@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Core permissions for the single local main window, listed explicitly instead of core:default. This narrows only Tauri's core APIs: commands registered with invoke_handler are callable from any window of this app, so the command boundary is the one main webview itself (bundled assets only, no remote URLs, no other windows, withGlobalTauri off).",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:allow-set-title",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

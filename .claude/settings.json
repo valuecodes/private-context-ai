@@ -11,7 +11,15 @@
       "Bash(pnpm secrets:scan:*)",
       "Bash(pnpm knip:*)",
       "Bash(pnpm --filter @repo/logger typecheck:*)",
-      "Bash(pnpm --filter @repo/logger test:*)"
+      "Bash(pnpm --filter @repo/logger test:*)",
+      "Bash(pnpm --filter desktop dev:*)",
+      "Bash(pnpm --filter desktop build:*)",
+      "Bash(pnpm --filter desktop typecheck:*)",
+      "Bash(pnpm --filter desktop test:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo check:*)"
     ],
     "deny": [
       "Bash(curl:*)",

@@ -1,0 +1,38 @@
+[package]
+name = "private-context-ai"
+version = "0.1.0"
+description = "Secure local AI sandbox: desktop chat against a local Ollama"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+# `_lib` suffix so the lib and the `private-context-ai` binary do not collide
+# on Windows (cargo issue 8519).
+name = "private_context_ai_lib"
+crate-type = ["rlib"]
+
+[build-dependencies]
+tauri-build = { version = "=2.7.3", features = [] }
+
+# Pinned exactly; `Cargo.lock` is committed and every cargo command runs with
+# `--locked`. Crates for later PRs (HTTP, storage, keychain) are added when
+# first used.
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+tauri = { version = "=2.12.4", features = [] }
+thiserror = "=2.0.21"
+tracing = "=0.1.44"
+tracing-appender = "=0.2.5"
+tracing-subscriber = { version = "=0.3.23", features = [
+  "env-filter",
+  "fmt",
+  "json",
+] }
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = true
+codegen-units = 1
