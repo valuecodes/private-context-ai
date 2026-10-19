@@ -25,12 +25,6 @@ allowBuilds:
   "@tailwindcss/oxide": true
   # Still used by Vite's dependency pre-bundling and Vitest's transforms.
   esbuild: true
-  # Wrangler's local runtime (playground deploy). Its binary ships in the
-  # optional @cloudflare/workerd-<platform> package, so the postinstall (a check
-  # plus a fallback download) isn't needed, and `wrangler deploy` of static
-  # assets never runs workerd. It has to be listed, even as false, or the
-  # install fails with ERR_PNPM_IGNORED_BUILDS.
-  workerd: false
 
 # 14 days, in minutes: a new release is not resolvable until it is this old.
 # So `pnpm up --latest` deliberately skips fresh releases; use

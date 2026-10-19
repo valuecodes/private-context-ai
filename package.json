@@ -1,6 +1,6 @@
 {
-  "name": "agentic-monorepo-starter",
-  "description": "Monorepo template for agent-assisted development",
+  "name": "private-context-ai",
+  "description": "Secure local AI sandbox (in development): desktop chat against a local Ollama with encrypted history",
   "private": true,
   "engines": {
     "node": "^24.21.0 || >=26.0.0",

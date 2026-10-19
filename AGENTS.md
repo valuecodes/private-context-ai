@@ -10,9 +10,7 @@ Guidelines for AI agents and contributors working in this Turborepo monorepo.
 
 ### Apps (`apps/`)
 
-| Name       | Filter       | Description                                                     |
-| ---------- | ------------ | --------------------------------------------------------------- |
-| playground | `playground` | Vite 8 + React 19 app for experiments, deployable to Cloudflare |
+None yet. `apps/desktop` (Tauri 2 desktop app) lands in the next PR.
 
 ### Packages (`packages/`)
 
@@ -39,7 +37,6 @@ and inside an app use the `~/` alias (`src/*`) to go up the tree.
 
 ```bash
 pnpm install                     # Install all dependencies
-pnpm --filter playground dev     # Vite dev server (port 3000)
 
 pnpm lint                        # oxlint, one process over the whole repo
 pnpm knip                        # unused files, exports and dependencies
@@ -57,7 +54,7 @@ repo. oxlint is configured by the root `.oxlintrc.json` (including `import/no-cy
 and prints nothing when there are no findings, so silent output means clean. Knip is
 configured by the root `knip.jsonc` and exits 0 when clean. Formatting is oxfmt
 (Prettier-compatible), configured by the root `.oxfmtrc.jsonc`, which also sorts
-imports and Tailwind classes.
+imports.
 
 There is no post-edit formatting hook: run `pnpm format` yourself before committing.
 

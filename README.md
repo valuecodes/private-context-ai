@@ -1,11 +1,12 @@
-# Agentic Monorepo Starter
+# Private Context AI
 
-A Turborepo template for agentic development: strict repo guardrails, consistent tooling,
-and clear package boundaries — so agents move fast without turning the codebase into spaghetti.
+A secure local AI sandbox, in development. The planned MVP is a Tauri 2 desktop app that
+chats with a user-installed Ollama server on loopback. History is encrypted at rest, the
+model gets no tools, and the app contacts nothing but Ollama. The desktop app lands in
+`apps/desktop` in a follow-up PR; today the repo holds the shared tooling it builds on.
 
 ## What's inside
 
-- Vite playground in `apps/playground` (Vite 8, React 19, Tailwind CSS 4)
 - Shared tooling: oxlint, oxfmt, Knip, TypeScript 7, Turbo
 - `@repo/logger` — structured JSON logging for Cloud Run / Cloud Logging
 - pnpm catalog for versions, with supply-chain guards: a 14-day release-age wait,
@@ -13,7 +14,6 @@ and clear package boundaries — so agents move fast without turning the codebas
 - Claude Code settings in `.claude/`
 
 ```text
-apps/playground        Vite 8 + React 19 sandbox
 packages/logger        pino logger, Cloud Logging shaped JSON
 tooling/typescript     shared tsconfig presets (base, node, react)
 tooling/github         composite action: pnpm + Node + install; secrets-scan script
@@ -27,7 +27,6 @@ Requires Node.js 24.21.0 (`.nvmrc`) and pnpm 12.6.0 (`packageManager` in `packag
 
 ```bash
 pnpm install
-pnpm dev          # playground at http://localhost:3000
 ```
 
 ## Commands
@@ -49,13 +48,8 @@ CI runs typecheck, lint, knip, format-check, test, build and a gitleaks secret s
 push to `main` and on PRs, plus CodeQL code scanning. `secrets:scan` needs either
 `gitleaks` v8.19+ on PATH or a running Docker daemon.
 
-## Use this template
+## Repository settings
 
-Use GitHub's **Use this template** button, then:
-
-- Optionally rename the `@repo/*` scope to your own (e.g. `@acme/*`)
-- Update `name` and `description` in `package.json`
-- Verify everything is green: `pnpm lint && pnpm knip && pnpm typecheck && pnpm test && pnpm build`
 - CodeQL (the `codeql` CI job) is free on public repos; private repos need GitHub Code
   Security. If "default setup" is enabled under Settings → Code security, turn it off —
   GitHub rejects the workflow's uploads while it is on.

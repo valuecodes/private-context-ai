@@ -16,16 +16,7 @@
       "unknown",
     ],
   },
-  "sortTailwindcss": {
-    "stylesheet": "./apps/playground/src/globals.css",
-  },
   // Only the root .gitignore is consulted, so per-workspace ignores are
   // repeated here.
-  "ignorePatterns": [
-    "pnpm-lock.yaml",
-    "**/dist/",
-    "**/.turbo/",
-    "**/.cache/",
-    "**/.wrangler/",
-  ],
+  "ignorePatterns": ["pnpm-lock.yaml", "**/dist/", "**/.turbo/", "**/.cache/"],
 }
