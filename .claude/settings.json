@@ -10,11 +10,6 @@
       "Bash(pnpm test:*)",
       "Bash(pnpm secrets:scan:*)",
       "Bash(pnpm knip:*)",
-      "Bash(pnpm --filter playground dev:*)",
-      "Bash(pnpm --filter playground build:*)",
-      "Bash(pnpm --filter playground preview:*)",
-      "Bash(pnpm --filter playground typecheck:*)",
-      "Bash(pnpm --filter playground test:*)",
       "Bash(pnpm --filter @repo/logger typecheck:*)",
       "Bash(pnpm --filter @repo/logger test:*)"
     ],
