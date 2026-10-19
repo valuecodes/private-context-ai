@@ -10,7 +10,13 @@ Guidelines for AI agents and contributors working in this Turborepo monorepo.
 
 ### Apps (`apps/`)
 
-None yet. `apps/desktop` (Tauri 2 desktop app) lands in the next PR.
+| Name    | Filter    | Description                                                     |
+| ------- | --------- | --------------------------------------------------------------- |
+| desktop | `desktop` | Tauri 2 desktop app: React 19 + Vite 8 + Tailwind 4, Rust shell |
+
+`apps/desktop/src/lib/ipc.ts` is the only module that imports `@tauri-apps/api`;
+everything else calls its typed wrappers, so `vi.mock("~/lib/ipc")` is the one test
+seam. The Rust side lives in `apps/desktop/src-tauri`.
 
 ### Packages (`packages/`)
 
@@ -37,6 +43,11 @@ and inside an app use the `~/` alias (`src/*`) to go up the tree.
 
 ```bash
 pnpm install                     # Install all dependencies
+pnpm --filter desktop dev        # Tauri dev window (Vite on port 1420)
+pnpm --filter desktop build:app  # Rust release build + installers
+pnpm --filter desktop rust:fmt   # cargo fmt --check
+pnpm --filter desktop rust:check # cargo clippy --all-targets --locked -D warnings
+pnpm --filter desktop rust:test  # cargo test --locked
 
 pnpm lint                        # oxlint, one process over the whole repo
 pnpm knip                        # unused files, exports and dependencies
@@ -54,7 +65,7 @@ repo. oxlint is configured by the root `.oxlintrc.json` (including `import/no-cy
 and prints nothing when there are no findings, so silent output means clean. Knip is
 configured by the root `knip.jsonc` and exits 0 when clean. Formatting is oxfmt
 (Prettier-compatible), configured by the root `.oxfmtrc.jsonc`, which also sorts
-imports.
+imports and Tailwind classes.
 
 There is no post-edit formatting hook: run `pnpm format` yourself before committing.
 
@@ -65,6 +76,22 @@ It exits 0 when clean and 1 when it finds a leak.
 CI (`.github/workflows/`) runs typecheck, lint, knip, format-check, test, build,
 secrets-scan and CodeQL code scanning (`javascript-typescript` and `actions`) on push
 to `main` and on PRs.
+
+### Rust (`apps/desktop/src-tauri`)
+
+`pnpm build` is frontend only (`vite build`); it never compiles Rust, and CI does not
+build or check Rust at all. Crates are pinned exactly (`=x.y.z`) and `Cargo.lock` is
+committed. Before a PR that touches the desktop app merges, run on a Windows checkout:
+the three `rust:*` scripts above, `pnpm --filter desktop dev` (window opens, no CSP
+violations in the dev console), and `pnpm --filter desktop build:app`.
+
+Prerequisites: rustup (the toolchain is pinned by `rust-toolchain.toml`). Windows: MSVC
+Build Tools, WebView2, and the VBSCRIPT optional feature for the MSI installer. Linux:
+webkit2gtk 4.1, and later `perl`, `make` and a C compiler for SQLCipher.
+
+WSL2 lacks the webkit2gtk libraries and an OS keychain, so `tauri dev`, clippy and the
+tests do not run there. From WSL2 only `rust:fmt` works; say so in the PR description
+and run the rest from a Windows checkout.
 
 ---
 

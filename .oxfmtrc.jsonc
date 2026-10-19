@@ -16,7 +16,18 @@
       "unknown",
     ],
   },
+  "sortTailwindcss": {
+    "stylesheet": "./apps/desktop/src/globals.css",
+  },
   // Only the root .gitignore is consulted, so per-workspace ignores are
-  // repeated here.
-  "ignorePatterns": ["pnpm-lock.yaml", "**/dist/", "**/.turbo/", "**/.cache/"],
+  // repeated here. `src-tauri/target` is Cargo output and `src-tauri/gen` is
+  // written by the Tauri build.
+  "ignorePatterns": [
+    "pnpm-lock.yaml",
+    "**/dist/",
+    "**/.turbo/",
+    "**/.cache/",
+    "**/src-tauri/target/",
+    "**/src-tauri/gen/",
+  ],
 }
