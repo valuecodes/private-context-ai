@@ -1,0 +1,31 @@
+{
+  "name": "agentic-monorepo-starter",
+  "description": "Monorepo template for agent-assisted development",
+  "private": true,
+  "engines": {
+    "node": "^24.21.0 || >=26.0.0",
+    "pnpm": ">=12.0.0"
+  },
+  "packageManager": "pnpm@12.6.0+sha512.3ef68f951cb111ac204b4a5a16f0b2ddf0da56a96e0413e81d855d9f0b55ef926714709028e1cd00c405c2c5fb7b9e8ec4dc46777c805d0373c2f2ff00fd20ec",
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "lint": "oxlint --type-aware --report-unused-disable-directives",
+    "test": "turbo run test",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "knip": "knip",
+    "secrets:scan": "sh tooling/github/scripts/secrets-scan.sh",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "knip": "6.38.0",
+    "oxfmt": "0.71.0",
+    "oxlint": "1.85.0",
+    "oxlint-tsgolint": "7.0.2003",
+    "turbo": "2.11.4",
+    "typescript": "catalog:"
+  }
+}

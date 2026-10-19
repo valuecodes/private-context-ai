@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(pnpm lint:*)",
+      "Bash(pnpm typecheck:*)",
+      "Bash(pnpm build:*)",
+      "Bash(pnpm format:*)",
+      "Bash(pnpm format:check:*)",
+      "Bash(pnpm test:*)",
+      "Bash(pnpm secrets:scan:*)",
+      "Bash(pnpm knip:*)",
+      "Bash(pnpm --filter playground dev:*)",
+      "Bash(pnpm --filter playground build:*)",
+      "Bash(pnpm --filter playground preview:*)",
+      "Bash(pnpm --filter playground typecheck:*)",
+      "Bash(pnpm --filter playground test:*)",
+      "Bash(pnpm --filter @repo/logger typecheck:*)",
+      "Bash(pnpm --filter @repo/logger test:*)"
+    ],
+    "deny": [
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(nc:*)",
+      "Bash(ssh:*)",
+      "Read(**/.env*)",
+      "Read(**/secrets/**)"
+    ],
+    "ask": [
+      "Bash(pnpm install:*)",
+      "Bash(pnpm add:*)",
+      "Bash(pnpm remove:*)",
+      "Bash(git commit:*)"
+    ],
+    "defaultMode": "default"
+  }
+}

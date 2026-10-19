@@ -1,0 +1,8 @@
+{
+  "recommendations": [
+    "Anthropic.claude-code",
+    "oxc.oxc-vscode",
+    "bradlc.vscode-tailwindcss",
+    "GitHub.vscode-pull-request-github"
+  ]
+}

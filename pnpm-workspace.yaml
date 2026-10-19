@@ -1,0 +1,45 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+  - "tooling/*"
+
+# Versions used by more than one package, referenced as `catalog:`. Bump with
+# `pnpm up --latest -r <pkg>`, which rewrites only this file.
+#
+# Not here: `@repo/*` deps (stay `workspace:*`) and single-consumer deps (pinned
+# inline in that manifest). Scoped keys must be double-quoted.
+catalog:
+  # `typescript` is the native (Go) compiler; its binary is still `tsc`.
+  "@types/node": 24.13.6
+  typescript: 7.0.2
+  vitest: 5.0.1
+
+# Makes `pnpm add` / `pnpm update` use the catalog and reject conflicting
+# versions. Plain `pnpm install` never evaluates it, so it is an authoring
+# guardrail, not a CI check.
+catalogMode: strict
+
+allowBuilds:
+  # Installs Tailwind 4's native binary. Without it Tailwind silently emits no
+  # styles, and `pnpm build` still passes.
+  "@tailwindcss/oxide": true
+  # Still used by Vite's dependency pre-bundling and Vitest's transforms.
+  esbuild: true
+  # Wrangler's local runtime (playground deploy). Its binary ships in the
+  # optional @cloudflare/workerd-<platform> package, so the postinstall (a check
+  # plus a fallback download) isn't needed, and `wrangler deploy` of static
+  # assets never runs workerd. It has to be listed, even as false, or the
+  # install fails with ERR_PNPM_IGNORED_BUILDS.
+  workerd: false
+
+# 14 days, in minutes: a new release is not resolvable until it is this old.
+# So `pnpm up --latest` deliberately skips fresh releases; use
+# `minimumReleaseAgeExclude` if one package must move faster.
+minimumReleaseAge: 20160
+
+# Fails when a version has weaker trust evidence (provenance, trusted
+# publishing) than an earlier one, the usual sign of a hijacked account.
+# Also re-checked on `--frozen-lockfile` installs. If a downgrade is
+# legitimate, exclude that exact version in `trustPolicyExclude` with a reason,
+# never a bare package name.
+trustPolicy: no-downgrade

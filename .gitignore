@@ -1,0 +1,37 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Turbo / Wrangler
+.turbo
+.cache
+.wrangler
+
+# Local git worktrees
+.worktrees/
+
+# Build Outputs
+.next
+dist
+dist-ssr
+build
+out
+
+# Logs
+logs
+*.log
+
+# Environment files
+.env
+.env.*
+!.env.example
+*.local
+
+# Editors
+.idea
+*.suo
+*.sw?
+
+# Misc
+.DS_Store
