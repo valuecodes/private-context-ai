@@ -31,6 +31,8 @@ pub fn init(log_dir: &Path) -> Result<WorkerGuard, AppError> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .json()
+        // A file, not a terminal: no colour escape codes in the JSON lines.
+        .with_ansi(false)
         .with_env_filter(filter)
         .with_writer(writer)
         .try_init()
