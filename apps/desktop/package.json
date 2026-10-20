@@ -10,9 +10,9 @@
     "build:app": "tauri build",
     "typecheck": "tsc",
     "test": "vitest run",
-    "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
-    "rust:check": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked -- -D warnings",
-    "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
+    "rust:fmt": "cd src-tauri && cargo fmt --check",
+    "rust:check": "cd src-tauri && cargo clippy --all-targets --locked -- -D warnings",
+    "rust:test": "cd src-tauri && cargo test --locked",
     "clean": "rm -rf .turbo node_modules .cache dist"
   },
   "dependencies": {
