@@ -90,6 +90,8 @@ const ChatView = ({
   }, [reachable, modelsAttempt, setModel]);
 
   const modelList = models.phase === "ready" ? models.models : [];
+  // An opened conversation may name a model that is no longer installed.
+  const selected = pickModel(modelList, model);
   const streaming = state.phase === "streaming";
 
   return (
@@ -100,7 +102,7 @@ const ChatView = ({
         </label>
         <select
           id="model"
-          value={model}
+          value={selected}
           onChange={(event) => {
             setModel(event.target.value);
           }}
@@ -150,8 +152,8 @@ const ChatView = ({
       )}
       <Composer
         streaming={streaming}
-        canSend={model !== ""}
-        onSend={(text) => send(model, text)}
+        canSend={selected !== "" && !state.loading}
+        onSend={(text) => send(selected, text)}
         onStop={stop}
       />
     </div>
