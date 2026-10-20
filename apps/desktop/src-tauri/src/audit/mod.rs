@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::sync::{Mutex, PoisonError};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -14,9 +15,26 @@ use serde::Serialize;
 pub struct AuditEvent {
     /// Unix time in milliseconds.
     pub at_ms: u64,
+    /// What was done, e.g. `ollama.chat`, `ollama.tags`, `ollama.version`.
     pub action: String,
+    /// Where it went, as `host:port`.
     pub target: String,
+    /// `ok`, `cancelled` or `error:<AppError kind>`.
     pub outcome: String,
+    pub duration_ms: u64,
+    /// Absent when no response status was received.
+    pub http_status: Option<u16>,
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+}
+
+/// Current Unix time in milliseconds; 0 if the clock is before 1970.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 pub trait AuditSink: Send + Sync {
@@ -76,6 +94,10 @@ mod tests {
             action: "test".into(),
             target: format!("target-{n}"),
             outcome: "ok".into(),
+            duration_ms: 0,
+            http_status: None,
+            prompt_tokens: None,
+            completion_tokens: None,
         }
     }
 

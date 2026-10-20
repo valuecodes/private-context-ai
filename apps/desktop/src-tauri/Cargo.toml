@@ -16,13 +16,23 @@ crate-type = ["rlib"]
 tauri-build = { version = "=2.7.3", features = [] }
 
 # Pinned exactly; `Cargo.lock` is committed and every cargo command runs with
-# `--locked`. Crates for later PRs (HTTP, storage, keychain) are added when
-# first used.
+# `--locked`. Crates for later PRs (storage, keychain) are added when first
+# used.
 [dependencies]
+# No TLS feature and no system proxy: the binary cannot speak HTTPS and only
+# ever talks to Ollama on loopback.
+reqwest = { version = "=0.13.5", default-features = false, features = ["json"] }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 tauri = { version = "=2.12.4", features = [] }
 thiserror = "=2.0.21"
+tokio = { version = "=1.53.3", features = [
+  "macros",
+  "rt-multi-thread",
+  "sync",
+  "time",
+] }
+tokio-util = "=0.7.20"
 tracing = "=0.1.44"
 tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = [
@@ -30,6 +40,12 @@ tracing-subscriber = { version = "=0.3.23", features = [
   "fmt",
   "json",
 ] }
+url = "=2.5.8"
+uuid = { version = "=1.28.0", features = ["serde", "v4"] }
+
+[dev-dependencies]
+# `net` + `io-util` for the hand-rolled fake Ollama server in the tests.
+tokio = { version = "=1.53.3", features = ["io-util", "net"] }
 
 [profile.release]
 panic = "abort"

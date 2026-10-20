@@ -4,8 +4,11 @@
 //! error variants) do not trip `dead_code` under `clippy -D warnings`.
 
 pub mod audit;
+pub mod commands;
 pub mod error;
 pub mod observability;
+pub mod ollama;
+pub mod redacted;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -14,6 +17,8 @@ use tauri::{Manager, RunEvent};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::audit::{AuditSink, MemorySink};
+use crate::ollama::Ollama;
+use crate::ollama::client::default_base_url;
 
 /// What the `app_info` command returns; mirrored by `AppInfo` in
 /// `src/lib/types.ts`.
@@ -42,12 +47,26 @@ pub fn run() {
             app.manage(LogGuard(Mutex::new(Some(guard))));
 
             let sink: Arc<dyn AuditSink> = Arc::new(MemorySink::new());
-            app.manage(sink);
+            app.manage(Arc::clone(&sink));
+
+            // A rejected base URL does not stop the app: every Ollama command
+            // reports it, and the status line shows it.
+            let base_url = default_base_url();
+            if let Err(err) = &base_url {
+                tracing::warn!(error = %err, "Ollama base URL rejected");
+            }
+            app.manage(Arc::new(Ollama::new(base_url, sink)));
 
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "app started");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![app_info])
+        .invoke_handler(tauri::generate_handler![
+            app_info,
+            commands::ollama::ollama_status,
+            commands::ollama::ollama_list_models,
+            commands::ollama::chat_send,
+            commands::ollama::chat_cancel,
+        ])
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri application");
 

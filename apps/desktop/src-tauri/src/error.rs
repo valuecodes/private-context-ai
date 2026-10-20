@@ -5,13 +5,48 @@ use serde::Serialize;
 /// Serialized as an adjacently tagged enum, `{ "kind": "io", "message": "…" }`,
 /// so the frontend can switch on `kind`. Messages never carry prompt or
 /// response text.
-#[derive(Debug, thiserror::Error, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error, Serialize)]
 #[serde(tag = "kind", content = "message", rename_all = "camelCase")]
 pub enum AppError {
     #[error("I/O error: {0}")]
     Io(String),
     #[error("internal error: {0}")]
     Internal(String),
+    /// The configured Ollama URL is not plain `http` on loopback. Raised
+    /// before any socket is opened.
+    #[error("Ollama URL rejected: {0}")]
+    InvalidBaseUrl(String),
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    /// The conversation already has a request running, or too many are.
+    #[error("busy: {0}")]
+    Busy(String),
+    #[error("too large: {0}")]
+    TooLarge(String),
+    #[error("timed out: {0}")]
+    Timeout(String),
+    #[error("Ollama unreachable: {0}")]
+    Unreachable(String),
+    /// Ollama answered with an error status or an error line.
+    #[error("Ollama error: {0}")]
+    Ollama(String),
+}
+
+impl AppError {
+    /// The serialized `kind`, for audit outcomes and log fields.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Io(_) => "io",
+            Self::Internal(_) => "internal",
+            Self::InvalidBaseUrl(_) => "invalidBaseUrl",
+            Self::InvalidInput(_) => "invalidInput",
+            Self::Busy(_) => "busy",
+            Self::TooLarge(_) => "tooLarge",
+            Self::Timeout(_) => "timeout",
+            Self::Unreachable(_) => "unreachable",
+            Self::Ollama(_) => "ollama",
+        }
+    }
 }
 
 impl From<std::io::Error> for AppError {
@@ -37,5 +72,15 @@ mod tests {
             io,
             serde_json::json!({ "kind": "io", "message": "disk full" })
         );
+
+        let busy = serde_json::to_value(AppError::Busy("one at a time".into())).unwrap();
+        assert_eq!(
+            busy,
+            serde_json::json!({ "kind": "busy", "message": "one at a time" })
+        );
+
+        let base = AppError::InvalidBaseUrl("host must be loopback".into());
+        assert_eq!(serde_json::to_value(&base).unwrap()["kind"], base.kind());
+        assert_eq!(base.kind(), "invalidBaseUrl");
     }
 }
