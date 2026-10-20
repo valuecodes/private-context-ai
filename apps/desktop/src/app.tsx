@@ -53,8 +53,8 @@ const Workspace = () => {
 
   const remove = (id: string) => {
     void conversations.remove(id).then((deleted) => {
-      if (deleted && id === chat.state.conversationId) {
-        chat.open(null);
+      if (deleted) {
+        chat.forget(id);
       }
     });
   };

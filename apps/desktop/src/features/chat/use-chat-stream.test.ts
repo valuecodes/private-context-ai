@@ -184,16 +184,43 @@ describe("opening conversations", () => {
   it("clears the view and loads the saved messages", () => {
     let state = chatReducer(sent(), { type: "cancel" });
     state = chatReducer(state, { type: "open", conversationId: "c2" });
-    expect(state).toEqual(createChatState("c2"));
+    expect(state).toEqual({ ...createChatState("c2"), loading: true });
 
     state = chatReducer(state, {
       type: "loaded",
       conversationId: "c2",
       messages: fromStored([stored("u", "user", "complete")]),
     });
+    expect(state.loading).toBe(false);
     expect(state.messages).toEqual([
       { id: "u", role: "user", content: "u", status: "complete" },
     ]);
+  });
+
+  it("refuses a send until the saved messages have loaded", () => {
+    const loading = chatReducer(createChatState(), {
+      type: "open",
+      conversationId: "c2",
+    });
+    expect(
+      chatReducer(loading, { type: "send", streamId: "s1", text: "Hi" })
+    ).toBe(loading);
+
+    expect(
+      chatReducer(createChatState(), { type: "open", conversationId: null })
+        .loading
+    ).toBe(false);
+  });
+
+  it("clears the view only if the deleted conversation is still open", () => {
+    const open = chatReducer(createChatState("a"), {
+      type: "deleted",
+      conversationId: "b",
+    });
+    expect(open.conversationId).toBe("a");
+    expect(chatReducer(open, { type: "deleted", conversationId: "a" })).toEqual(
+      createChatState()
+    );
   });
 
   it("ignores a load for a conversation that is no longer open", () => {
@@ -219,12 +246,17 @@ describe("opening conversations", () => {
 
   it("shows a failed load as the error", () => {
     const error = { kind: "database", message: "locked" } as const;
-    const state = chatReducer(createChatState("a"), {
+    const loading = chatReducer(createChatState(), {
+      type: "open",
+      conversationId: "a",
+    });
+    const state = chatReducer(loading, {
       type: "loadFailed",
       conversationId: "a",
       error,
     });
     expect(state.error).toEqual(error);
+    expect(state.loading).toBe(false);
   });
 
   it("does not switch away from a streaming reply", () => {

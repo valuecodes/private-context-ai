@@ -51,10 +51,14 @@ const conversationsReducer = (
   action: ConversationsAction
 ): ConversationsState => {
   if (action.type === "loaded") {
+    // Keep chats created while the list was loading; the query may predate them.
+    const created = state.conversations.filter(
+      (local) => !action.conversations.some(({ id }) => id === local.id)
+    );
     return {
       ...state,
       phase: "ready",
-      conversations: action.conversations,
+      conversations: [...created, ...action.conversations],
       error: null,
     };
   }

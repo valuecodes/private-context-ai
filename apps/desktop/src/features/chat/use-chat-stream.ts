@@ -30,6 +30,8 @@ type ChatNotice = "busy" | "length";
 type ChatState = {
   /** The open conversation; `null` for a new chat the first send saves. */
   conversationId: string | null;
+  /** The saved messages are still loading; sending waits for them. */
+  loading: boolean;
   messages: UiMessage[];
   phase: "idle" | "streaming";
   /** Local id of the current send; events for any other id are stale. */
@@ -48,10 +50,12 @@ type ChatAction =
   | { type: "started"; streamId: string; requestId: RequestId }
   | { type: "event"; streamId: string; event: ChatEvent }
   | { type: "cancel" }
-  | { type: "failed"; streamId: string; error: AppError };
+  | { type: "failed"; streamId: string; error: AppError }
+  | { type: "deleted"; conversationId: string };
 
 const createChatState = (conversationId: string | null = null): ChatState => ({
   conversationId,
+  loading: false,
   messages: [],
   phase: "idle",
   streamId: null,
@@ -159,6 +163,10 @@ const startSend = (
   if (state.phase === "streaming") {
     return { ...state, notice: "busy" };
   }
+  // The load would replace the new bubbles when it lands.
+  if (state.loading) {
+    return state;
+  }
   return {
     ...state,
     messages: [
@@ -207,18 +215,29 @@ const failSend = (
 const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   if (action.type === "open") {
     // Switching away would orphan the live reply's bubbles.
-    return state.phase === "streaming"
-      ? state
-      : createChatState(action.conversationId);
+    if (state.phase === "streaming") {
+      return state;
+    }
+    return {
+      ...createChatState(action.conversationId),
+      loading: action.conversationId !== null,
+    };
   }
   if (action.type === "loaded" || action.type === "loadFailed") {
     // A slower load for a conversation that is no longer open is stale.
-    if (action.conversationId !== state.conversationId) {
+    if (action.conversationId !== state.conversationId || !state.loading) {
       return state;
     }
     return action.type === "loaded"
-      ? { ...state, messages: action.messages }
-      : { ...state, error: action.error };
+      ? { ...state, loading: false, messages: action.messages }
+      : { ...state, loading: false, error: action.error };
+  }
+  if (action.type === "deleted") {
+    // Checked when the delete lands: another conversation may be open by now.
+    return action.conversationId === state.conversationId &&
+      state.phase === "idle"
+      ? createChatState()
+      : state;
   }
   if (action.type === "send") {
     return startSend(state, action.streamId, action.text);
@@ -290,11 +309,19 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     );
   };
 
-  /** Returns `false` when the send was refused because a reply streams. */
+  /** Clears the view if the deleted conversation is still the open one. */
+  const forget = (conversationId: string) => {
+    dispatch({ type: "deleted", conversationId });
+  };
+
+  /**
+   * Returns `false` when the send was refused because a reply streams or the
+   * conversation is still loading.
+   */
   const send = (model: string, text: string): boolean => {
     const streamId = newStreamId();
     dispatch({ type: "send", streamId, text });
-    if (state.phase === "streaming") {
+    if (state.phase === "streaming" || state.loading) {
       return false;
     }
     const onEvent = (event: ChatEvent) => {
@@ -348,7 +375,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     dispatch({ type: "cancel" });
   };
 
-  return { state, open, send, stop };
+  return { state, open, forget, send, stop };
 };
 
 export type { ChatState, UiMessage };

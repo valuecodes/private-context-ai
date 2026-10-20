@@ -39,6 +39,25 @@ describe("conversationsReducer", () => {
     expect(ids(state)).toEqual(["a", "b"]);
   });
 
+  it("keeps a chat created while the list was loading", () => {
+    let state = conversationsReducer(initialConversations, {
+      type: "created",
+      conversation: conversation("new"),
+    });
+    state = conversationsReducer(state, {
+      type: "loaded",
+      conversations: [conversation("old")],
+    });
+    expect(ids(state)).toEqual(["new", "old"]);
+    expect(state.selectedId).toBe("new");
+
+    const again = conversationsReducer(state, {
+      type: "loaded",
+      conversations: [conversation("new"), conversation("old")],
+    });
+    expect(ids(again)).toEqual(["new", "old"]);
+  });
+
   it("puts a created conversation first and selects it", () => {
     const state = conversationsReducer(loaded("a"), {
       type: "created",
