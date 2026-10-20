@@ -245,12 +245,16 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   if (action.type === "cancel") {
     return finishStream(state, "cancelled");
   }
+  if (action.type === "created") {
+    // Adopted even after an early Stop: the turn is saved there, and the
+    // sidebar selects it. A view that moved on has an id of its own.
+    return state.conversationId === null
+      ? { ...state, conversationId: action.conversationId }
+      : state;
+  }
   // The rest belong to one send; results of an earlier send are stale.
   if (action.streamId !== state.streamId) {
     return state;
-  }
-  if (action.type === "created") {
-    return { ...state, conversationId: action.conversationId };
   }
   if (action.type === "started") {
     return { ...state, requestId: action.requestId };
@@ -266,8 +270,8 @@ const newStreamId = (): string => crypto.randomUUID();
 type ChatCallbacks = {
   /** The first send of a new chat saved it as this conversation. */
   onCreated: (conversation: Conversation) => void;
-  /** Rust admitted a send, so the conversation was just used. */
-  onStarted: (conversationId: string) => void;
+  /** Rust admitted a send, so the conversation was just used with `model`. */
+  onStarted: (conversationId: string, model: string) => void;
 };
 
 const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
@@ -341,7 +345,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
       .then((id) =>
         chatSend({ conversationId: id, model, prompt: text }, onEvent).then(
           (request) => {
-            onStarted(id);
+            onStarted(id, model);
             return request;
           }
         )

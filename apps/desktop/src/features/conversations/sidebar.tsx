@@ -86,7 +86,9 @@ const SidebarItem = ({
           <button
             type="button"
             onClick={onDelete}
-            className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700"
+            // A reply may have started since the confirm opened.
+            disabled={disabled}
+            className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-40"
           >
             Delete
           </button>

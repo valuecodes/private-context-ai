@@ -23,7 +23,7 @@ type ConversationsAction =
   | { type: "created"; conversation: Conversation }
   | { type: "renamed"; conversation: Conversation }
   | { type: "deleted"; id: string }
-  | { type: "touched"; id: string }
+  | { type: "touched"; id: string; model: string }
   | { type: "failed"; error: AppError };
 
 const initialConversations: ConversationsState = {
@@ -95,10 +95,13 @@ const conversationsReducer = (
     };
   }
   if (action.type === "touched") {
-    return {
-      ...state,
-      conversations: moveToTop(state.conversations, action.id),
-    };
+    // Rust saved the model with the send; keep the cached copy in step.
+    const updated = state.conversations.map((conversation) =>
+      conversation.id === action.id
+        ? { ...conversation, model: action.model }
+        : conversation
+    );
+    return { ...state, conversations: moveToTop(updated, action.id) };
   }
   return { ...state, phase: "ready", error: action.error };
 };
@@ -137,8 +140,8 @@ const useConversations = () => {
     dispatch({ type: "created", conversation });
   };
 
-  const touched = (id: string) => {
-    dispatch({ type: "touched", id });
+  const touched = (id: string, model: string) => {
+    dispatch({ type: "touched", id, model });
   };
 
   /** Resolves `false` when Rust refused the title. */
