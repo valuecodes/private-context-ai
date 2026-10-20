@@ -896,7 +896,13 @@ mod tests {
         assert!(!status.reachable);
         assert_eq!(status.version, None);
         assert_eq!(status.base_url, format!("http://{addr}"));
-        assert_eq!(audit.recent(1)[0].outcome, "error:unreachable");
+        // Windows takes about 2 s to refuse a loopback connect, so on a busy
+        // machine the 3 s request timeout can win; both mean "not running".
+        let outcome = &audit.recent(1)[0].outcome;
+        assert!(
+            outcome == "error:unreachable" || outcome == "error:timeout",
+            "{outcome}"
+        );
     }
 
     #[tokio::test]
