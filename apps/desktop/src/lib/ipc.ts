@@ -5,13 +5,18 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import type {
   AppInfo,
   ChatEvent,
-  ChatMessage,
+  Conversation,
+  ConversationWithMessages,
   ModelInfo,
   OllamaStatus,
   RequestId,
+  StorageStatus,
 } from "~/lib/types";
 
 const appInfo = (): Promise<AppInfo> => invoke<AppInfo>("app_info");
+
+const storageStatus = (): Promise<StorageStatus> =>
+  invoke<StorageStatus>("storage_status");
 
 const ollamaStatus = (): Promise<OllamaStatus> =>
   invoke<OllamaStatus>("ollama_status");
@@ -19,25 +24,44 @@ const ollamaStatus = (): Promise<OllamaStatus> =>
 const ollamaListModels = (): Promise<ModelInfo[]> =>
   invoke<ModelInfo[]>("ollama_list_models");
 
+const conversationCreate = (
+  title: string | null,
+  model: string
+): Promise<Conversation> =>
+  invoke<Conversation>("conversation_create", { title, model });
+
+const conversationList = (): Promise<Conversation[]> =>
+  invoke<Conversation[]>("conversation_list");
+
+const conversationGet = (id: string): Promise<ConversationWithMessages> =>
+  invoke<ConversationWithMessages>("conversation_get", { id });
+
+const conversationRename = (id: string, title: string): Promise<Conversation> =>
+  invoke<Conversation>("conversation_rename", { id, title });
+
+const conversationDelete = (id: string): Promise<void> =>
+  invoke<undefined>("conversation_delete", { id });
+
 type ChatSendArgs = {
   conversationId: string;
   model: string;
-  messages: ChatMessage[];
+  prompt: string;
 };
 
 /**
- * Starts a streamed reply. Resolves with the request id as soon as Rust has
- * admitted the request; events may arrive before it resolves.
+ * Saves the prompt and starts a streamed reply. Resolves with the request id
+ * as soon as Rust has admitted the request; events may arrive before it
+ * resolves. Rust builds the history from the saved conversation.
  */
 const chatSend = (
-  { conversationId, model, messages }: ChatSendArgs,
+  { conversationId, model, prompt }: ChatSendArgs,
   onEvent: (event: ChatEvent) => void
 ): Promise<RequestId> => {
   const channel = new Channel<ChatEvent>(onEvent);
   return invoke<RequestId>("chat_send", {
     conversationId,
     model,
-    messages,
+    prompt,
     onEvent: channel,
   });
 };
@@ -45,4 +69,16 @@ const chatSend = (
 const chatCancel = (requestId: RequestId): Promise<void> =>
   invoke<undefined>("chat_cancel", { requestId });
 
-export { appInfo, chatCancel, chatSend, ollamaListModels, ollamaStatus };
+export {
+  appInfo,
+  chatCancel,
+  chatSend,
+  conversationCreate,
+  conversationDelete,
+  conversationGet,
+  conversationList,
+  conversationRename,
+  ollamaListModels,
+  ollamaStatus,
+  storageStatus,
+};

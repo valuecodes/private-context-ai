@@ -30,6 +30,16 @@ pub enum AppError {
     /// Ollama answered with an error status or an error line.
     #[error("Ollama error: {0}")]
     Ollama(String),
+    /// The key from the keychain does not open the database.
+    #[error("wrong database key: {0}")]
+    WrongKey(String),
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// Secure storage did not open at startup; `storage_status` says why.
+    #[error("secure storage unavailable: {0}")]
+    StorageUnavailable(String),
+    #[error("database error: {0}")]
+    Database(String),
 }
 
 impl AppError {
@@ -45,6 +55,10 @@ impl AppError {
             Self::Timeout(_) => "timeout",
             Self::Unreachable(_) => "unreachable",
             Self::Ollama(_) => "ollama",
+            Self::WrongKey(_) => "wrongKey",
+            Self::NotFound(_) => "notFound",
+            Self::StorageUnavailable(_) => "storageUnavailable",
+            Self::Database(_) => "database",
         }
     }
 }
@@ -52,6 +66,13 @@ impl AppError {
 impl From<std::io::Error> for AppError {
     fn from(err: std::io::Error) -> Self {
         Self::Io(err.to_string())
+    }
+}
+
+/// SQLite's messages name tables, columns and constraints, never row values.
+impl From<rusqlite::Error> for AppError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Database(err.to_string())
     }
 }
 
@@ -82,5 +103,24 @@ mod tests {
         let base = AppError::InvalidBaseUrl("host must be loopback".into());
         assert_eq!(serde_json::to_value(&base).unwrap()["kind"], base.kind());
         assert_eq!(base.kind(), "invalidBaseUrl");
+    }
+
+    #[test]
+    fn storage_errors_carry_kind_and_message() {
+        for (error, kind) in [
+            (AppError::WrongKey("x".into()), "wrongKey"),
+            (AppError::NotFound("x".into()), "notFound"),
+            (
+                AppError::StorageUnavailable("x".into()),
+                "storageUnavailable",
+            ),
+            (AppError::Database("x".into()), "database"),
+        ] {
+            assert_eq!(error.kind(), kind);
+            assert_eq!(
+                serde_json::to_value(&error).unwrap(),
+                serde_json::json!({ "kind": kind, "message": "x" })
+            );
+        }
     }
 }

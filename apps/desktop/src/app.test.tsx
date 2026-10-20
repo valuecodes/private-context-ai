@@ -1,16 +1,26 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import { App } from "./app";
+import { App, Workspace } from "./app";
 
 vi.mock("~/lib/ipc");
 
 describe("App", () => {
-  const html = renderToString(<App />);
+  it("waits for secure storage before showing any chat UI", () => {
+    const html = renderToString(<App />);
+    expect(html).toContain("Opening secure storage…");
+    expect(html).not.toContain("<aside");
+    expect(html).not.toContain("composer");
+  });
+});
 
-  it("renders the conversation sidebar placeholder", () => {
+describe("Workspace", () => {
+  const html = renderToString(<Workspace />);
+
+  it("renders the conversation sidebar while it loads", () => {
     expect(html).toContain("<aside");
-    expect(html).toContain("No conversations yet");
+    expect(html).toMatch(/<button[^>]*>New chat<\/button>/);
+    expect(html).toContain("Loading…");
   });
 
   it("renders the empty chat area", () => {

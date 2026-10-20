@@ -1,18 +1,35 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ChatEvent } from "~/lib/types";
+import type { ChatEvent, StoredMessage } from "~/lib/types";
 
 import type { ChatState } from "./use-chat-stream";
 import {
   chatReducer,
   createChatState,
-  historyForRequest,
+  fromStored,
+  titleFromPrompt,
 } from "./use-chat-stream";
 
 vi.mock("~/lib/ipc");
 
 const sent = (text = "Hi", streamId = "s1"): ChatState =>
   chatReducer(createChatState("c1"), { type: "send", streamId, text });
+
+const stored = (
+  id: string,
+  role: StoredMessage["role"],
+  status: StoredMessage["status"],
+  content = id
+): StoredMessage => ({
+  id,
+  role,
+  content,
+  status,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  promptTokens: null,
+  completionTokens: null,
+  durationMs: null,
+});
 
 const event = (
   state: ChatState,
@@ -163,51 +180,119 @@ describe("chatReducer", () => {
   });
 });
 
-describe("historyForRequest", () => {
-  it("keeps complete turns and the visible part of a stopped reply", () => {
-    let state = event(
-      event(sent("One"), { type: "token", content: "Reply" }),
-      done()
-    );
-    state = chatReducer(state, { type: "send", streamId: "s2", text: "Two" });
-    state = event(state, { type: "token", content: "Half" }, "s2");
-    state = chatReducer(state, { type: "cancel" });
+describe("opening conversations", () => {
+  it("clears the view and loads the saved messages", () => {
+    let state = chatReducer(sent(), { type: "cancel" });
+    state = chatReducer(state, { type: "open", conversationId: "c2" });
+    expect(state).toEqual(createChatState("c2"));
 
-    expect(historyForRequest(state.messages)).toEqual([
-      { role: "user", content: "One" },
-      { role: "assistant", content: "Reply" },
-      { role: "user", content: "Two" },
-      { role: "assistant", content: "Half" },
+    state = chatReducer(state, {
+      type: "loaded",
+      conversationId: "c2",
+      messages: fromStored([stored("u", "user", "complete")]),
+    });
+    expect(state.messages).toEqual([
+      { id: "u", role: "user", content: "u", status: "complete" },
     ]);
   });
 
-  it("leaves out empty stopped bubbles and failed turns", () => {
-    let state = chatReducer(sent("Lost"), { type: "cancel" });
-    state = chatReducer(state, {
-      type: "send",
-      streamId: "s2",
-      text: "Refused",
+  it("ignores a load for a conversation that is no longer open", () => {
+    let state = chatReducer(createChatState(), {
+      type: "open",
+      conversationId: "a",
     });
-    state = chatReducer(state, {
-      type: "failed",
-      streamId: "s2",
-      error: { kind: "busy", message: "x" },
-    });
-    state = chatReducer(state, {
-      type: "send",
-      streamId: "s3",
-      text: "Errored",
-    });
-    state = event(state, { type: "token", content: "partial" }, "s3");
-    state = event(
-      state,
-      { type: "error", error: { kind: "ollama", message: "boom" } },
-      "s3"
-    );
+    state = chatReducer(state, { type: "open", conversationId: "b" });
+    const before = state;
 
-    expect(historyForRequest(state.messages)).toEqual([
-      { role: "user", content: "Lost" },
-      { role: "user", content: "Errored" },
+    state = chatReducer(state, {
+      type: "loaded",
+      conversationId: "a",
+      messages: fromStored([stored("x", "user", "complete")]),
+    });
+    state = chatReducer(state, {
+      type: "loadFailed",
+      conversationId: "a",
+      error: { kind: "notFound", message: "gone" },
+    });
+    expect(state).toEqual(before);
+  });
+
+  it("shows a failed load as the error", () => {
+    const error = { kind: "database", message: "locked" } as const;
+    const state = chatReducer(createChatState("a"), {
+      type: "loadFailed",
+      conversationId: "a",
+      error,
+    });
+    expect(state.error).toEqual(error);
+  });
+
+  it("does not switch away from a streaming reply", () => {
+    const before = sent();
+    expect(chatReducer(before, { type: "open", conversationId: "c2" })).toBe(
+      before
+    );
+  });
+
+  it("adopts the conversation a first send created", () => {
+    let state = chatReducer(createChatState(), {
+      type: "send",
+      streamId: "s1",
+      text: "Hi",
+    });
+    state = chatReducer(state, {
+      type: "created",
+      streamId: "s1",
+      conversationId: "new",
+    });
+    expect(state.conversationId).toBe("new");
+    expect(state.messages).toHaveLength(2);
+
+    const stale = chatReducer(state, {
+      type: "created",
+      streamId: "old",
+      conversationId: "other",
+    });
+    expect(stale.conversationId).toBe("new");
+  });
+});
+
+describe("fromStored", () => {
+  it("maps statuses and drops system messages", () => {
+    expect(
+      fromStored([
+        stored("s", "system", "complete"),
+        stored("u", "user", "complete"),
+        stored("p", "assistant", "pending"),
+        stored("c", "assistant", "cancelled"),
+        stored("e", "assistant", "error"),
+      ]).map(({ id, status }) => [id, status])
+    ).toEqual([
+      ["u", "complete"],
+      ["p", "streaming"],
+      ["c", "cancelled"],
+      ["e", "error"],
     ]);
+  });
+});
+
+describe("titleFromPrompt", () => {
+  it("uses the first non-empty line", () => {
+    expect(titleFromPrompt("\n  \n  Plan the trip  \nmore")).toBe(
+      "Plan the trip"
+    );
+  });
+
+  it("cuts long lines to 60 characters", () => {
+    expect(titleFromPrompt("x".repeat(100))).toBe("x".repeat(60));
+    expect([...(titleFromPrompt("😀".repeat(70)) ?? "")]).toHaveLength(60);
+  });
+
+  it("replaces control characters", () => {
+    expect(titleFromPrompt("a\tb")).toBe("a b");
+  });
+
+  it("leaves a blank prompt to the default", () => {
+    expect(titleFromPrompt(" \n\t\n")).toBeNull();
   });
 });

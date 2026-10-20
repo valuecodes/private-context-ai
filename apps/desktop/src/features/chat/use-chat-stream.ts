@@ -1,8 +1,19 @@
 import { useReducer, useRef } from "react";
 
 import { toAppError } from "~/lib/app-error";
-import { chatCancel, chatSend } from "~/lib/ipc";
-import type { AppError, ChatEvent, ChatMessage, RequestId } from "~/lib/types";
+import {
+  chatCancel,
+  chatSend,
+  conversationCreate,
+  conversationGet,
+} from "~/lib/ipc";
+import type {
+  AppError,
+  ChatEvent,
+  Conversation,
+  RequestId,
+  StoredMessage,
+} from "~/lib/types";
 
 type MessageStatus = "complete" | "streaming" | "cancelled" | "error";
 
@@ -17,8 +28,8 @@ type UiMessage = {
 type ChatNotice = "busy" | "length";
 
 type ChatState = {
-  /** Frontend-generated; Rust keeps no conversation of its own yet. */
-  conversationId: string;
+  /** The open conversation; `null` for a new chat the first send saves. */
+  conversationId: string | null;
   messages: UiMessage[];
   phase: "idle" | "streaming";
   /** Local id of the current send; events for any other id are stale. */
@@ -29,13 +40,17 @@ type ChatState = {
 };
 
 type ChatAction =
+  | { type: "open"; conversationId: string | null }
+  | { type: "loaded"; conversationId: string; messages: UiMessage[] }
+  | { type: "loadFailed"; conversationId: string; error: AppError }
   | { type: "send"; streamId: string; text: string }
+  | { type: "created"; streamId: string; conversationId: string }
   | { type: "started"; streamId: string; requestId: RequestId }
   | { type: "event"; streamId: string; event: ChatEvent }
   | { type: "cancel" }
   | { type: "failed"; streamId: string; error: AppError };
 
-const createChatState = (conversationId: string): ChatState => ({
+const createChatState = (conversationId: string | null = null): ChatState => ({
   conversationId,
   messages: [],
   phase: "idle",
@@ -54,6 +69,39 @@ const updateMessage = (
   update: (message: UiMessage) => UiMessage
 ): UiMessage[] =>
   messages.map((message) => (message.id === id ? update(message) : message));
+
+/** Saved messages as bubbles. A `pending` row shows as still streaming. */
+const fromStored = (messages: StoredMessage[]): UiMessage[] =>
+  messages.flatMap((message) =>
+    message.role === "system"
+      ? []
+      : [
+          {
+            id: message.id,
+            role: message.role,
+            content: message.content,
+            status: message.status === "pending" ? "streaming" : message.status,
+          },
+        ]
+  );
+
+const TITLE_CHARS = 60;
+
+/**
+ * A title for a new conversation: the prompt's first non-empty line, cut to
+ * 60 characters. `null` lets Rust use its default.
+ */
+const titleFromPrompt = (prompt: string): string | null => {
+  const line = prompt
+    .split("\n")
+    .map((part) => part.replaceAll(/\p{Cc}/gu, " ").trim())
+    .find((part) => part !== "");
+  if (line === undefined) {
+    return null;
+  }
+  // Spread splits by code point, so a cut never halves an emoji.
+  return [...line].slice(0, TITLE_CHARS).join("").trim();
+};
 
 /** Ends the current stream, setting the assistant bubble's final status. */
 const finishStream = (
@@ -132,8 +180,8 @@ const startSend = (
 };
 
 /**
- * Rust never admitted the request. Drop the empty bubble and mark the prompt
- * failed, so it is not sent as history later.
+ * Rust never admitted the request, so nothing was saved. Drop the empty
+ * bubble and mark the prompt failed.
  */
 const failSend = (
   state: ChatState,
@@ -157,6 +205,21 @@ const failSend = (
 };
 
 const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
+  if (action.type === "open") {
+    // Switching away would orphan the live reply's bubbles.
+    return state.phase === "streaming"
+      ? state
+      : createChatState(action.conversationId);
+  }
+  if (action.type === "loaded" || action.type === "loadFailed") {
+    // A slower load for a conversation that is no longer open is stale.
+    if (action.conversationId !== state.conversationId) {
+      return state;
+    }
+    return action.type === "loaded"
+      ? { ...state, messages: action.messages }
+      : { ...state, error: action.error };
+  }
   if (action.type === "send") {
     return startSend(state, action.streamId, action.text);
   }
@@ -167,6 +230,9 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   if (action.streamId !== state.streamId) {
     return state;
   }
+  if (action.type === "created") {
+    return { ...state, conversationId: action.conversationId };
+  }
   if (action.type === "started") {
     return { ...state, requestId: action.requestId };
   }
@@ -176,25 +242,17 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   return failSend(state, action.streamId, action.error);
 };
 
-/**
- * The turns sent to Ollama: completed ones, plus the visible part of a reply
- * that was stopped. Failed turns and empty bubbles are left out.
- */
-const historyForRequest = (messages: UiMessage[]): ChatMessage[] =>
-  messages
-    .filter(
-      (message) =>
-        message.content !== "" &&
-        (message.status === "complete" || message.status === "cancelled")
-    )
-    .map(({ role, content }) => ({ role, content }));
-
 const newStreamId = (): string => crypto.randomUUID();
 
-const useChatStream = () => {
-  const [state, dispatch] = useReducer(chatReducer, undefined, (): ChatState =>
-    createChatState(crypto.randomUUID())
-  );
+type ChatCallbacks = {
+  /** The first send of a new chat saved it as this conversation. */
+  onCreated: (conversation: Conversation) => void;
+  /** Rust admitted a send, so the conversation was just used. */
+  onStarted: (conversationId: string) => void;
+};
+
+const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
+  const [state, dispatch] = useReducer(chatReducer, null, createChatState);
   // The latest send: its request id once Rust admits it, `null` if refused.
   // Stop can then cancel even before `chatSend` has resolved.
   const pending = useRef<{
@@ -205,6 +263,33 @@ const useChatStream = () => {
   // only once Rust has freed the slot, so the resend is not refused as busy.
   const cancelling = useRef<Promise<void>>(Promise.resolve());
 
+  /** Shows a saved conversation, or a new chat for `null`. */
+  const open = (conversationId: string | null) => {
+    if (state.phase === "streaming") {
+      return;
+    }
+    dispatch({ type: "open", conversationId });
+    if (conversationId === null) {
+      return;
+    }
+    void conversationGet(conversationId).then(
+      (saved) => {
+        dispatch({
+          type: "loaded",
+          conversationId,
+          messages: fromStored(saved.messages),
+        });
+      },
+      (error: unknown) => {
+        dispatch({
+          type: "loadFailed",
+          conversationId,
+          error: toAppError(error),
+        });
+      }
+    );
+  };
+
   /** Returns `false` when the send was refused because a reply streams. */
   const send = (model: string, text: string): boolean => {
     const streamId = newStreamId();
@@ -212,18 +297,26 @@ const useChatStream = () => {
     if (state.phase === "streaming") {
       return false;
     }
-    const messages: ChatMessage[] = [
-      ...historyForRequest(state.messages),
-      { role: "user", content: text },
-    ];
     const onEvent = (event: ChatEvent) => {
       dispatch({ type: "event", streamId, event });
     };
+    const saved = state.conversationId;
+    const conversationId: Promise<string> =
+      saved === null
+        ? conversationCreate(titleFromPrompt(text), model).then((created) => {
+            dispatch({ type: "created", streamId, conversationId: created.id });
+            onCreated(created);
+            return created.id;
+          })
+        : Promise.resolve(saved);
     const requestId = cancelling.current
-      .then(() =>
-        chatSend(
-          { conversationId: state.conversationId, model, messages },
-          onEvent
+      .then(() => conversationId)
+      .then((id) =>
+        chatSend({ conversationId: id, model, prompt: text }, onEvent).then(
+          (request) => {
+            onStarted(id);
+            return request;
+          }
         )
       )
       .then(
@@ -255,8 +348,14 @@ const useChatStream = () => {
     dispatch({ type: "cancel" });
   };
 
-  return { state, send, stop };
+  return { state, open, send, stop };
 };
 
 export type { ChatState, UiMessage };
-export { chatReducer, createChatState, historyForRequest, useChatStream };
+export {
+  chatReducer,
+  createChatState,
+  fromStored,
+  titleFromPrompt,
+  useChatStream,
+};

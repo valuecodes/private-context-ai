@@ -3,7 +3,7 @@ name = "private-context-ai"
 version = "0.1.0"
 description = "Secure local AI sandbox: desktop chat against a local Ollama"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.95"
 publish = false
 
 [lib]
@@ -16,12 +16,22 @@ crate-type = ["rlib"]
 tauri-build = { version = "=2.7.3", features = [] }
 
 # Pinned exactly; `Cargo.lock` is committed and every cargo command runs with
-# `--locked`. Crates for later PRs (storage, keychain) are added when first
-# used.
+# `--locked`.
 [dependencies]
+# The OS keychain (Windows Credential Manager, macOS Keychain, Secret Service)
+# holds the database key.
+keyring = "=4.2.0"
+rand = "=0.10.3"
 # No TLS feature and no system proxy: the binary cannot speak HTTPS and only
 # ever talks to Ollama on loopback.
 reqwest = { version = "=0.13.5", default-features = false }
+# SQLCipher with a vendored OpenSSL, so the database is encrypted at rest on
+# every platform. Building it needs perl, make and a C compiler.
+rusqlite = { version = "=0.40.2", default-features = false, features = [
+  "bundled-sqlcipher-vendored-openssl",
+] }
+# 2.6.0 is the first release for rusqlite 0.40; it needs Rust 1.95.
+rusqlite_migration = "=2.6.0"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 tauri = { version = "=2.12.4", features = [] }
@@ -41,8 +51,10 @@ tracing-subscriber = { version = "=0.3.23", features = [
 ] }
 url = "=2.5.8"
 uuid = { version = "=1.28.0", features = ["serde", "v4"] }
+zeroize = "=1.9.1"
 
 [dev-dependencies]
+tempfile = "=3.27.0"
 # `net` + `io-util` for the hand-rolled fake Ollama server in the tests.
 tokio = { version = "=1.53.3", features = ["io-util", "net"] }
 

@@ -14,9 +14,22 @@ type AppError = {
     | "tooLarge"
     | "timeout"
     | "unreachable"
-    | "ollama";
+    | "ollama"
+    | "wrongKey"
+    | "notFound"
+    | "storageUnavailable"
+    | "database";
   message: string;
 };
+
+/** What the `storage_status` command returns. */
+type StorageStatus =
+  | { state: "ok" }
+  | { state: "keychainUnavailable"; detail: string }
+  | { state: "keyMissing"; dbPath: string }
+  | { state: "wrongKey"; dbPath: string }
+  | { state: "io"; detail: string }
+  | { state: "alreadyRunning" };
 
 /** What the `ollama_status` command returns. */
 type OllamaStatus = {
@@ -34,10 +47,34 @@ type ModelInfo = {
 
 type ChatRole = "system" | "user" | "assistant";
 
-/** One turn as `chat_send` receives it. */
-type ChatMessage = {
+/** A saved conversation, without its messages. */
+type Conversation = {
+  id: string;
+  title: string;
+  /** Empty until the first send when no model was picked. */
+  model: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** `pending`: still streaming, or the app stopped while it was. */
+type MessageStatus = "pending" | "complete" | "cancelled" | "error";
+
+type StoredMessage = {
+  id: string;
   role: ChatRole;
   content: string;
+  status: MessageStatus;
+  createdAt: string;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  durationMs: number | null;
+};
+
+/** What the `conversation_get` command returns. */
+type ConversationWithMessages = {
+  conversation: Conversation;
+  messages: StoredMessage[];
 };
 
 /** Streamed by `chat_send` over its channel. */
@@ -59,8 +96,11 @@ export type {
   AppError,
   AppInfo,
   ChatEvent,
-  ChatMessage,
+  Conversation,
+  ConversationWithMessages,
   ModelInfo,
   OllamaStatus,
   RequestId,
+  StorageStatus,
+  StoredMessage,
 };
