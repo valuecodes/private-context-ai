@@ -82,12 +82,20 @@ to `main` and on PRs.
 `pnpm build` is frontend only (`vite build`); it never compiles Rust, and CI does not
 build or check Rust at all. Crates are pinned exactly (`=x.y.z`) and `Cargo.lock` is
 committed. Before a PR that touches the desktop app merges, run on a Windows checkout:
-the three `rust:*` scripts above, `pnpm --filter desktop dev` (window opens, no CSP
-violations in the dev console), and `pnpm --filter desktop build:app`.
+the three `rust:*` scripts above, `pnpm --filter desktop dev` (window opens, `invoke`
+works), and `pnpm --filter desktop build:app`, then open the built app and check its
+devtools console for CSP violations.
 
-Prerequisites: rustup (the toolchain is pinned by `rust-toolchain.toml`). Windows: MSVC
-Build Tools, WebView2, and the VBSCRIPT optional feature for the MSI installer. Linux:
-webkit2gtk 4.1, and later `perl`, `make` and a C compiler for SQLCipher.
+On desktop, `tauri dev` loads the Vite server directly, so Tauri applies neither `csp`
+nor `devCsp` there (Tauri proxies the dev server, and so applies `devCsp`, only on
+mobile). The production CSP is enforced only in the bundled app, which is why the CSP
+check runs against the `build:app` output.
+
+Prerequisites: rustup. The toolchain is pinned by `src-tauri/rust-toolchain.toml`,
+which rustup only honours when cargo runs inside `src-tauri`, so the `rust:*` scripts
+`cd` there. Windows: MSVC Build Tools, WebView2, and the VBSCRIPT optional feature for
+the MSI installer. Linux: webkit2gtk 4.1, and later `perl`, `make` and a C compiler for
+SQLCipher.
 
 WSL2 lacks the webkit2gtk libraries and an OS keychain, so `tauri dev`, clippy and the
 tests do not run there. From WSL2 only `rust:fmt` works; say so in the PR description
