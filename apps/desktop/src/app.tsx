@@ -1,10 +1,14 @@
 import { useEffect, useState } from "react";
 
 import { loadVersion } from "~/app-version";
+import { ChatView } from "~/features/chat/chat-view";
 import { OllamaStatus } from "~/features/status/ollama-status";
+import { isReachable } from "~/features/status/status-state";
+import { useOllamaStatus } from "~/features/status/use-ollama-status";
 
 const App = () => {
   const [version, setVersion] = useState("");
+  const { status, retry } = useOllamaStatus();
 
   useEffect(() => {
     let cancelled = false;
@@ -29,14 +33,13 @@ const App = () => {
           {version === "" ? "" : `v${version}`}
         </p>
       </aside>
-      <div className="flex flex-1 flex-col">
-        <main className="flex flex-1 items-center justify-center p-6">
-          <h1 className="text-lg text-zinc-500 dark:text-zinc-400">
-            Private Context AI
-          </h1>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <main className="flex min-h-0 flex-1 flex-col">
+          <h1 className="sr-only">Private Context AI</h1>
+          <ChatView reachable={isReachable(status)} />
         </main>
         <footer className="border-t border-zinc-200 px-4 py-2 dark:border-zinc-800">
-          <OllamaStatus />
+          <OllamaStatus status={status} onRetry={retry} />
         </footer>
       </div>
     </div>

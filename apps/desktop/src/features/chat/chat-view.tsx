@@ -1,0 +1,114 @@
+import { useEffect, useState } from "react";
+
+import { Composer } from "~/features/chat/composer";
+import { MessageList } from "~/features/chat/message-list";
+import type { ChatState } from "~/features/chat/use-chat-stream";
+import { useChatStream } from "~/features/chat/use-chat-stream";
+import { toAppError } from "~/lib/app-error";
+import { ollamaListModels } from "~/lib/ipc";
+import type { AppError, ModelInfo } from "~/lib/types";
+
+const NOTICE_TEXT: Record<NonNullable<ChatState["notice"]>, string> = {
+  busy: "Still answering. Stop it or wait for it to finish.",
+  length: "The reply reached the length limit and was cut off.",
+};
+
+type Models =
+  | { phase: "idle" }
+  | { phase: "ready"; models: ModelInfo[] }
+  | { phase: "failed"; error: AppError };
+
+const modelLabel = (model: ModelInfo): string =>
+  model.parameterSize === null
+    ? model.name
+    : `${model.name} (${model.parameterSize})`;
+
+/** The selected model if it is still listed, else the first one. */
+const pickModel = (models: ModelInfo[], current: string): string =>
+  models.some((model) => model.name === current)
+    ? current
+    : (models[0]?.name ?? "");
+
+const ChatView = ({ reachable }: { reachable: boolean }) => {
+  const { state, send, stop } = useChatStream();
+  const [models, setModels] = useState<Models>({ phase: "idle" });
+  const [model, setModel] = useState("");
+
+  // (Re)load the model list whenever Ollama becomes reachable.
+  useEffect(() => {
+    let cancelled = false;
+    if (reachable) {
+      void ollamaListModels().then(
+        (list) => {
+          if (!cancelled) {
+            setModels({ phase: "ready", models: list });
+            setModel((current) => pickModel(list, current));
+          }
+        },
+        (error: unknown) => {
+          if (!cancelled) {
+            setModels({ phase: "failed", error: toAppError(error) });
+          }
+        }
+      );
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [reachable]);
+
+  const modelList = models.phase === "ready" ? models.models : [];
+  const streaming = state.phase === "streaming";
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
+      <div className="flex items-center gap-2">
+        <label htmlFor="model" className="text-sm font-medium">
+          Model
+        </label>
+        <select
+          id="model"
+          value={model}
+          onChange={(event) => {
+            setModel(event.target.value);
+          }}
+          disabled={modelList.length === 0}
+          className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+        >
+          {modelList.length === 0 && <option value="">No models</option>}
+          {modelList.map((info) => (
+            <option key={info.name} value={info.name}>
+              {modelLabel(info)}
+            </option>
+          ))}
+        </select>
+        {models.phase === "failed" && (
+          <span className="text-xs text-red-600 dark:text-red-400">
+            Could not list models: {models.error.message}
+          </span>
+        )}
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+        <MessageList messages={state.messages} />
+      </div>
+      {state.notice !== null && (
+        <p className="text-sm text-amber-700 dark:text-amber-400">
+          {NOTICE_TEXT[state.notice]}
+        </p>
+      )}
+      {state.error !== null && (
+        <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+          {state.error.message}
+        </p>
+      )}
+      <Composer
+        streaming={streaming}
+        canSend={model !== ""}
+        onSend={(text) => send(model, text)}
+        onStop={stop}
+      />
+    </div>
+  );
+};
+
+export { ChatView };

@@ -20,4 +20,10 @@ describe("App", () => {
   it("renders the Ollama status line", () => {
     expect(html).toMatch(/role="status"[^>]*>Ollama: checking…</);
   });
+
+  it("renders the model picker and the composer", () => {
+    expect(html).toMatch(/<select[^>]*id="model"/);
+    expect(html).toMatch(/<textarea[^>]*id="composer"/);
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled/);
+  });
 });
