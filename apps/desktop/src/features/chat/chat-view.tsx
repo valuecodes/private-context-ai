@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import type { UIEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
@@ -33,8 +34,25 @@ const ChatView = ({ reachable }: { reachable: boolean }) => {
   const { state, send, stop } = useChatStream();
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [model, setModel] = useState("");
+  const [modelsAttempt, setModelsAttempt] = useState(0);
+  const scroller = useRef<HTMLDivElement>(null);
+  // Follow new tokens unless the user has scrolled up to read.
+  const followBottom = useRef(true);
 
-  // (Re)load the model list whenever Ollama becomes reachable.
+  useEffect(() => {
+    const element = scroller.current;
+    if (element !== null && followBottom.current) {
+      element.scrollTop = element.scrollHeight;
+    }
+  }, [state.messages]);
+
+  const onScroll = (event: UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    followBottom.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+  };
+
+  // (Re)load the model list whenever Ollama becomes reachable, or on retry.
   useEffect(() => {
     let cancelled = false;
     if (reachable) {
@@ -55,7 +73,7 @@ const ChatView = ({ reachable }: { reachable: boolean }) => {
     return () => {
       cancelled = true;
     };
-  }, [reachable]);
+  }, [reachable, modelsAttempt]);
 
   const modelList = models.phase === "ready" ? models.models : [];
   const streaming = state.phase === "streaming";
@@ -83,12 +101,27 @@ const ChatView = ({ reachable }: { reachable: boolean }) => {
           ))}
         </select>
         {models.phase === "failed" && (
-          <span className="text-xs text-red-600 dark:text-red-400">
-            Could not list models: {models.error.message}
-          </span>
+          <>
+            <span className="text-xs text-red-600 dark:text-red-400">
+              Could not list models: {models.error.message}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setModelsAttempt((count) => count + 1);
+              }}
+              className="rounded border border-zinc-300 px-2 py-0.5 text-xs hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+            >
+              Retry
+            </button>
+          </>
         )}
       </div>
-      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+      <div
+        ref={scroller}
+        onScroll={onScroll}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+      >
         <MessageList messages={state.messages} />
       </div>
       {state.notice !== null && (
