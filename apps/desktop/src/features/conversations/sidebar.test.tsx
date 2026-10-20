@@ -40,13 +40,13 @@ const renderSidebar = (
     />
   );
 
-const renderItem = (mode: "view" | "rename" | "confirm", selected = false) =>
+const renderItem = (mode: "view" | "rename" | "confirm", disabled = false) =>
   renderToString(
     <ul>
       <SidebarItem
         conversation={conversation("a", "Trip plan")}
-        selected={selected}
-        disabled={false}
+        selected={false}
+        disabled={disabled}
         mode={mode}
         onSelect={noop}
         onMode={noop}
@@ -111,5 +111,10 @@ describe("SidebarItem", () => {
     expect(html).toContain("Delete “Trip plan”?");
     expect(html).toContain(">Delete<");
     expect(html).toContain(">Keep<");
+    expect(html).not.toMatch(/disabled=""[^>]*>Delete</);
+  });
+
+  it("disables a pending delete once a reply streams", () => {
+    expect(renderItem("confirm", true)).toMatch(/disabled=""[^>]*>Delete</);
   });
 });

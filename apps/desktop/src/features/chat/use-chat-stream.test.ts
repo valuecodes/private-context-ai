@@ -287,6 +287,21 @@ describe("opening conversations", () => {
     });
     expect(stale.conversationId).toBe("new");
   });
+
+  it("adopts the created conversation after an early stop", () => {
+    let state = chatReducer(createChatState(), {
+      type: "send",
+      streamId: "s1",
+      text: "Hi",
+    });
+    state = chatReducer(state, { type: "cancel" });
+    state = chatReducer(state, {
+      type: "created",
+      streamId: "s1",
+      conversationId: "new",
+    });
+    expect(state.conversationId).toBe("new");
+  });
 });
 
 describe("fromStored", () => {

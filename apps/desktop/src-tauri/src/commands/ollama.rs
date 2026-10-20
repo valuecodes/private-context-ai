@@ -136,8 +136,9 @@ where
                 duration_ms,
                 ..
             } => lock(&recorder).complete(*prompt_tokens, *completion_tokens, *duration_ms),
-            // `on_end` saves the error status.
-            ChatEvent::Error { .. } => Ok(()),
+            // `on_end` saves the error status, but a save failure the ticker
+            // already hit matters more than why Ollama stopped.
+            ChatEvent::Error { .. } => lock(&recorder).ensure_saved(),
         };
         match saved {
             Ok(()) => send(event),
@@ -314,6 +315,30 @@ mod tests {
             ChatEvent::Error {
                 error: AppError::Database(_)
             }
+        ));
+    }
+
+    #[test]
+    fn earlier_flush_failure_replaces_ollama_error() {
+        let (storage, _dir) = temp_storage();
+        let (_, recorder) = started_turn(&storage);
+        let (events, send) = collector(true);
+        let sink = recording_sink(Arc::clone(&recorder), send);
+
+        assert!(sink(token("Hi")));
+        break_writes(&storage);
+        // What the ticker does between events.
+        assert!(lock(&recorder).flush_if_dirty().is_err());
+        assert!(!sink(ChatEvent::Error {
+            error: AppError::Timeout("slow".into())
+        }));
+
+        let events = events.lock().unwrap();
+        assert!(matches!(
+            events.last(),
+            Some(ChatEvent::Error {
+                error: AppError::Database(_)
+            })
         ));
     }
 

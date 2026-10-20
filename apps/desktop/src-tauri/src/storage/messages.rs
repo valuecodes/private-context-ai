@@ -372,6 +372,11 @@ impl TurnRecorder {
         }
     }
 
+    /// Fails once any write for this turn has failed.
+    pub fn ensure_saved(&self) -> Result<(), AppError> {
+        self.check_failed()
+    }
+
     fn check_failed(&self) -> Result<(), AppError> {
         if self.failed {
             Err(AppError::Database("the reply could not be saved".into()))

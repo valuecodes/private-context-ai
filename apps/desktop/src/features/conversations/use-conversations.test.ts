@@ -90,14 +90,21 @@ describe("conversationsReducer", () => {
     expect(ids(state)).toEqual([]);
   });
 
-  it("moves a used conversation to the top", () => {
+  it("moves a used conversation to the top with the model it used", () => {
     const state = conversationsReducer(loaded("a", "b", "c"), {
       type: "touched",
       id: "c",
+      model: "qwen3",
     });
     expect(ids(state)).toEqual(["c", "a", "b"]);
+    expect(state.conversations[0]?.model).toBe("qwen3");
+    expect(state.conversations[1]?.model).toBe("llama3.2");
     expect(
-      conversationsReducer(state, { type: "touched", id: "missing" })
+      conversationsReducer(state, {
+        type: "touched",
+        id: "missing",
+        model: "x",
+      })
     ).toEqual(state);
   });
 
