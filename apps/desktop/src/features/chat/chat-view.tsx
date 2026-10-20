@@ -1,10 +1,9 @@
-import type { UIEvent } from "react";
+import type { Dispatch, SetStateAction, UIEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import type { ChatState } from "~/features/chat/use-chat-stream";
-import { useChatStream } from "~/features/chat/use-chat-stream";
 import { toAppError } from "~/lib/app-error";
 import { ollamaListModels } from "~/lib/ipc";
 import type { AppError, ModelInfo } from "~/lib/types";
@@ -30,10 +29,25 @@ const pickModel = (models: ModelInfo[], current: string): string =>
     ? current
     : (models[0]?.name ?? "");
 
-const ChatView = ({ reachable }: { reachable: boolean }) => {
-  const { state, send, stop } = useChatStream();
+type ChatViewProps = {
+  reachable: boolean;
+  state: ChatState;
+  send: (model: string, text: string) => boolean;
+  stop: () => void;
+  /** Owned by the parent, so opening a conversation can pick its model. */
+  model: string;
+  setModel: Dispatch<SetStateAction<string>>;
+};
+
+const ChatView = ({
+  reachable,
+  state,
+  send,
+  stop,
+  model,
+  setModel,
+}: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
-  const [model, setModel] = useState("");
   const [modelsAttempt, setModelsAttempt] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
   // Follow new tokens unless the user has scrolled up to read.
@@ -73,7 +87,7 @@ const ChatView = ({ reachable }: { reachable: boolean }) => {
     return () => {
       cancelled = true;
     };
-  }, [reachable, modelsAttempt]);
+  }, [reachable, modelsAttempt, setModel]);
 
   const modelList = models.phase === "ready" ? models.models : [];
   const streaming = state.phase === "streaming";

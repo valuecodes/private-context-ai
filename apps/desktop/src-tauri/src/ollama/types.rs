@@ -16,6 +16,26 @@ pub enum ChatRole {
     Assistant,
 }
 
+impl ChatRole {
+    /// The serialized name, also stored in the `messages.role` column.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::User => "user",
+            Self::Assistant => "assistant",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "system" => Some(Self::System),
+            "user" => Some(Self::User),
+            "assistant" => Some(Self::Assistant),
+            _ => None,
+        }
+    }
+}
+
 /// One turn of the conversation, as the frontend sends it and as Ollama
 /// receives it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -166,7 +186,17 @@ impl From<TagModel> for ModelInfo {
     }
 }
 
-/// Checks a chat request before any slot is taken or socket opened.
+pub fn validate_model(model: &str) -> Result<(), AppError> {
+    if model.trim().is_empty()
+        || model.chars().count() > MAX_MODEL_CHARS
+        || model.chars().any(char::is_control)
+    {
+        return Err(invalid("model name is invalid"));
+    }
+    Ok(())
+}
+
+/// Checks a chat request before any socket is opened.
 pub fn validate_chat_input(
     model: &str,
     messages: &[ChatMessage],
@@ -174,12 +204,7 @@ pub fn validate_chat_input(
     max_messages: usize,
     max_prompt_bytes: usize,
 ) -> Result<(), AppError> {
-    if model.trim().is_empty()
-        || model.chars().count() > MAX_MODEL_CHARS
-        || model.chars().any(char::is_control)
-    {
-        return Err(invalid("model name is invalid"));
-    }
+    validate_model(model)?;
     if messages.is_empty() {
         return Err(invalid("at least one message is required"));
     }

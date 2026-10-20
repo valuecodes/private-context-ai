@@ -95,6 +95,13 @@ impl Drop for InflightGuard {
     }
 }
 
+/// A slot taken by [`Ollama::admit`], to be handed to [`Ollama::start`].
+/// Dropping it instead frees the slot.
+pub struct Admission {
+    guard: InflightGuard,
+    cancel: CancellationToken,
+}
+
 /// The Ollama side of the app state, managed by Tauri as `Arc<Ollama>`.
 pub struct Ollama {
     /// An invalid URL is kept as the error so the app still starts and every
@@ -180,39 +187,28 @@ impl Ollama {
         Ok(result?.models.into_iter().map(ModelInfo::from).collect())
     }
 
-    /// Validates and admits the request, spawns the streaming worker and
-    /// returns its id before any socket work, so the caller can cancel it
-    /// while it runs. Must be called inside a tokio runtime.
-    pub fn chat_send<F>(
-        self: &Arc<Self>,
-        conversation_id: Uuid,
-        model: String,
-        messages: Vec<ChatMessage>,
-        options: Option<ChatOptions>,
-        sink: F,
-    ) -> Result<Uuid, AppError>
-    where
-        F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
-    {
-        let (base, http) = self.connection()?;
+    /// Checks a request against this client's limits, before any socket is
+    /// opened.
+    pub fn validate(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        options: Option<&ChatOptions>,
+    ) -> Result<(), AppError> {
         validate_chat_input(
-            &model,
-            &messages,
-            options.as_ref(),
+            model,
+            messages,
+            options,
             self.limits.max_messages,
             self.limits.max_prompt_bytes,
-        )?;
-        let body = serde_json::to_vec(&ChatRequest {
-            model: &model,
-            messages: &messages,
-            stream: true,
-            options: options.as_ref(),
-        })
-        .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
-        let url = base.endpoint("/api/chat");
-        let base = base.clone();
-        let http = http.clone();
+        )
+    }
 
+    /// Takes a slot for `conversation_id` (one per conversation, `max_inflight`
+    /// in total). The slot is visible to `chat_cancel` and
+    /// `cancel_conversation` at once; dropping the admission frees it.
+    pub fn admit(&self, conversation_id: Uuid) -> Result<Admission, AppError> {
+        self.connection()?;
         let request_id = Uuid::new_v4();
         let cancel = CancellationToken::new();
         let finished = CancellationToken::new();
@@ -241,11 +237,58 @@ impl Ollama {
                 },
             );
         }
-        let guard = InflightGuard {
-            inflight: Arc::clone(&self.inflight),
-            request_id,
-            finished,
+        Ok(Admission {
+            guard: InflightGuard {
+                inflight: Arc::clone(&self.inflight),
+                request_id,
+                finished,
+            },
+            cancel,
+        })
+    }
+
+    /// Spawns the streaming worker for an admitted request and returns its
+    /// id. `on_end` runs exactly once, on every path, before the audit record.
+    /// A request cancelled while admitted ends at once as `Cancelled`. Must be
+    /// called inside a tokio runtime.
+    pub fn start<F, E>(
+        self: &Arc<Self>,
+        admission: Admission,
+        model: &str,
+        messages: &[ChatMessage],
+        options: Option<&ChatOptions>,
+        sink: F,
+        on_end: E,
+    ) -> Result<Uuid, AppError>
+    where
+        F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
+        E: FnOnce(&ChatEnd) + Send + 'static,
+    {
+        let (base, http) = match self.connection() {
+            Ok(connection) => connection,
+            Err(err) => {
+                on_end(&ChatEnd::Failed(err.clone()));
+                return Err(err);
+            }
         };
+        let body = match serde_json::to_vec(&ChatRequest {
+            model,
+            messages,
+            stream: true,
+            options,
+        }) {
+            Ok(body) => body,
+            Err(err) => {
+                let err = AppError::Internal(format!("request body: {err}"));
+                on_end(&ChatEnd::Failed(err.clone()));
+                return Err(err);
+            }
+        };
+        let url = base.endpoint("/api/chat");
+        let base = base.clone();
+        let http = http.clone();
+        let Admission { guard, cancel } = admission;
+        let request_id = guard.request_id;
 
         let this = Arc::clone(self);
         tokio::spawn(async move {
@@ -259,10 +302,12 @@ impl Ollama {
                     error: error.clone(),
                 });
             }
+            on_end(&run.end);
             let (outcome, prompt_tokens, completion_tokens) = match run.end {
                 ChatEnd::Done {
                     prompt_tokens,
                     completion_tokens,
+                    ..
                 } => ("ok".to_owned(), prompt_tokens, completion_tokens),
                 ChatEnd::Cancelled => ("cancelled".to_owned(), None, None),
                 ChatEnd::Failed(error) => (format!("error:{}", error.kind()), None, None),
@@ -291,8 +336,24 @@ impl Ollama {
         Ok(())
     }
 
+    /// Cancels whatever runs for `conversation_id`, admitted or streaming,
+    /// and waits like [`Self::chat_cancel`]. Nothing running is a no-op.
+    pub async fn cancel_conversation(&self, conversation_id: Uuid) {
+        let finished: Vec<CancellationToken> = lock(&self.inflight)
+            .values()
+            .filter(|entry| entry.conversation_id == conversation_id)
+            .map(|entry| {
+                entry.cancel.cancel();
+                entry.finished.clone()
+            })
+            .collect();
+        for finished in finished {
+            let _ = tokio::time::timeout(self.limits.cancel_wait, finished.cancelled()).await;
+        }
+    }
+
     #[cfg(test)]
-    fn inflight_len(&self) -> usize {
+    pub(crate) fn inflight_len(&self) -> usize {
         lock(&self.inflight).len()
     }
 }
@@ -475,11 +536,47 @@ mod tests {
         }]
     }
 
+    type Ends = Arc<Mutex<Vec<ChatEnd>>>;
+
+    fn send_with_end<F>(
+        ollama: &Arc<Ollama>,
+        conversation: Uuid,
+        sink: F,
+        ends: &Ends,
+    ) -> Result<Uuid, AppError>
+    where
+        F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
+    {
+        let messages = prompt();
+        ollama.validate("llama3.2", &messages, None)?;
+        let admission = ollama.admit(conversation)?;
+        let ends = Arc::clone(ends);
+        ollama.start(admission, "llama3.2", &messages, None, sink, move |end| {
+            ends.lock().unwrap().push(clone_end(end));
+        })
+    }
+
     fn send<F>(ollama: &Arc<Ollama>, conversation: Uuid, sink: F) -> Result<Uuid, AppError>
     where
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
     {
-        ollama.chat_send(conversation, "llama3.2".into(), prompt(), None, sink)
+        send_with_end(ollama, conversation, sink, &Ends::default())
+    }
+
+    fn clone_end(end: &ChatEnd) -> ChatEnd {
+        match end {
+            ChatEnd::Done {
+                prompt_tokens,
+                completion_tokens,
+                duration_ms,
+            } => ChatEnd::Done {
+                prompt_tokens: *prompt_tokens,
+                completion_tokens: *completion_tokens,
+                duration_ms: *duration_ms,
+            },
+            ChatEnd::Cancelled => ChatEnd::Cancelled,
+            ChatEnd::Failed(error) => ChatEnd::Failed(error.clone()),
+        }
     }
 
     async fn wait_idle(ollama: &Ollama) {
@@ -825,12 +922,120 @@ mod tests {
         let (ollama, _) = ollama_at(fake.addr, test_limits());
         let messages = vec![prompt()[0].clone(); 11];
 
-        let err = ollama
-            .chat_send(Uuid::new_v4(), "m".into(), messages, None, |_| true)
-            .unwrap_err();
+        let err = ollama.validate("m", &messages, None).unwrap_err();
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert_eq!(ollama.inflight_len(), 0);
         assert_eq!(fake.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn dropped_admission_frees_slot() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let conversation = Uuid::new_v4();
+
+        let admission = ollama.admit(conversation).unwrap();
+        assert_eq!(ollama.inflight_len(), 1);
+        assert!(matches!(ollama.admit(conversation), Err(AppError::Busy(_))));
+        drop(admission);
+
+        assert_eq!(ollama.inflight_len(), 0);
+        assert!(ollama.admit(conversation).is_ok());
+        assert_eq!(fake.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn on_end_called_for_done_cancel_and_error() {
+        let done = fake_ollama(Reply::Lines(vec![HEL, DONE], Duration::ZERO)).await;
+        let (ollama, _) = ollama_at(done.addr, test_limits());
+        let ends = Ends::default();
+        send_with_end(&ollama, Uuid::new_v4(), |_| true, &ends).unwrap();
+        wait_idle(&ollama).await;
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Done {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(2),
+                duration_ms: Some(5),
+            }]
+        ));
+
+        let silent = fake_ollama(Reply::Silent).await;
+        let (ollama, _) = ollama_at(silent.addr, test_limits());
+        let ends = Ends::default();
+        let id = send_with_end(&ollama, Uuid::new_v4(), |_| true, &ends).unwrap();
+        ollama.chat_cancel(id).await.unwrap();
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Cancelled]
+        ));
+
+        let failing = fake_ollama(Reply::Status(500, r#"{"error":"boom"}"#)).await;
+        let (ollama, _) = ollama_at(failing.addr, test_limits());
+        let ends = Ends::default();
+        send_with_end(&ollama, Uuid::new_v4(), |_| true, &ends).unwrap();
+        wait_idle(&ollama).await;
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Failed(AppError::Ollama(_))]
+        ));
+    }
+
+    #[tokio::test]
+    async fn cancel_conversation_stops_its_stream() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let conversation = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        send(&ollama, conversation, |_| true).unwrap();
+        let other_id = send(&ollama, other, |_| true).unwrap();
+        ollama.cancel_conversation(conversation).await;
+
+        assert_eq!(ollama.inflight_len(), 1);
+        assert!(send(&ollama, conversation, |_| true).is_ok());
+        ollama.chat_cancel(other_id).await.unwrap();
+        ollama.cancel_conversation(conversation).await;
+        assert_eq!(ollama.inflight_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancel_while_admitted_ends_as_cancelled() {
+        let fake = fake_ollama(Reply::Lines(vec![HEL, DONE], Duration::ZERO)).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let conversation = Uuid::new_v4();
+        let ends = Ends::default();
+        let (events, sink) = collector();
+
+        let admission = ollama.admit(conversation).unwrap();
+        // A delete racing a send: the cancel lands between admit and start.
+        let canceller = {
+            let ollama = Arc::clone(&ollama);
+            tokio::spawn(async move { ollama.cancel_conversation(conversation).await })
+        };
+        for _ in 0..500 {
+            if lock(&ollama.inflight)
+                .values()
+                .all(|entry| entry.cancel.is_cancelled())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let recorded = Arc::clone(&ends);
+        ollama
+            .start(admission, "m", &prompt(), None, sink, move |end| {
+                recorded.lock().unwrap().push(clone_end(end));
+            })
+            .unwrap();
+        canceller.await.unwrap();
+
+        assert_eq!(ollama.inflight_len(), 0);
+        assert!(snapshot(&events).is_empty());
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Cancelled]
+        ));
     }
 
     #[tokio::test]

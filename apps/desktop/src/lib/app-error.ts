@@ -10,6 +10,10 @@ const APP_ERROR_KINDS = new Set<string>([
   "timeout",
   "unreachable",
   "ollama",
+  "wrongKey",
+  "notFound",
+  "storageUnavailable",
+  "database",
 ] satisfies AppError["kind"][]);
 
 const isAppError = (value: unknown): value is AppError =>

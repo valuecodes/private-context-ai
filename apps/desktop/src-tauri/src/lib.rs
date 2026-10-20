@@ -2,13 +2,13 @@
 //!
 //! Modules are `pub` so items that later PRs wire up (audit sink methods,
 //! error variants) do not trip `dead_code` under `clippy -D warnings`.
-
 pub mod audit;
 pub mod commands;
 pub mod error;
 pub mod observability;
 pub mod ollama;
 pub mod redacted;
+pub mod storage;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -19,6 +19,8 @@ use tracing_appender::non_blocking::WorkerGuard;
 use crate::audit::{AuditSink, MemorySink};
 use crate::ollama::Ollama;
 use crate::ollama::client::default_base_url;
+use crate::storage::StorageState;
+use crate::storage::key::KeychainKeySource;
 
 /// What the `app_info` command returns; mirrored by `AppInfo` in
 /// `src/lib/types.ts`.
@@ -57,6 +59,12 @@ pub fn run() {
             }
             app.manage(Arc::new(Ollama::new(base_url, sink)));
 
+            // A storage problem does not stop the app: the UI explains it and
+            // every storage command refuses.
+            let storage = StorageState::open(&app.path().app_data_dir()?, &KeychainKeySource);
+            tracing::info!(status = storage.status().kind(), "storage opened");
+            app.manage(storage);
+
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "app started");
             Ok(())
         })
@@ -66,6 +74,12 @@ pub fn run() {
             commands::ollama::ollama_list_models,
             commands::ollama::chat_send,
             commands::ollama::chat_cancel,
+            commands::conversations::storage_status,
+            commands::conversations::conversation_create,
+            commands::conversations::conversation_list,
+            commands::conversations::conversation_get,
+            commands::conversations::conversation_rename,
+            commands::conversations::conversation_delete,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the Tauri application");

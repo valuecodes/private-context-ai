@@ -79,6 +79,7 @@ pub enum ChatEnd {
     Done {
         prompt_tokens: Option<u64>,
         completion_tokens: Option<u64>,
+        duration_ms: Option<u64>,
     },
     Cancelled,
     Failed(AppError),
@@ -226,10 +227,11 @@ async fn stream_reply(
                 }
             }
             if line.done {
+                let duration_ms = line.total_duration.map(|nanos| nanos / 1_000_000);
                 let done = ChatEvent::Done {
                     prompt_tokens: line.prompt_eval_count,
                     completion_tokens: line.eval_count,
-                    duration_ms: line.total_duration.map(|nanos| nanos / 1_000_000),
+                    duration_ms,
                     done_reason: line.done_reason,
                 };
                 // The reply is complete either way; a closed receiver only
@@ -238,6 +240,7 @@ async fn stream_reply(
                 return Ok(ChatEnd::Done {
                     prompt_tokens: line.prompt_eval_count,
                     completion_tokens: line.eval_count,
+                    duration_ms,
                 });
             }
         }

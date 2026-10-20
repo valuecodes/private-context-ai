@@ -37,10 +37,43 @@ On Windows install the MSVC Build Tools and WebView2, plus the VBSCRIPT optional
 feature to build the MSI installer. On Linux install webkit2gtk 4.1. Under WSL2 the
 app cannot run; use a Windows checkout.
 
+The chat database is SQLCipher with a vendored OpenSSL, compiled from source on the
+first build. That needs `perl`, `make` and a C compiler: on Windows, Strawberry Perl
+plus the MSVC Build Tools; on Linux, `perl` and `build-essential` (or your distro's
+equivalent).
+
 ```bash
 pnpm --filter desktop dev        # open the app window (Vite on port 1420)
 pnpm --filter desktop build:app  # release build and installers
 ```
+
+## Where is my data
+
+Conversations live in one encrypted SQLite database (SQLCipher), `private-context.db`,
+in the app data folder. While the app runs, `private-context.db-wal` and
+`private-context.db-shm` sit next to it, along with `private-context.lock`, which
+keeps a second copy of the app from opening the database.
+
+| OS      | App data folder                                                       |
+| ------- | --------------------------------------------------------------------- |
+| Windows | `%APPDATA%\io.github.valuecodes.privatecontextai`                     |
+| macOS   | `~/Library/Application Support/io.github.valuecodes.privatecontextai` |
+| Linux   | `~/.local/share/io.github.valuecodes.privatecontextai`                |
+
+The database key is 32 random bytes created on first start and kept only in the OS
+keychain, under service `private-context-ai` and account `db-key-v1`. On Windows that
+is the generic credential `db-key-v1.private-context-ai` in Credential Manager; on
+macOS, the login Keychain; on Linux, the Secret Service (GNOME Keyring, KWallet). The
+key never reaches the app window, and without a working keychain the app shows
+"Secure storage unavailable" instead of storing anything unencrypted.
+
+**Key missing.** If the database exists but its keychain entry is gone, the app says
+so and stops. It never creates a new key, since that would make the existing chats
+unreadable for good. Restore the entry if you can.
+
+**Wiping everything.** Quit the app, delete `private-context.db` and its `-wal` and
+`-shm` files, then delete the keychain entry. The next start creates a new key and an
+empty database.
 
 ## Commands
 
