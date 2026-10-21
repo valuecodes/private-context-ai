@@ -78,7 +78,7 @@ const Composer = ({ streaming, canSend, onSend, onStop }: ComposerProps) => {
         }}
         aria-keyshortcuts={streaming ? "Escape" : undefined}
         aria-disabled={streaming || sendable ? undefined : true}
-        className={`${button} ${streaming ? "bg-red-600 hover:bg-red-700" : "bg-zinc-900 hover:bg-zinc-700 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 aria-disabled:hover:bg-zinc-900 dark:bg-zinc-100 dark:text-zinc-900"}`}
+        className={`${button} ${streaming ? "bg-red-600 hover:bg-red-700" : "bg-zinc-900 hover:bg-zinc-700 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"}`}
       >
         {streaming ? "Stop" : "Send"}
       </button>
