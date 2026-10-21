@@ -114,7 +114,9 @@ discussion first.
   Tauri plugins). Only Rust talks to Ollama, through `ollama/client.rs`, which refuses
   non-loopback hosts, proxies and redirects; `reqwest` has no TLS feature.
 - **The model gets no tools.** `/api/chat` is called without `tools`, `format` or
-  `think`; replies are rendered as text, never as HTML.
+  `think`; replies are rendered as Markdown into React elements with raw HTML disabled
+  (`skipHtml`, no `rehype-raw`, no `dangerouslySetInnerHTML`); links and images are
+  inert (no `href`, nothing fetched) and code highlighting is local JS.
 - **Encrypted at rest.** All chat data lives in the SQLCipher database, only Rust opens
   it, and its key never reaches the webview.
 - **Observable.** Every outbound request writes an audit row before its socket opens.

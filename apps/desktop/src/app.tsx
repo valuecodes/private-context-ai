@@ -1,3 +1,5 @@
+import { Activity, MessageSquare, Settings } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { loadVersion } from "~/app-version";
@@ -20,10 +22,10 @@ import type { StorageStatus } from "~/lib/types";
 
 type View = "chat" | "activity" | "settings";
 
-const VIEWS: { id: View; label: string }[] = [
-  { id: "chat", label: "Chat" },
-  { id: "activity", label: "Activity" },
-  { id: "settings", label: "Settings" },
+const VIEWS: { id: View; label: string; Icon: LucideIcon }[] = [
+  { id: "chat", label: "Chat", Icon: MessageSquare },
+  { id: "activity", label: "Activity", Icon: Activity },
+  { id: "settings", label: "Settings", Icon: Settings },
 ];
 
 /** The sidebar and the chat, activity and settings views, shown once
@@ -103,7 +105,7 @@ const Workspace = () => {
           aria-label="Views"
           className="flex gap-1 border-b border-zinc-200 px-4 pt-2 dark:border-zinc-800"
         >
-          {VIEWS.map(({ id, label }) => (
+          {VIEWS.map(({ id, label, Icon }) => (
             <button
               key={id}
               type="button"
@@ -111,8 +113,9 @@ const Workspace = () => {
               onClick={() => {
                 setView(id);
               }}
-              className={`rounded-t px-3 py-1 text-sm ${view === id ? "border-b-2 border-zinc-900 font-medium dark:border-zinc-100" : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"}`}
+              className={`flex items-center gap-1.5 rounded-t px-3 py-1 text-sm ${view === id ? "border-b-2 border-zinc-900 font-medium dark:border-zinc-100" : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"}`}
             >
+              <Icon aria-hidden="true" className="size-4" />
               {label}
             </button>
           ))}

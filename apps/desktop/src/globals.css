@@ -1,3 +1,166 @@
 @import "tailwindcss";
 
 @source "./**/*.{js,jsx,ts,tsx}";
+
+/* Replies rendered by `features/chat/markdown.tsx`. */
+@layer components {
+  .markdown {
+    @apply leading-relaxed break-words;
+  }
+  .markdown > :first-child {
+    @apply mt-0;
+  }
+  .markdown > :last-child {
+    @apply mb-0;
+  }
+  .markdown p,
+  .markdown ul,
+  .markdown ol,
+  .markdown blockquote,
+  .markdown table {
+    @apply my-3;
+  }
+  .markdown h1 {
+    @apply mt-5 mb-3 text-xl font-semibold;
+  }
+  .markdown h2 {
+    @apply mt-5 mb-2 text-lg font-semibold;
+  }
+  .markdown h3,
+  .markdown h4,
+  .markdown h5,
+  .markdown h6 {
+    @apply mt-4 mb-2 font-semibold;
+  }
+  .markdown ul {
+    @apply list-disc pl-6;
+  }
+  .markdown ol {
+    @apply list-decimal pl-6;
+  }
+  .markdown li {
+    @apply my-1;
+  }
+  .markdown li > ul,
+  .markdown li > ol {
+    @apply my-1;
+  }
+  .markdown blockquote {
+    @apply border-l-4 border-zinc-300 pl-3 text-zinc-600 dark:border-zinc-700 dark:text-zinc-400;
+  }
+  .markdown hr {
+    @apply my-4 border-zinc-200 dark:border-zinc-800;
+  }
+  .markdown table {
+    @apply block border-collapse overflow-x-auto;
+  }
+  .markdown th,
+  .markdown td {
+    @apply border border-zinc-300 px-2 py-1 dark:border-zinc-700;
+  }
+  .markdown th {
+    @apply bg-zinc-100 font-semibold dark:bg-zinc-900;
+  }
+  .markdown :not(pre) > code {
+    @apply rounded bg-zinc-200 px-1 py-0.5 font-mono text-[0.9em] dark:bg-zinc-800;
+  }
+  .markdown-link {
+    @apply text-blue-700 underline decoration-dotted dark:text-blue-400;
+  }
+}
+
+/* Code highlighting by lowlight (highlight.js classes), light then dark. */
+.hljs-comment,
+.hljs-quote {
+  color: #6a737d;
+  font-style: italic;
+}
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-literal,
+.hljs-type,
+.hljs-doctag {
+  color: #d73a49;
+}
+.hljs-string,
+.hljs-regexp,
+.hljs-addition,
+.hljs-meta .hljs-string {
+  color: #032f62;
+}
+.hljs-number,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-attr,
+.hljs-selector-attr,
+.hljs-selector-pseudo {
+  color: #005cc5;
+}
+.hljs-title,
+.hljs-section,
+.hljs-built_in,
+.hljs-name {
+  color: #6f42c1;
+}
+.hljs-tag,
+.hljs-meta,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #22863a;
+}
+.hljs-deletion {
+  color: #b31d28;
+}
+.hljs-emphasis {
+  font-style: italic;
+}
+.hljs-strong {
+  font-weight: 600;
+}
+
+@media (prefers-color-scheme: dark) {
+  .hljs-comment,
+  .hljs-quote {
+    color: #8b949e;
+  }
+  .hljs-keyword,
+  .hljs-selector-tag,
+  .hljs-literal,
+  .hljs-type,
+  .hljs-doctag {
+    color: #ff7b72;
+  }
+  .hljs-string,
+  .hljs-regexp,
+  .hljs-addition,
+  .hljs-meta .hljs-string {
+    color: #a5d6ff;
+  }
+  .hljs-number,
+  .hljs-symbol,
+  .hljs-bullet,
+  .hljs-variable,
+  .hljs-template-variable,
+  .hljs-attr,
+  .hljs-selector-attr,
+  .hljs-selector-pseudo {
+    color: #79c0ff;
+  }
+  .hljs-title,
+  .hljs-section,
+  .hljs-built_in,
+  .hljs-name {
+    color: #d2a8ff;
+  }
+  .hljs-tag,
+  .hljs-meta,
+  .hljs-selector-id,
+  .hljs-selector-class {
+    color: #7ee787;
+  }
+  .hljs-deletion {
+    color: #ffa198;
+  }
+}

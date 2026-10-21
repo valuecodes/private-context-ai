@@ -47,8 +47,9 @@ What the app guarantees, and what enforces it:
   no redirects and pins `localhost` to `127.0.0.1`. `reqwest` is built without any TLS
   backend, so the binary cannot speak HTTPS at all.
 - **The model gets no tools.** `/api/chat` is sent without `tools`, `format` or
-  `think`; the request type has no such fields. Replies are shown as plain text: never
-  rendered as HTML, never executed.
+  `think`; the request type has no such fields. Replies are rendered as Markdown into
+  React elements with raw HTML disabled: links and images are inert (no `href`, nothing
+  fetched), code highlighting is local JS, and nothing in a reply is executed.
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random
   32-byte key lives in the OS keychain and never reaches the webview. Without a working
   keychain the app stores nothing.
