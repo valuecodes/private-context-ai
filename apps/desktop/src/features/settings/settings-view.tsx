@@ -180,6 +180,29 @@ const SettingsView = ({ onSaved }: SettingsViewProps) => {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [errors, setErrors] = useState<Errors>(NO_ERRORS);
+  // Bumped after each save, so a new base URL lists its own models.
+  const [modelsAttempt, setModelsAttempt] = useState(0);
+
+  // Optional: Ollama may be down. A failure clears the list, so models of a
+  // previous URL are never offered.
+  useEffect(() => {
+    let cancelled = false;
+    void ollamaListModels().then(
+      (list) => {
+        if (!cancelled) {
+          setModels(list.map((model) => model.name));
+        }
+      },
+      () => {
+        if (!cancelled) {
+          setModels([]);
+        }
+      }
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [modelsAttempt]);
 
   useEffect(() => {
     let cancelled = false;
@@ -195,15 +218,7 @@ const SettingsView = ({ onSaved }: SettingsViewProps) => {
         }
       }
     );
-    // Both are optional: Ollama may be down, and the folder is decoration.
-    void ollamaListModels().then(
-      (list) => {
-        if (!cancelled) {
-          setModels(list.map((model) => model.name));
-        }
-      },
-      () => undefined
-    );
+    // The folder is decoration.
     void appInfo().then(
       (info) => {
         if (!cancelled) {
@@ -225,6 +240,7 @@ const SettingsView = ({ onSaved }: SettingsViewProps) => {
       setDraft(stored);
       setErrors(NO_ERRORS);
       setSaved(true);
+      setModelsAttempt((count) => count + 1);
       onSaved(stored);
     } catch (error: unknown) {
       const appError = toAppError(error);
