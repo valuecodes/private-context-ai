@@ -34,6 +34,12 @@ describe("Workspace", () => {
   it("renders the model picker and the composer", () => {
     expect(html).toMatch(/<select[^>]*id="model"/);
     expect(html).toMatch(/<textarea[^>]*id="composer"/);
-    expect(html).toMatch(/<button[^>]*type="submit"[^>]*disabled/);
+    expect(html).toMatch(/<button[^>]*type="submit"[^>]*aria-disabled="true"/);
+  });
+
+  it("renders the reply live region outside the views", () => {
+    expect(html).toMatch(
+      /<h1[^>]*>[^<]*<\/h1><p role="status" class="sr-only">/
+    );
   });
 });
