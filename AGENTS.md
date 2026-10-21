@@ -113,8 +113,11 @@ discussion first.
 - **No egress except Ollama on loopback.** The webview has no network (strict CSP, no
   Tauri plugins). Only Rust talks to Ollama, through `ollama/client.rs`, which refuses
   non-loopback hosts, proxies and redirects; `reqwest` has no TLS feature.
-- **The model gets no tools.** `/api/chat` is called without `tools`, `format` or
-  `think`; replies are rendered as Markdown into React elements with raw HTML disabled
+- **The model gets no tools.** `/api/chat` is called without `tools` or `format`;
+  `think` is sent only as a boolean or an advertised level, only to models whose
+  audited `/api/show` lists `thinking`, and is `false` unless the user turns it on.
+  Thinking text is stored encrypted, shown collapsed, never sent back to the model.
+  Replies are rendered as Markdown into React elements with raw HTML disabled
   (`skipHtml`, no `rehype-raw`, no `dangerouslySetInnerHTML`); links and images are
   inert (no `href`, nothing fetched) and code highlighting is local JS.
 - **Encrypted at rest.** All chat data lives in the SQLCipher database, only Rust opens

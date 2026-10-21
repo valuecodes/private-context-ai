@@ -5,10 +5,18 @@ import { stopsReply } from "~/features/chat/chat-keys";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
+import { thinkToSend } from "~/features/chat/think-choice";
+import type { ThinkChoice } from "~/features/chat/think-choice";
+import { ThinkControl } from "~/features/chat/think-control";
 import type { ChatState } from "~/features/chat/use-chat-stream";
 import { toAppError } from "~/lib/app-error";
-import { ollamaListModels } from "~/lib/ipc";
-import type { AppError, ModelInfo } from "~/lib/types";
+import { ollamaListModels, ollamaModelCapabilities } from "~/lib/ipc";
+import type {
+  AppError,
+  ModelCapabilities,
+  ModelInfo,
+  Think,
+} from "~/lib/types";
 
 const NOTICE_TEXT: Record<NonNullable<ChatState["notice"]>, string> = {
   busy: "Still answering. Stop it or wait for it to finish.",
@@ -20,21 +28,35 @@ type Models =
   | { phase: "ready"; models: ModelInfo[] }
   | { phase: "failed"; error: AppError };
 
-const modelLabel = (model: ModelInfo): string =>
-  model.parameterSize === null
-    ? model.name
-    : `${model.name} (${model.parameterSize})`;
+/** Capabilities are only known for models looked up so far. */
+const modelLabel = (
+  model: ModelInfo,
+  caps: ModelCapabilities | undefined
+): string => {
+  const name =
+    model.parameterSize === null
+      ? model.name
+      : `${model.name} (${model.parameterSize})`;
+  const tags = [
+    caps?.thinking === true ? " · thinking" : "",
+    caps?.vision === true ? " · vision" : "",
+  ];
+  return name + tags.join("");
+};
 
 type ChatViewProps = {
   reachable: boolean;
   state: ChatState;
-  send: (model: string, text: string) => boolean;
+  send: (model: string, text: string, think: Think | null) => boolean;
   stop: () => void;
   /** Owned by the parent, so opening a conversation can pick its model. */
   model: string;
   setModel: Dispatch<SetStateAction<string>>;
   /** From Settings; used when `model` is empty or not installed. */
   defaultModel: string;
+  /** Owned by the parent, so switching views keeps it. */
+  think: ThinkChoice;
+  setThink: Dispatch<SetStateAction<ThinkChoice>>;
 };
 
 const ChatView = ({
@@ -45,9 +67,15 @@ const ChatView = ({
   model,
   setModel,
   defaultModel,
+  think,
+  setThink,
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
+  // Looked up lazily, one audited `/api/show` per model.
+  const [capabilities, setCapabilities] = useState<
+    Record<string, ModelCapabilities>
+  >({});
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   // Follow new tokens unless the user has scrolled up to read.
@@ -87,6 +115,8 @@ const ChatView = ({
         (list) => {
           if (!cancelled) {
             setModels({ phase: "ready", models: list });
+            // The base URL may have changed: another Ollama, other models.
+            setCapabilities({});
           }
         },
         (error: unknown) => {
@@ -101,10 +131,34 @@ const ChatView = ({
     };
   }, [reachable, modelsAttempt]);
 
-  const modelList = models.phase === "ready" ? models.models : [];
+  // Embedding-only models cannot chat; they drop out once looked up.
+  const modelList = (models.phase === "ready" ? models.models : []).filter(
+    (info) => capabilities[info.name]?.embeddingOnly !== true
+  );
   // An opened conversation may name a model that is no longer installed.
   const selected = pickModel(modelList, model, defaultModel);
   const streaming = state.phase === "streaming";
+  const selectedCaps: ModelCapabilities | undefined = capabilities[selected];
+  const known = selectedCaps !== undefined;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (reachable && selected !== "" && !known) {
+      // A failed lookup just shows no Think control; Rust checks again on
+      // send.
+      void ollamaModelCapabilities(selected).then(
+        (caps) => {
+          if (!cancelled) {
+            setCapabilities((current) => ({ ...current, [selected]: caps }));
+          }
+        },
+        () => undefined
+      );
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [reachable, selected, known]);
 
   // Esc stops the reply wherever focus is, not only in the composer.
   useEffect(() => {
@@ -143,10 +197,17 @@ const ChatView = ({
           {modelList.length === 0 && <option value="">No models</option>}
           {modelList.map((info) => (
             <option key={info.name} value={info.name}>
-              {modelLabel(info)}
+              {modelLabel(info, capabilities[info.name])}
             </option>
           ))}
         </select>
+        {selectedCaps !== undefined && (
+          <ThinkControl
+            caps={selectedCaps}
+            choice={think}
+            onChange={setThink}
+          />
+        )}
         {models.phase === "failed" && (
           <>
             <span className="text-xs text-red-600 dark:text-red-400">
@@ -205,7 +266,9 @@ const ChatView = ({
         <Composer
           streaming={streaming}
           canSend={selected !== "" && !state.loading}
-          onSend={(text) => send(selected, text)}
+          onSend={(text) =>
+            send(selected, text, thinkToSend(selectedCaps, think))
+          }
           onStop={stop}
         />
       </div>

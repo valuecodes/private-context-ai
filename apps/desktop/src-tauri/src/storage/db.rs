@@ -52,7 +52,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -147,6 +147,35 @@ mod tests {
                 ("b".to_owned(), "complete".to_owned())
             ]
         );
+    }
+
+    #[test]
+    fn version_one_db_gains_thinking_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the first release wrote.
+        conn.execute_batch(
+            "ALTER TABLE messages DROP COLUMN thinking;
+             ALTER TABLE messages DROP COLUMN thinking_ms;
+             PRAGMA user_version = 1;
+             INSERT INTO conversations VALUES ('c', 't', 'm', 'x', 'x');
+             INSERT INTO messages (id, conversation_id, role, content, created_at, status)
+               VALUES ('a', 'c', 'assistant', 'old', 'x', 'complete');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let row: (String, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT content, thinking, thinking_ms FROM messages WHERE id = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("old".to_owned(), None, None));
     }
 
     #[test]

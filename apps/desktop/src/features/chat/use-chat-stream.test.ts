@@ -30,6 +30,8 @@ const stored = (
   promptTokens: null,
   completionTokens: null,
   durationMs: null,
+  thinking: null,
+  thinkingMs: null,
 });
 
 const event = (
@@ -37,7 +39,7 @@ const event = (
   chatEvent: ChatEvent,
   streamId = "s1"
 ): ChatState =>
-  chatReducer(state, { type: "event", streamId, event: chatEvent });
+  chatReducer(state, { type: "event", streamId, event: chatEvent, at: 0 });
 
 const done = (doneReason: string | null = "stop"): ChatEvent => ({
   type: "done",
@@ -45,6 +47,7 @@ const done = (doneReason: string | null = "stop"): ChatEvent => ({
   completionTokens: 2,
   durationMs: 3,
   doneReason,
+  thinkingMs: null,
 });
 
 describe("chatReducer", () => {

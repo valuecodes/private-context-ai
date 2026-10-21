@@ -2,6 +2,7 @@ import { Check, Copy } from "lucide-react";
 import { memo, useDeferredValue, useState } from "react";
 
 import { Markdown } from "~/features/chat/markdown";
+import { ThinkingBlock } from "~/features/chat/thinking-block";
 import { TypingIndicator } from "~/features/chat/typing-indicator";
 import type { UiMessage } from "~/features/chat/use-chat-stream";
 import { copyText } from "~/lib/clipboard";
@@ -49,18 +50,36 @@ const CopyMessage = ({ text }: { text: string }) => {
  */
 const STREAM_MARKDOWN_MAX_CHARS = 16 * 1024;
 
-const AssistantReply = ({ message }: { message: UiMessage }) => {
+const ReplyText = ({ message }: { message: UiMessage }) => {
   // Re-parsing the Markdown on every token is low priority: React drops
   // stale values, so a short reply never blocks typing or Stop.
   const text = useDeferredValue(message.content);
   const streaming = message.status === "streaming";
   if (streaming && message.content === "") {
-    return <TypingIndicator />;
+    // The thinking block already shows that the model is working.
+    return (message.thinking ?? "") === "" ? <TypingIndicator /> : null;
   }
   if (streaming && text.length > STREAM_MARKDOWN_MAX_CHARS) {
     return <p className="whitespace-pre-wrap">{text}</p>;
   }
   return <Markdown text={text} highlight={!streaming} />;
+};
+
+const AssistantReply = ({ message }: { message: UiMessage }) => {
+  const thinking = message.thinking ?? "";
+  const streaming = message.status === "streaming";
+  return (
+    <>
+      {thinking !== "" && (
+        <ThinkingBlock
+          text={thinking}
+          ms={message.thinkingMs ?? null}
+          active={streaming && message.content === ""}
+        />
+      )}
+      <ReplyText message={message} />
+    </>
+  );
 };
 
 /**
@@ -70,6 +89,7 @@ const AssistantReply = ({ message }: { message: UiMessage }) => {
 const MessageItem = memo(({ message }: { message: UiMessage }) => {
   const note = STATUS_NOTE[message.status];
   const user = message.role === "user";
+  // No copy button until there is an answer to copy; thinking is not copied.
   const waiting = message.status === "streaming" && message.content === "";
   return (
     <li

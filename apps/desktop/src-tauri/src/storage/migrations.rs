@@ -6,7 +6,10 @@ use rusqlite_migration::{Error, M, MigrationDefinitionError, Migrations};
 use crate::error::AppError;
 
 /// Append-only: never edit a migration that has shipped.
-const STEPS: &[M<'static>] = &[M::up(include_str!("schema.sql"))];
+const STEPS: &[M<'static>] = &[
+    M::up(include_str!("schema.sql")),
+    M::up(include_str!("migrations/0002_thinking.sql")),
+];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(STEPS);
 
 /// Brings the schema up to date in one transaction. A database written by a

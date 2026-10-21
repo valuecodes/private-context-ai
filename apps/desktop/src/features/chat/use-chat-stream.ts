@@ -13,6 +13,7 @@ import type {
   Conversation,
   RequestId,
   StoredMessage,
+  Think,
 } from "~/lib/types";
 
 type MessageStatus = "complete" | "streaming" | "cancelled" | "error";
@@ -22,6 +23,12 @@ type UiMessage = {
   role: "user" | "assistant";
   content: string;
   status: MessageStatus;
+  /** The model's reasoning, when it sent any. */
+  thinking?: string;
+  /** How long it thought before answering; null when not known. */
+  thinkingMs?: number | null;
+  /** When the first thinking chunk arrived, while it streams. */
+  thinkingStartedAt?: number;
 };
 
 /** `busy`: a send while a reply streams. `length`: the reply was cut off. */
@@ -48,7 +55,8 @@ type ChatAction =
   | { type: "send"; streamId: string; text: string }
   | { type: "created"; streamId: string; conversationId: string }
   | { type: "started"; streamId: string; requestId: RequestId }
-  | { type: "event"; streamId: string; event: ChatEvent }
+  /** `at`: when the event arrived, in ms, so the reducer stays pure. */
+  | { type: "event"; streamId: string; event: ChatEvent; at: number }
   | { type: "cancel" }
   | { type: "failed"; streamId: string; error: AppError }
   | { type: "deleted"; conversationId: string };
@@ -101,18 +109,26 @@ const updateMessage = (
 
 /** Saved messages as bubbles. A `pending` row shows as still streaming. */
 const fromStored = (messages: StoredMessage[]): UiMessage[] =>
-  messages.flatMap((message) =>
-    message.role === "system"
-      ? []
+  messages.flatMap((message): UiMessage[] => {
+    if (message.role === "system") {
+      return [];
+    }
+    const bubble: UiMessage = {
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      status: message.status === "pending" ? "streaming" : message.status,
+    };
+    return message.thinking === null || message.thinking === ""
+      ? [bubble]
       : [
           {
-            id: message.id,
-            role: message.role,
-            content: message.content,
-            status: message.status === "pending" ? "streaming" : message.status,
+            ...bubble,
+            thinking: message.thinking,
+            thinkingMs: message.thinkingMs,
           },
-        ]
-  );
+        ];
+  });
 
 const TITLE_CHARS = 60;
 
@@ -155,25 +171,51 @@ const finishStream = (
   };
 };
 
-const applyEvent = (state: ChatState, event: ChatEvent): ChatState => {
-  if (state.streamId === null) {
+/** The thinking time once the answer starts, if it was not known yet. */
+const thoughtFor = (message: UiMessage, at: number): number | null => {
+  if (message.thinkingMs !== undefined && message.thinkingMs !== null) {
+    return message.thinkingMs;
+  }
+  return message.thinkingStartedAt === undefined
+    ? null
+    : at - message.thinkingStartedAt;
+};
+
+const applyEvent = (
+  state: ChatState,
+  event: ChatEvent,
+  at: number
+): ChatState => {
+  const { streamId } = state;
+  if (streamId === null) {
     return state;
   }
+  const update = (change: (message: UiMessage) => UiMessage): ChatState => ({
+    ...state,
+    messages: updateMessage(state.messages, assistantId(streamId), change),
+  });
+  if (event.type === "thinking") {
+    return update((message) => ({
+      ...message,
+      thinking: (message.thinking ?? "") + event.content,
+      thinkingStartedAt: message.thinkingStartedAt ?? at,
+    }));
+  }
   if (event.type === "token") {
-    return {
-      ...state,
-      messages: updateMessage(
-        state.messages,
-        assistantId(state.streamId),
-        (message) => ({
-          ...message,
-          content: message.content + event.content,
-        })
-      ),
-    };
+    return update((message) => ({
+      ...message,
+      content: message.content + event.content,
+      ...(message.thinking === undefined
+        ? {}
+        : { thinkingMs: thoughtFor(message, at) }),
+    }));
   }
   if (event.type === "done") {
-    return finishStream(state, "complete", {
+    const finished =
+      event.thinkingMs === null
+        ? state
+        : update((message) => ({ ...message, thinkingMs: event.thinkingMs }));
+    return finishStream(finished, "complete", {
       notice: event.doneReason === "length" ? "length" : null,
     });
   }
@@ -285,7 +327,7 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
     return { ...state, requestId: action.requestId };
   }
   if (action.type === "event") {
-    return applyEvent(state, action.event);
+    return applyEvent(state, action.event, action.at);
   }
   return failSend(state, action.streamId, action.error);
 };
@@ -347,14 +389,14 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
    * Returns `false` when the send was refused because a reply streams or the
    * conversation is still loading.
    */
-  const send = (model: string, text: string): boolean => {
+  const send = (model: string, text: string, think: Think | null): boolean => {
     const streamId = newStreamId();
     dispatch({ type: "send", streamId, text });
     if (state.phase === "streaming" || state.loading) {
       return false;
     }
     const onEvent = (event: ChatEvent) => {
-      dispatch({ type: "event", streamId, event });
+      dispatch({ type: "event", streamId, event, at: Date.now() });
     };
     const saved = state.conversationId;
     const conversationId: Promise<string> =
@@ -368,12 +410,13 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     const requestId = cancelling.current
       .then(() => conversationId)
       .then((id) =>
-        chatSend({ conversationId: id, model, prompt: text }, onEvent).then(
-          (request) => {
-            onStarted(id, model);
-            return request;
-          }
-        )
+        chatSend(
+          { conversationId: id, model, prompt: text, think },
+          onEvent
+        ).then((request) => {
+          onStarted(id, model);
+          return request;
+        })
       )
       .then(
         (id) => {

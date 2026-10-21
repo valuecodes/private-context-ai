@@ -4,8 +4,8 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 
 use crate::error::AppError;
@@ -19,6 +19,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Cap for small JSON responses (`/api/version`, `/api/tags`).
 pub const MAX_JSON_BODY: usize = 1024 * 1024;
+
+/// Cap for `/api/show`, which carries the model's license and template.
+pub const MAX_SHOW_BODY: usize = 4 * 1024 * 1024;
 
 /// Cap for an error response body read for its `error` field.
 pub const MAX_ERROR_BODY: usize = 64 * 1024;
@@ -177,17 +180,46 @@ pub async fn get_json<T: DeserializeOwned>(
     url: Url,
     timeout: Duration,
 ) -> (Option<u16>, Result<T, AppError>) {
+    fetch_json(http.get(url), timeout, MAX_JSON_BODY).await
+}
+
+/// POSTs `body` as JSON and reads a JSON reply of at most `max` bytes, like
+/// [`get_json`].
+pub async fn post_json<T: DeserializeOwned>(
+    http: &reqwest::Client,
+    url: Url,
+    body: &impl Serialize,
+    timeout: Duration,
+    max: usize,
+) -> (Option<u16>, Result<T, AppError>) {
+    let body = match serde_json::to_vec(body) {
+        Ok(body) => body,
+        Err(err) => {
+            return (
+                None,
+                Err(AppError::Internal(format!("request body: {err}"))),
+            );
+        }
+    };
+    let request = http
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body);
+    fetch_json(request, timeout, max).await
+}
+
+async fn fetch_json<T: DeserializeOwned>(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+    max: usize,
+) -> (Option<u16>, Result<T, AppError>) {
     let mut status = None;
     let request = async {
-        let mut resp = http
-            .get(url)
-            .send()
-            .await
-            .map_err(|err| map_reqwest(&err))?;
+        let mut resp = request.send().await.map_err(|err| map_reqwest(&err))?;
         let code = resp.status();
         status = Some(code.as_u16());
         let limit = if code.is_success() {
-            MAX_JSON_BODY
+            max
         } else {
             MAX_ERROR_BODY
         };

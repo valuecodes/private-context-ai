@@ -15,11 +15,11 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use self::client::{OllamaBaseUrl, build_http, get_json};
+use self::client::{MAX_SHOW_BODY, OllamaBaseUrl, build_http, get_json, post_json};
 use self::stream::{ChatEnd, run_chat};
 use self::types::{
-    ChatEvent, ChatMessage, ChatOptions, ChatRequest, ModelInfo, OllamaStatus, TagsResponse,
-    VersionResponse, validate_chat_input,
+    ChatEvent, ChatMessage, ChatOptions, ChatRequest, ModelCapabilities, ModelInfo, OllamaStatus,
+    ShowResponse, TagsResponse, Think, VersionResponse, validate_chat_input, validate_model,
 };
 use crate::audit::{Audit, AuditId, AuditOutcome, AuditStatus, NewAuditEvent};
 use crate::error::AppError;
@@ -27,6 +27,11 @@ use crate::error::AppError;
 const MIB: usize = 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 const TAGS_TIMEOUT: Duration = Duration::from_secs(10);
+const SHOW_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Capabilities by (`host:port`, model), so a lookup is one audit row per
+/// model and Ollama.
+type CapabilityCache = Mutex<HashMap<(String, String), ModelCapabilities>>;
 
 /// Timeouts and size caps for chat requests.
 #[derive(Debug, Clone)]
@@ -188,6 +193,7 @@ pub struct Ollama {
     inflight: Inflight,
     audit: Arc<Audit>,
     limits: Limits,
+    capabilities: CapabilityCache,
 }
 
 impl Ollama {
@@ -205,7 +211,15 @@ impl Ollama {
             inflight: Arc::default(),
             audit,
             limits,
+            capabilities: Mutex::default(),
         }
+    }
+
+    fn capability_cache(&self) -> MutexGuard<'_, HashMap<(String, String), ModelCapabilities>> {
+        // Every critical section is one map operation.
+        self.capabilities
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn connection(&self) -> Arc<Connection> {
@@ -227,6 +241,8 @@ impl Ollama {
             .connection
             .write()
             .unwrap_or_else(PoisonError::into_inner) = connection;
+        // The same host may now be a different Ollama with other models.
+        self.capability_cache().clear();
     }
 
     /// `reachable: false` when nothing answers; an error only for a rejected
@@ -266,6 +282,35 @@ impl Ollama {
                 .await;
         tracked.finish(result_outcome(&result, http_status));
         Ok(result?.models.into_iter().map(ModelInfo::from).collect())
+    }
+
+    /// What `model` can do, from an audited `/api/show`. Successful lookups
+    /// are cached per base URL, so only the first costs a request.
+    pub async fn model_capabilities(&self, model: &str) -> Result<ModelCapabilities, AppError> {
+        validate_model(model)?;
+        let connection = self.connection();
+        let (base, http) = connection.get()?;
+        let key = (base.host_port(), model.to_owned());
+        if let Some(cached) = self.capability_cache().get(&key) {
+            return Ok(cached.clone());
+        }
+        let tracked = Tracked::begin(&self.audit, "ollama.show", base, "/api/show", Some(model))?;
+        let (http_status, result) = post_json::<ShowResponse>(
+            http,
+            base.endpoint("/api/show"),
+            &serde_json::json!({ "model": model }),
+            SHOW_TIMEOUT,
+            MAX_SHOW_BODY,
+        )
+        .instrument(tracked.span.clone())
+        .await;
+        tracked.finish(result_outcome(&result, http_status));
+        let caps = ModelCapabilities::from_show(model, &result?);
+        // A base URL switched during the lookup must not get this answer.
+        if Arc::ptr_eq(&connection, &self.connection()) {
+            self.capability_cache().insert(key, caps.clone());
+        }
+        Ok(caps)
     }
 
     /// Checks a request against this client's limits, before any socket is
@@ -335,6 +380,7 @@ impl Ollama {
         model: &str,
         messages: &[ChatMessage],
         options: Option<&ChatOptions>,
+        think: Option<Think>,
     ) -> Result<(reqwest::Client, url::Url, Vec<u8>, Tracked), AppError> {
         let connection = self.connection();
         let (base, http) = connection.get()?;
@@ -343,6 +389,7 @@ impl Ollama {
             messages,
             stream: true,
             options,
+            think,
         })
         .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
         let tracked = Tracked::begin(&self.audit, "ollama.chat", base, "/api/chat", Some(model))?;
@@ -353,13 +400,15 @@ impl Ollama {
     /// admitted request and returns its id. `on_end` runs exactly once, on
     /// every path, before the outcome is written. A request cancelled while
     /// admitted ends at once as `Cancelled`. Must be called inside a tokio
-    /// runtime.
+    /// runtime. `think` must already be resolved for the model.
+    #[allow(clippy::too_many_arguments)]
     pub fn start<F, E>(
         self: &Arc<Self>,
         admission: Admission,
         model: &str,
         messages: &[ChatMessage],
         options: Option<&ChatOptions>,
+        think: Option<Think>,
         sink: F,
         on_end: E,
     ) -> Result<Uuid, AppError>
@@ -367,7 +416,7 @@ impl Ollama {
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
         E: FnOnce(&ChatEnd) + Send + 'static,
     {
-        let (http, url, body, tracked) = match self.prepare_chat(model, messages, options) {
+        let (http, url, body, tracked) = match self.prepare_chat(model, messages, options, think) {
             Ok(prepared) => prepared,
             Err(err) => {
                 on_end(&ChatEnd::Failed(err.clone()));
@@ -489,9 +538,13 @@ mod tests {
         Endless(&'static str),
     }
 
+    type Bodies = Arc<Mutex<Vec<serde_json::Value>>>;
+
     struct Fake {
         addr: SocketAddr,
         accepted: Arc<AtomicUsize>,
+        /// Every JSON request body received, in order.
+        bodies: Bodies,
     }
 
     async fn fake_ollama(reply: Reply) -> Fake {
@@ -499,17 +552,23 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let accepted = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&accepted);
+        let bodies = Bodies::default();
+        let received = Arc::clone(&bodies);
         tokio::spawn(async move {
             while let Ok((socket, _)) = listener.accept().await {
                 counter.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(serve(socket, reply.clone()));
+                tokio::spawn(serve(socket, reply.clone(), Arc::clone(&received)));
             }
         });
-        Fake { addr, accepted }
+        Fake {
+            addr,
+            accepted,
+            bodies,
+        }
     }
 
     /// Reads one request (headers plus `content-length` body), then answers.
-    async fn serve(mut socket: TcpStream, reply: Reply) {
+    async fn serve(mut socket: TcpStream, reply: Reply, bodies: Bodies) {
         let mut request = Vec::new();
         let mut buf = [0u8; 4096];
         let body_start = loop {
@@ -534,6 +593,9 @@ mod tests {
                 Ok(0) | Err(_) => return,
                 Ok(n) => request.extend_from_slice(&buf[..n]),
             }
+        }
+        if let Ok(body) = serde_json::from_slice(&request[body_start..]) {
+            bodies.lock().unwrap().push(body);
         }
 
         let head = |status: u16| {
@@ -656,13 +718,34 @@ mod tests {
     where
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
     {
+        send_thinking(ollama, conversation, None, sink, ends)
+    }
+
+    fn send_thinking<F>(
+        ollama: &Arc<Ollama>,
+        conversation: Uuid,
+        think: Option<Think>,
+        sink: F,
+        ends: &Ends,
+    ) -> Result<Uuid, AppError>
+    where
+        F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
+    {
         let messages = prompt();
         ollama.validate("llama3.2", &messages, None)?;
         let admission = ollama.admit(conversation)?;
         let ends = Arc::clone(ends);
-        ollama.start(admission, "llama3.2", &messages, None, sink, move |end| {
-            ends.lock().unwrap().push(clone_end(end));
-        })
+        ollama.start(
+            admission,
+            "llama3.2",
+            &messages,
+            None,
+            think,
+            sink,
+            move |end| {
+                ends.lock().unwrap().push(clone_end(end));
+            },
+        )
     }
 
     fn send<F>(ollama: &Arc<Ollama>, conversation: Uuid, sink: F) -> Result<Uuid, AppError>
@@ -678,10 +761,12 @@ mod tests {
                 prompt_tokens,
                 completion_tokens,
                 duration_ms,
+                thinking_ms,
             } => ChatEnd::Done {
                 prompt_tokens: *prompt_tokens,
                 completion_tokens: *completion_tokens,
                 duration_ms: *duration_ms,
+                thinking_ms: *thinking_ms,
             },
             ChatEnd::Cancelled => ChatEnd::Cancelled,
             ChatEnd::Failed(error) => ChatEnd::Failed(error.clone()),
@@ -748,9 +833,159 @@ mod tests {
                     completion_tokens: Some(2),
                     duration_ms: Some(5),
                     done_reason: Some("stop".into()),
+                    thinking_ms: None,
                 },
             ]
         );
+    }
+
+    const THINK_A: &str =
+        r#"{"message":{"role":"assistant","content":"","thinking":"Let me"},"done":false}"#;
+    const THINK_B: &str =
+        r#"{"message":{"role":"assistant","content":"","thinking":" see"},"done":false}"#;
+
+    #[tokio::test]
+    async fn streams_thinking_then_tokens() {
+        let fake = fake_ollama(Reply::Lines(
+            vec![THINK_A, THINK_B, HEL, DONE],
+            Duration::from_millis(20),
+        ))
+        .await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let (events, sink) = collector();
+
+        send(&ollama, Uuid::new_v4(), sink).unwrap();
+        wait_idle(&ollama).await;
+
+        let events = snapshot(&events);
+        assert_eq!(
+            events[..3],
+            [
+                ChatEvent::Thinking {
+                    content: Redacted::new("Let me"),
+                },
+                ChatEvent::Thinking {
+                    content: Redacted::new(" see"),
+                },
+                token("Hel"),
+            ]
+        );
+        let Some(ChatEvent::Done {
+            thinking_ms: Some(ms),
+            ..
+        }) = events.last()
+        else {
+            panic!("expected done with thinking_ms, got {events:?}");
+        };
+        // Two 20 ms gaps: the second thought and the first token.
+        assert!(*ms >= 30, "{ms}");
+    }
+
+    #[tokio::test]
+    async fn thinking_counts_toward_content_limit() {
+        let fake = fake_ollama(Reply::Endless(
+            "{\"message\":{\"content\":\"\",\"thinking\":\"abcdefgh\"},\"done\":false}\n",
+        ))
+        .await;
+        let limits = Limits {
+            max_stream_bytes: MIB,
+            ..test_limits()
+        };
+        let (ollama, _) = ollama_at(fake.addr, limits);
+        let (events, sink) = collector();
+
+        send(&ollama, Uuid::new_v4(), sink).unwrap();
+        wait_idle(&ollama).await;
+
+        assert!(matches!(last_error(&events), AppError::TooLarge(_)));
+        let thoughts = snapshot(&events)
+            .iter()
+            .filter(|event| matches!(event, ChatEvent::Thinking { .. }))
+            .count();
+        assert_eq!(thoughts, 8, "64 content bytes is eight 8-byte thoughts");
+    }
+
+    #[tokio::test]
+    async fn chat_request_body_carries_think() {
+        let fake = fake_ollama(Reply::Lines(vec![DONE], Duration::ZERO)).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let ends = Ends::default();
+
+        send_thinking(
+            &ollama,
+            Uuid::new_v4(),
+            Some(Think::Enabled(false)),
+            |_| true,
+            &ends,
+        )
+        .unwrap();
+        wait_idle(&ollama).await;
+        send_thinking(&ollama, Uuid::new_v4(), None, |_| true, &ends).unwrap();
+        wait_idle(&ollama).await;
+
+        let bodies = fake.bodies.lock().unwrap().clone();
+        let [off, absent] = bodies.as_slice() else {
+            panic!("expected two requests, got {bodies:?}");
+        };
+        assert_eq!(off["think"], serde_json::json!(false));
+        assert!(absent.get("think").is_none());
+        for body in &bodies {
+            assert!(body.get("tools").is_none());
+            assert!(body.get("format").is_none());
+        }
+    }
+
+    const SHOW_QWEN3: &str = r#"{"license":"Apache","template":"{{ .Prompt }}","details":{"family":"qwen3"},"capabilities":["completion","tools","thinking"],"thinking":{"values":[true,false],"default":true}}"#;
+
+    #[tokio::test]
+    async fn model_capabilities_audited_once_and_cached() {
+        let fake = fake_ollama(Reply::Json(SHOW_QWEN3)).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+
+        let caps = ollama.model_capabilities("qwen3:8b").await.unwrap();
+        assert!(caps.thinking);
+        assert_eq!(caps.think_style, types::ThinkStyle::Bool);
+        let again = ollama.model_capabilities("qwen3:8b").await.unwrap();
+        assert_eq!(again, caps);
+
+        let events = log.all();
+        let [event] = events.as_slice() else {
+            panic!("expected one audit event, got {events:?}");
+        };
+        assert_eq!(event.kind, "ollama.show");
+        assert_eq!(event.endpoint.as_deref(), Some("/api/show"));
+        assert_eq!(event.model.as_deref(), Some("qwen3:8b"));
+        assert_eq!(event.status, AuditStatus::Ok);
+        assert_eq!(fake.accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            fake.bodies.lock().unwrap().as_slice(),
+            [serde_json::json!({ "model": "qwen3:8b" })]
+        );
+
+        // A new base URL, even the same one, forgets what was learned.
+        ollama.set_base_url(OllamaBaseUrl::parse(&format!("http://{}", fake.addr)));
+        ollama.model_capabilities("qwen3:8b").await.unwrap();
+        assert_eq!(log.all().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn model_capabilities_failure_is_not_cached() {
+        let fake = fake_ollama(Reply::Status(404, r#"{"error":"model not found"}"#)).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+
+        for _ in 0..2 {
+            assert_eq!(
+                ollama.model_capabilities("missing").await,
+                Err(AppError::Ollama("HTTP 404: model not found".into()))
+            );
+        }
+        assert_eq!(log.all().len(), 2);
+        assert_eq!(log.last().status, AuditStatus::Error);
+        assert!(matches!(
+            ollama.model_capabilities("bad\nname").await,
+            Err(AppError::InvalidInput(_))
+        ));
+        assert_eq!(log.all().len(), 2);
     }
 
     #[tokio::test]
@@ -1086,7 +1321,7 @@ mod tests {
     #[tokio::test]
     async fn endless_empty_chunks_trip_stream_byte_limit() {
         let fake = fake_ollama(Reply::Endless(
-            "{\"message\":{\"content\":\"\",\"thinking\":\"hm\"},\"done\":false}\n",
+            "{\"message\":{\"content\":\"\",\"thinking\":\"\"},\"done\":false}\n",
         ))
         .await;
         let (ollama, _) = ollama_at(fake.addr, test_limits());
@@ -1140,6 +1375,7 @@ mod tests {
                 prompt_tokens: Some(3),
                 completion_tokens: Some(2),
                 duration_ms: Some(5),
+                thinking_ms: None,
             }]
         ));
 
@@ -1207,7 +1443,7 @@ mod tests {
         }
         let recorded = Arc::clone(&ends);
         ollama
-            .start(admission, "m", &prompt(), None, sink, move |end| {
+            .start(admission, "m", &prompt(), None, None, sink, move |end| {
                 recorded.lock().unwrap().push(clone_end(end));
             })
             .unwrap();

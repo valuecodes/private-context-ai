@@ -8,12 +8,14 @@ import type {
   ChatEvent,
   Conversation,
   ConversationWithMessages,
+  ModelCapabilities,
   ModelInfo,
   OllamaStatus,
   RequestId,
   Settings,
   SettingsPatch,
   StorageStatus,
+  Think,
 } from "~/lib/types";
 
 const appInfo = (): Promise<AppInfo> => invoke<AppInfo>("app_info");
@@ -26,6 +28,10 @@ const ollamaStatus = (): Promise<OllamaStatus> =>
 
 const ollamaListModels = (): Promise<ModelInfo[]> =>
   invoke<ModelInfo[]>("ollama_list_models");
+
+/** Audited once per model; Rust caches the answer. */
+const ollamaModelCapabilities = (model: string): Promise<ModelCapabilities> =>
+  invoke<ModelCapabilities>("ollama_model_capabilities", { model });
 
 const conversationCreate = (
   title: string | null,
@@ -49,6 +55,8 @@ type ChatSendArgs = {
   conversationId: string;
   model: string;
   prompt: string;
+  /** What the user picked; Rust decides what the model is actually sent. */
+  think: Think | null;
 };
 
 /**
@@ -57,7 +65,7 @@ type ChatSendArgs = {
  * resolves. Rust builds the history from the saved conversation.
  */
 const chatSend = (
-  { conversationId, model, prompt }: ChatSendArgs,
+  { conversationId, model, prompt, think }: ChatSendArgs,
   onEvent: (event: ChatEvent) => void
 ): Promise<RequestId> => {
   const channel = new Channel<ChatEvent>(onEvent);
@@ -65,6 +73,7 @@ const chatSend = (
     conversationId,
     model,
     prompt,
+    think,
     onEvent: channel,
   });
 };
@@ -100,6 +109,7 @@ export {
   conversationList,
   conversationRename,
   ollamaListModels,
+  ollamaModelCapabilities,
   ollamaStatus,
   settingsGet,
   settingsSet,

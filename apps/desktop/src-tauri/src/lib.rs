@@ -123,6 +123,7 @@ pub fn run() {
             app_info,
             commands::ollama::ollama_status,
             commands::ollama::ollama_list_models,
+            commands::ollama::ollama_model_capabilities,
             commands::ollama::chat_send,
             commands::ollama::chat_cancel,
             commands::conversations::storage_status,

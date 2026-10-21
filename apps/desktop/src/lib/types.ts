@@ -47,6 +47,31 @@ type ModelInfo = {
   parameterSize: string | null;
 };
 
+type ThinkLevel = "low" | "medium" | "high";
+
+/** Ollama's `think`: on/off, or a level for models that take one. */
+type Think = boolean | ThinkLevel;
+
+/** How a thinking model is switched. */
+type ThinkStyle =
+  | { kind: "bool" }
+  | {
+      kind: "levels";
+      levels: ThinkLevel[];
+      default: ThinkLevel;
+      /** `false` turns thinking off; models that always think refuse it. */
+      canDisable: boolean;
+    };
+
+/** What `ollama_model_capabilities` returns, from an audited `/api/show`. */
+type ModelCapabilities = {
+  thinking: boolean;
+  vision: boolean;
+  tools: boolean;
+  embeddingOnly: boolean;
+  thinkStyle: ThinkStyle;
+};
+
 type ChatRole = "system" | "user" | "assistant";
 
 /** A saved conversation, without its messages. */
@@ -71,6 +96,9 @@ type StoredMessage = {
   promptTokens: number | null;
   completionTokens: number | null;
   durationMs: number | null;
+  /** The model's reasoning; never sent back to it. */
+  thinking: string | null;
+  thinkingMs: number | null;
 };
 
 /** What the `conversation_get` command returns. */
@@ -82,12 +110,15 @@ type ConversationWithMessages = {
 /** Streamed by `chat_send` over its channel. */
 type ChatEvent =
   | { type: "token"; content: string }
+  | { type: "thinking"; content: string }
   | {
       type: "done";
       promptTokens: number | null;
       completionTokens: number | null;
       durationMs: number | null;
       doneReason: string | null;
+      /** From the first thinking chunk to the first answer chunk. */
+      thinkingMs: number | null;
     }
   | { type: "error"; error: AppError };
 
@@ -102,7 +133,10 @@ type AuditEvent = {
   id: number;
   /** ISO-8601 UTC. */
   at: string;
-  /** `ollama.chat`, `ollama.tags`, `ollama.version`, `app.start`, `db.open`. */
+  /**
+   * `ollama.chat`, `ollama.show`, `ollama.tags`, `ollama.version`,
+   * `app.start`, `db.open`.
+   */
   kind: string;
   /** `host:port`; null for lifecycle events. */
   host: string | null;
@@ -137,6 +171,7 @@ export type {
   Conversation,
   ConversationWithMessages,
   LogLevel,
+  ModelCapabilities,
   ModelInfo,
   OllamaStatus,
   RequestId,
@@ -144,4 +179,7 @@ export type {
   SettingsPatch,
   StorageStatus,
   StoredMessage,
+  Think,
+  ThinkLevel,
+  ThinkStyle,
 };

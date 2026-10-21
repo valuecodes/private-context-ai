@@ -80,6 +80,7 @@ pub enum ChatEnd {
         prompt_tokens: Option<u64>,
         completion_tokens: Option<u64>,
         duration_ms: Option<u64>,
+        thinking_ms: Option<u64>,
     },
     Cancelled,
     Failed(AppError),
@@ -109,6 +110,33 @@ pub async fn run_chat(
         Err(err) => ChatEnd::Failed(err),
     };
     ChatRun { http_status, end }
+}
+
+/// How long the model thought: from its first thinking chunk to its first
+/// answer chunk, or to the end when no answer came.
+#[derive(Debug, Default)]
+struct ThinkingClock {
+    started: Option<Instant>,
+    took: Option<std::time::Duration>,
+}
+
+impl ThinkingClock {
+    fn thought(&mut self) {
+        if self.started.is_none() {
+            self.started = Some(Instant::now());
+        }
+    }
+
+    fn answered(&mut self) {
+        if let (Some(started), None) = (self.started, self.took) {
+            self.took = Some(started.elapsed());
+        }
+    }
+
+    fn ms(&self) -> Option<u64> {
+        self.took
+            .map(|took| u64::try_from(took.as_millis()).unwrap_or(u64::MAX))
+    }
 }
 
 enum Step<T> {
@@ -185,7 +213,9 @@ async fn stream_reply(
 
     let mut decoder = NdjsonDecoder::new(limits.max_line_bytes);
     let mut received = 0usize;
+    // Answer and thinking bytes together, against `max_content_bytes`.
     let mut content = 0usize;
+    let mut thinking = ThinkingClock::default();
     let mut deadline = first_deadline;
     loop {
         let chunk = match step(cancel, deadline, resp.chunk()).await? {
@@ -212,9 +242,12 @@ async fn stream_reply(
             if let Some(error) = line.error {
                 return Err(AppError::Ollama(truncate(&error, MAX_ERROR_CHARS)));
             }
-            if let Some(text) = line.message.and_then(|message| message.content)
-                && !text.is_empty()
-            {
+            let message = line.message.unwrap_or_default();
+            // Thinking comes first: within one line it precedes the answer.
+            for (text, is_thinking) in [(message.thinking, true), (message.content, false)] {
+                let Some(text) = text.filter(|text| !text.is_empty()) else {
+                    continue;
+                };
                 content += text.len_bytes();
                 if content > limits.max_content_bytes {
                     return Err(AppError::TooLarge(format!(
@@ -222,17 +255,27 @@ async fn stream_reply(
                         limits.max_content_bytes
                     )));
                 }
-                if !emit_checked(cancel, emit, ChatEvent::Token { content: text }) {
+                let event = if is_thinking {
+                    thinking.thought();
+                    ChatEvent::Thinking { content: text }
+                } else {
+                    thinking.answered();
+                    ChatEvent::Token { content: text }
+                };
+                if !emit_checked(cancel, emit, event) {
                     return Ok(ChatEnd::Cancelled);
                 }
             }
             if line.done {
                 let duration_ms = line.total_duration.map(|nanos| nanos / 1_000_000);
+                thinking.answered();
+                let thinking_ms = thinking.ms();
                 let done = ChatEvent::Done {
                     prompt_tokens: line.prompt_eval_count,
                     completion_tokens: line.eval_count,
                     duration_ms,
                     done_reason: line.done_reason,
+                    thinking_ms,
                 };
                 // The reply is complete either way; a closed receiver only
                 // means nobody sees the summary.
@@ -241,6 +284,7 @@ async fn stream_reply(
                     prompt_tokens: line.prompt_eval_count,
                     completion_tokens: line.eval_count,
                     duration_ms,
+                    thinking_ms,
                 });
             }
         }
@@ -293,22 +337,17 @@ mod tests {
     }
 
     #[test]
-    fn decoder_ignores_thinking() {
+    fn decoder_reads_thinking() {
         let mut decoder = NdjsonDecoder::new(1024);
         let lines = decoder
             .push(b"{\"message\":{\"role\":\"assistant\",\"content\":\"\",\"thinking\":\"hmm\"},\"done\":false}\n")
             .unwrap();
-        assert_eq!(lines.len(), 1);
-        assert!(
-            lines[0]
-                .message
-                .as_ref()
-                .unwrap()
-                .content
-                .as_ref()
-                .unwrap()
-                .is_empty()
-        );
+        let [line] = lines.as_slice() else {
+            panic!("expected one line");
+        };
+        let message = line.message.as_ref().unwrap();
+        assert!(message.content.as_ref().unwrap().is_empty());
+        assert_eq!(message.thinking.as_ref().unwrap().expose(), "hmm");
     }
 
     #[test]

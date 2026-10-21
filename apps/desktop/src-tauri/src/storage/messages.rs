@@ -55,6 +55,9 @@ pub struct StoredMessage {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// The model's reasoning; shown collapsed, never part of the history.
+    pub thinking: Option<Redacted>,
+    pub thinking_ms: Option<u64>,
 }
 
 pub(super) fn bad_text(index: usize, what: &str) -> rusqlite::Error {
@@ -87,7 +90,17 @@ fn message_row(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
         prompt_tokens: count_column(row, 5)?,
         completion_tokens: count_column(row, 6)?,
         duration_ms: count_column(row, 7)?,
+        thinking: row
+            .get::<_, Option<String>>(8)?
+            .filter(|text| !text.is_empty())
+            .map(Redacted::new),
+        thinking_ms: count_column(row, 9)?,
     })
+}
+
+/// `NULL` rather than an empty string for a reply with no thinking.
+fn thinking_column(thinking: &str) -> Option<&str> {
+    (!thinking.is_empty()).then_some(thinking)
 }
 
 /// Oldest first. Rows inserted in the same millisecond keep insert order.
@@ -97,7 +110,7 @@ pub(super) fn load_messages(
 ) -> Result<Vec<StoredMessage>, AppError> {
     let mut statement = conn.prepare(
         "SELECT id, role, content, status, created_at, prompt_tokens, completion_tokens,
-                duration_ms
+                duration_ms, thinking, thinking_ms
          FROM messages WHERE conversation_id = ?1 ORDER BY created_at, rowid",
     )?;
     let messages = statement
@@ -121,7 +134,8 @@ impl Storage {
     /// an empty `pending` assistant row, and marks the conversation used.
     ///
     /// History is every `complete` message plus the visible part of a
-    /// `cancelled` reply; failed and unfinished replies are left out.
+    /// `cancelled` reply; failed and unfinished replies are left out. It is
+    /// role and content only: thinking is never sent back to the model.
     pub fn begin_turn(
         &self,
         conversation_id: Uuid,
@@ -199,19 +213,25 @@ impl Storage {
 
     /// Only a `pending` row changes, so a late write can never undo a final
     /// status. A deleted row is silently skipped.
-    fn save_pending(&self, id: Uuid, content: &str) -> Result<(), AppError> {
+    fn save_pending(&self, id: Uuid, content: &str, thinking: &str) -> Result<(), AppError> {
         self.conn().execute(
-            "UPDATE messages SET content = ?2 WHERE id = ?1 AND status = 'pending'",
-            params![id.to_string(), content],
+            "UPDATE messages SET content = ?2, thinking = ?3 WHERE id = ?1 AND status = 'pending'",
+            params![id.to_string(), content, thinking_column(thinking)],
         )?;
         Ok(())
     }
 
-    fn save_final(&self, id: Uuid, content: &str, end: &FinalState) -> Result<(), AppError> {
+    fn save_final(
+        &self,
+        id: Uuid,
+        content: &str,
+        thinking: &str,
+        end: &FinalState,
+    ) -> Result<(), AppError> {
         self.conn().execute(
             "UPDATE messages
              SET content = ?2, status = ?3, prompt_tokens = ?4, completion_tokens = ?5,
-                 duration_ms = ?6
+                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8
              WHERE id = ?1 AND status = 'pending'",
             params![
                 id.to_string(),
@@ -219,7 +239,9 @@ impl Storage {
                 end.status.as_str(),
                 to_sql_count(end.prompt_tokens),
                 to_sql_count(end.completion_tokens),
-                to_sql_count(end.duration_ms)
+                to_sql_count(end.duration_ms),
+                thinking_column(thinking),
+                to_sql_count(end.thinking_ms)
             ],
         )?;
         Ok(())
@@ -250,6 +272,7 @@ struct FinalState {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     duration_ms: Option<u64>,
+    thinking_ms: Option<u64>,
 }
 
 impl FinalState {
@@ -259,8 +282,18 @@ impl FinalState {
             prompt_tokens: None,
             completion_tokens: None,
             duration_ms: None,
+            thinking_ms: None,
         }
     }
+}
+
+/// The counts a finished reply is saved with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReplyStats {
+    pub prompt_tokens: Option<u64>,
+    pub completion_tokens: Option<u64>,
+    pub duration_ms: Option<u64>,
+    pub thinking_ms: Option<u64>,
 }
 
 /// Saves one streamed reply into its `pending` row, so a hard kill keeps what
@@ -269,6 +302,7 @@ pub struct TurnRecorder {
     storage: Arc<Storage>,
     message_id: Uuid,
     content: String,
+    thinking: String,
     unflushed: usize,
     policy: FlushPolicy,
     /// A write failed: the turn ends as `error` whatever the stream does.
@@ -282,6 +316,7 @@ impl TurnRecorder {
             storage,
             message_id,
             content: String::new(),
+            thinking: String::new(),
             unflushed: 0,
             policy,
             failed: false,
@@ -296,11 +331,25 @@ impl TurnRecorder {
     /// Buffers a token and writes once [`FlushPolicy::tokens`] are waiting.
     /// After a failed write every call fails, so the stream stops.
     pub fn push(&mut self, token: &Redacted) -> Result<(), AppError> {
+        self.buffer(token, false)
+    }
+
+    /// Buffers a thinking chunk, flushed like [`Self::push`].
+    pub fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError> {
+        self.buffer(chunk, true)
+    }
+
+    fn buffer(&mut self, text: &Redacted, thinking: bool) -> Result<(), AppError> {
         self.check_failed()?;
         if self.finished {
             return Ok(());
         }
-        self.content.push_str(token.expose());
+        let target = if thinking {
+            &mut self.thinking
+        } else {
+            &mut self.content
+        };
+        target.push_str(text.expose());
         self.unflushed += 1;
         if self.unflushed >= self.policy.tokens {
             self.flush()?;
@@ -318,17 +367,13 @@ impl TurnRecorder {
     }
 
     /// Ends the turn as `complete`, or as `error` if an earlier write failed.
-    pub fn complete(
-        &mut self,
-        prompt_tokens: Option<u64>,
-        completion_tokens: Option<u64>,
-        duration_ms: Option<u64>,
-    ) -> Result<(), AppError> {
+    pub fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError> {
         self.finish_with(FinalState {
             status: MessageStatus::Complete,
-            prompt_tokens,
-            completion_tokens,
-            duration_ms,
+            prompt_tokens: stats.prompt_tokens,
+            completion_tokens: stats.completion_tokens,
+            duration_ms: stats.duration_ms,
+            thinking_ms: stats.thinking_ms,
         })
     }
 
@@ -348,9 +393,9 @@ impl TurnRecorder {
         } else {
             end
         };
-        if let Err(err) = self
-            .storage
-            .save_final(self.message_id, &self.content, &end)
+        if let Err(err) =
+            self.storage
+                .save_final(self.message_id, &self.content, &self.thinking, &end)
         {
             self.failed = true;
             return Err(err);
@@ -360,7 +405,10 @@ impl TurnRecorder {
     }
 
     fn flush(&mut self) -> Result<(), AppError> {
-        match self.storage.save_pending(self.message_id, &self.content) {
+        match self
+            .storage
+            .save_pending(self.message_id, &self.content, &self.thinking)
+        {
             Ok(()) => {
                 self.unflushed = 0;
                 Ok(())
@@ -459,11 +507,13 @@ mod tests {
 
         let done = turn(&storage, id, "One");
         let mut recorder = TurnRecorder::new(Arc::clone(&storage), done.assistant_id, policy);
+        recorder.push_thinking(&token("Private reasoning")).unwrap();
         recorder.push(&token("Reply")).unwrap();
-        recorder.complete(None, None, None).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
 
         let stopped = turn(&storage, id, "Two");
         let mut recorder = TurnRecorder::new(Arc::clone(&storage), stopped.assistant_id, policy);
+        recorder.push_thinking(&token("More reasoning")).unwrap();
         recorder.push(&token("Half")).unwrap();
         recorder.finish(MessageStatus::Cancelled).unwrap();
 
@@ -478,6 +528,12 @@ mod tests {
 
         let _pending = turn(&storage, id, "Five");
         let last = turn(&storage, id, "Six");
+        // Thinking is saved, but never part of what the model is sent.
+        assert!(
+            last.history
+                .iter()
+                .all(|message| !message.content.expose().contains("reasoning"))
+        );
         assert_eq!(
             texts(&last.history),
             [
@@ -531,7 +587,14 @@ mod tests {
 
         recorder.push(&token("Hel")).unwrap();
         recorder.push(&token("lo")).unwrap();
-        recorder.complete(Some(3), Some(2), Some(120)).unwrap();
+        recorder
+            .complete(ReplyStats {
+                prompt_tokens: Some(3),
+                completion_tokens: Some(2),
+                duration_ms: Some(120),
+                thinking_ms: None,
+            })
+            .unwrap();
 
         let saved = message(&storage, id, turn.assistant_id);
         assert_eq!(saved.content.expose(), "Hello");
@@ -539,6 +602,61 @@ mod tests {
         assert_eq!(saved.prompt_tokens, Some(3));
         assert_eq!(saved.completion_tokens, Some(2));
         assert_eq!(saved.duration_ms, Some(120));
+        assert_eq!(saved.thinking, None);
+        assert_eq!(saved.thinking_ms, None);
+    }
+
+    #[test]
+    fn recorder_saves_thinking() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        let turn = turn(&storage, id, "Hi");
+        let policy = FlushPolicy {
+            every: Duration::from_secs(60),
+            tokens: 2,
+        };
+        let mut recorder = TurnRecorder::new(Arc::clone(&storage), turn.assistant_id, policy);
+
+        recorder.push_thinking(&token("Let me")).unwrap();
+        recorder.push_thinking(&token(" see")).unwrap();
+        // Two chunks reach the flush threshold: the thinking is on disk.
+        let pending = message(&storage, id, turn.assistant_id);
+        assert_eq!(pending.thinking.unwrap().expose(), "Let me see");
+        assert_eq!(pending.content.expose(), "");
+        assert_eq!(pending.status, MessageStatus::Pending);
+
+        recorder.push(&token("Hi")).unwrap();
+        recorder
+            .complete(ReplyStats {
+                thinking_ms: Some(1500),
+                ..ReplyStats::default()
+            })
+            .unwrap();
+        let saved = message(&storage, id, turn.assistant_id);
+        assert_eq!(saved.thinking.unwrap().expose(), "Let me see");
+        assert_eq!(saved.thinking_ms, Some(1500));
+        assert_eq!(saved.content.expose(), "Hi");
+    }
+
+    #[test]
+    fn cancelled_reply_keeps_thinking() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        let turn = turn(&storage, id, "Hi");
+        let mut recorder = TurnRecorder::new(
+            Arc::clone(&storage),
+            turn.assistant_id,
+            FlushPolicy::default(),
+        );
+
+        recorder.push_thinking(&token("Hmm")).unwrap();
+        recorder.finish(MessageStatus::Cancelled).unwrap();
+
+        let saved = message(&storage, id, turn.assistant_id);
+        assert_eq!(saved.thinking.unwrap().expose(), "Hmm");
+        assert_eq!(saved.thinking_ms, None);
+        assert_eq!(saved.content.expose(), "");
+        assert_eq!(saved.status, MessageStatus::Cancelled);
     }
 
     #[test]
@@ -640,7 +758,12 @@ mod tests {
         );
 
         recorder.push(&token("Done")).unwrap();
-        recorder.complete(None, Some(1), None).unwrap();
+        recorder
+            .complete(ReplyStats {
+                completion_tokens: Some(1),
+                ..ReplyStats::default()
+            })
+            .unwrap();
         recorder.push(&token("late")).unwrap();
         recorder.flush_if_dirty().unwrap();
         recorder.finish(MessageStatus::Cancelled).unwrap();
@@ -664,7 +787,7 @@ mod tests {
         storage.delete_conversation(id).unwrap();
         recorder.push(&token("x")).unwrap();
         recorder.flush_if_dirty().unwrap();
-        recorder.complete(None, None, None).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
         assert!(storage.list_conversations().unwrap().is_empty());
     }
 
