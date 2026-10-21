@@ -90,7 +90,15 @@ async fn request_log_has_counts_and_no_content() {
     }];
     let admission = ollama.admit(Uuid::new_v4()).unwrap();
     ollama
-        .start(admission, "llama3.2", &messages, None, |_| true, |_| {})
+        .start(
+            admission,
+            "llama3.2",
+            &messages,
+            None,
+            None,
+            |_| true,
+            |_| {},
+        )
         .unwrap();
 
     let mut text = String::new();

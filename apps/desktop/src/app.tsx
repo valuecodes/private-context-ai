@@ -5,6 +5,8 @@ import { useEffect, useState } from "react";
 import { loadVersion } from "~/app-version";
 import { ActivityPanel } from "~/features/activity/activity-panel";
 import { ChatView } from "~/features/chat/chat-view";
+import { THINK_OFF } from "~/features/chat/think-choice";
+import type { ThinkChoice } from "~/features/chat/think-choice";
 import {
   replyAnnouncement,
   useChatStream,
@@ -34,6 +36,8 @@ const Workspace = () => {
   const [version, setVersion] = useState("");
   const [model, setModel] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
+  // Not saved yet: every app start begins with thinking off.
+  const [think, setThink] = useState<ThinkChoice>(THINK_OFF);
   const [view, setView] = useState<View>("chat");
   const { status, retry } = useOllamaStatus();
   const conversations = useConversations();
@@ -136,6 +140,8 @@ const Workspace = () => {
               model={model}
               setModel={setModel}
               defaultModel={defaultModel}
+              think={think}
+              setThink={setThink}
             />
           )}
           {view === "activity" && <ActivityPanel />}

@@ -27,8 +27,9 @@ Internet
 - **Webview ↔ Rust.** The React frontend has no network access of its own. It calls
   Rust commands over Tauri IPC and receives streamed tokens as IPC events. Only
   `apps/desktop/src/lib/ipc.ts` imports `@tauri-apps/api`.
-- **Rust ↔ Ollama.** Only Rust talks to Ollama: `/api/version`, `/api/tags` and a
-  streamed `/api/chat`, over plain HTTP to a loopback address.
+- **Rust ↔ Ollama.** Only Rust talks to Ollama: `/api/version`, `/api/tags`,
+  `/api/show` (a model's capabilities, looked up once per model) and a streamed
+  `/api/chat`, over plain HTTP to a loopback address.
 - **Rust ↔ disk.** Chats, the audit log and settings live in one SQLCipher database.
   Its key comes from the OS keychain and stays in Rust. Logs go to a separate folder
   and hold metadata only.
@@ -46,8 +47,12 @@ What the app guarantees, and what enforces it:
   credentials, path, query or fragment. The HTTP client ignores system proxies, follows
   no redirects and pins `localhost` to `127.0.0.1`. `reqwest` is built without any TLS
   backend, so the binary cannot speak HTTPS at all.
-- **The model gets no tools.** `/api/chat` is sent without `tools`, `format` or
-  `think`; the request type has no such fields. Replies are rendered as Markdown into
+- **The model gets no tools.** `/api/chat` is sent without `tools` or `format`; the
+  request type has no such fields. `think` is sent only as a boolean or a level the
+  model advertises, and only to models whose audited `/api/show` lists `thinking`; it
+  is `false` unless you turn Think on (models that always think get a level). Thinking
+  text is stored encrypted, shown collapsed, and never sent back to the model.
+  Replies are rendered as Markdown into
   React elements with raw HTML disabled: links and images are inert (no `href`, nothing
   fetched), code highlighting is local JS, and nothing in a reply is executed.
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random

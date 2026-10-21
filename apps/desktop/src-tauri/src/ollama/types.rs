@@ -80,8 +80,37 @@ impl ChatOptions {
     }
 }
 
-/// The `/api/chat` request body. Deliberately has no `tools`, `format` or
-/// `think` field: the model gets no tools and no structured-output hooks.
+/// A thinking level, for models that take one instead of a boolean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkLevel {
+    Low,
+    Medium,
+    High,
+}
+
+impl ThinkLevel {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+/// Ollama's `think` value: on/off, or a level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Think {
+    Enabled(bool),
+    Level(ThinkLevel),
+}
+
+/// The `/api/chat` request body. Deliberately has no `tools` or `format`
+/// field: the model gets no tools and no structured-output hooks. `think` is
+/// only ever what [`resolve_think`] allowed for the model.
 #[derive(Debug, Serialize)]
 pub struct ChatRequest<'a> {
     pub model: &'a str,
@@ -89,10 +118,12 @@ pub struct ChatRequest<'a> {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<&'a ChatOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub think: Option<Think>,
 }
 
-/// One NDJSON line of a streamed `/api/chat` response. Unknown fields, such
-/// as `message.thinking` from reasoning models, are ignored.
+/// One NDJSON line of a streamed `/api/chat` response. Unknown fields are
+/// ignored.
 #[derive(Debug, Default, Deserialize)]
 pub struct ChatLine {
     pub message: Option<ChatLineMessage>,
@@ -109,6 +140,8 @@ pub struct ChatLine {
 #[derive(Debug, Default, Deserialize)]
 pub struct ChatLineMessage {
     pub content: Option<Redacted>,
+    /// Reasoning from thinking models; shown, stored, never sent back.
+    pub thinking: Option<Redacted>,
 }
 
 /// Streamed to the frontend over a Tauri channel.
@@ -122,12 +155,17 @@ pub enum ChatEvent {
     Token {
         content: Redacted,
     },
+    Thinking {
+        content: Redacted,
+    },
     Done {
         prompt_tokens: Option<u64>,
         completion_tokens: Option<u64>,
         duration_ms: Option<u64>,
         /// `length` means the reply hit the token limit: a hint, not an error.
         done_reason: Option<String>,
+        /// From the first thinking chunk to the first answer chunk.
+        thinking_ms: Option<u64>,
     },
     Error {
         error: AppError,
@@ -184,6 +222,171 @@ impl From<TagModel> for ModelInfo {
             parameter_size: model.details.and_then(|details| details.parameter_size),
         }
     }
+}
+
+/// `/api/show` response. Only the fields capabilities come from are read.
+#[derive(Debug, Default, Deserialize)]
+pub struct ShowResponse {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub details: Option<ShowDetails>,
+    /// Absent when Ollama has no thinking metadata for the model.
+    pub thinking: Option<ShowThinking>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ShowDetails {
+    pub family: Option<String>,
+}
+
+/// The `think` values a model takes, and the one used when none is sent.
+#[derive(Debug, Default, Deserialize)]
+pub struct ShowThinking {
+    #[serde(default)]
+    pub values: Vec<ThinkValue>,
+    pub default: Option<ThinkValue>,
+}
+
+/// A boolean or a level name; unknown names parse and are then ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum ThinkValue {
+    Bool(bool),
+    Name(String),
+}
+
+impl ThinkValue {
+    fn level(&self) -> Option<ThinkLevel> {
+        match self {
+            Self::Name(name) => ThinkLevel::parse(name),
+            Self::Bool(_) => None,
+        }
+    }
+}
+
+/// How a thinking model is switched: on/off, or by level.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ThinkStyle {
+    Bool,
+    Levels {
+        levels: Vec<ThinkLevel>,
+        default: ThinkLevel,
+        /// `false` turns thinking off; models that always think refuse it.
+        can_disable: bool,
+    },
+}
+
+/// What `ollama_model_capabilities` returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCapabilities {
+    pub thinking: bool,
+    pub vision: bool,
+    pub tools: bool,
+    pub embedding_only: bool,
+    pub think_style: ThinkStyle,
+}
+
+const GPT_OSS_LEVELS: [ThinkLevel; 3] = [ThinkLevel::Low, ThinkLevel::Medium, ThinkLevel::High];
+
+impl ModelCapabilities {
+    /// The think style comes from the values `/api/show` advertises. Only
+    /// when it advertises none, gpt-oss (by family or name) takes levels.
+    pub fn from_show(model: &str, show: &ShowResponse) -> Self {
+        let has = |name: &str| show.capabilities.iter().any(|c| c == name);
+        let (thinking, think_style) = match &show.thinking {
+            Some(advertised) => {
+                let levels: Vec<ThinkLevel> = advertised
+                    .values
+                    .iter()
+                    .filter_map(ThinkValue::level)
+                    .collect();
+                let can_enable =
+                    !levels.is_empty() || advertised.values.contains(&ThinkValue::Bool(true));
+                let can_disable = advertised.values.contains(&ThinkValue::Bool(false));
+                let style = if levels.is_empty() {
+                    ThinkStyle::Bool
+                } else {
+                    let default = advertised
+                        .default
+                        .as_ref()
+                        .and_then(ThinkValue::level)
+                        .filter(|level| levels.contains(level))
+                        .unwrap_or(levels[levels.len() / 2]);
+                    ThinkStyle::Levels {
+                        levels,
+                        default,
+                        can_disable,
+                    }
+                };
+                (has("thinking") && can_enable, style)
+            }
+            None => {
+                let gpt_oss = show
+                    .details
+                    .as_ref()
+                    .and_then(|details| details.family.as_deref())
+                    == Some("gptoss")
+                    || model.to_ascii_lowercase().starts_with("gpt-oss");
+                let style = if gpt_oss {
+                    ThinkStyle::Levels {
+                        levels: GPT_OSS_LEVELS.to_vec(),
+                        default: ThinkLevel::Medium,
+                        can_disable: false,
+                    }
+                } else {
+                    ThinkStyle::Bool
+                };
+                (has("thinking"), style)
+            }
+        };
+        Self {
+            thinking,
+            vision: has("vision"),
+            tools: has("tools"),
+            embedding_only: has("embedding") && !has("completion"),
+            think_style,
+        }
+    }
+}
+
+/// The `think` value actually sent. A model that cannot think gets none,
+/// whatever was asked; a thinking model always gets an explicit value, so
+/// Ollama's version-dependent default never applies. A level the model does
+/// not advertise is never sent.
+pub fn resolve_think(
+    caps: &ModelCapabilities,
+    requested: Option<Think>,
+) -> Result<Option<Think>, AppError> {
+    if !caps.thinking {
+        return Ok(None);
+    }
+    let think = match &caps.think_style {
+        ThinkStyle::Bool => match requested {
+            None => Think::Enabled(false),
+            Some(Think::Enabled(on)) => Think::Enabled(on),
+            Some(Think::Level(_)) => Think::Enabled(true),
+        },
+        ThinkStyle::Levels {
+            levels,
+            default,
+            can_disable,
+        } => match requested {
+            Some(Think::Level(level)) if levels.contains(&level) => Think::Level(level),
+            Some(Think::Level(_) | Think::Enabled(true)) => Think::Level(*default),
+            None | Some(Think::Enabled(false)) if *can_disable => Think::Enabled(false),
+            None => Think::Level(*default),
+            Some(Think::Enabled(false)) => {
+                return Err(invalid("this model always thinks"));
+            }
+        },
+    };
+    Ok(Some(think))
 }
 
 pub fn validate_model(model: &str) -> Result<(), AppError> {
@@ -251,6 +454,7 @@ mod tests {
                 messages: &messages,
                 stream: true,
                 options,
+                think: None,
             })
             .unwrap();
             let object = body.as_object().unwrap();
@@ -270,6 +474,243 @@ mod tests {
                 serde_json::json!([{ "role": "user", "content": "hi" }])
             );
         }
+
+        for (think, expected) in [
+            (Think::Enabled(true), serde_json::json!(true)),
+            (Think::Enabled(false), serde_json::json!(false)),
+            (Think::Level(ThinkLevel::High), serde_json::json!("high")),
+        ] {
+            let body = serde_json::to_value(ChatRequest {
+                model: "qwen3",
+                messages: &messages,
+                stream: true,
+                options: None,
+                think: Some(think),
+            })
+            .unwrap();
+            let object = body.as_object().unwrap();
+            assert!(!object.contains_key("tools"));
+            assert!(!object.contains_key("format"));
+            assert_eq!(body["think"], expected);
+        }
+    }
+
+    fn show(json: &str) -> ShowResponse {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn show_parses_advertised_levels() {
+        let caps = ModelCapabilities::from_show(
+            "gpt-oss:20b",
+            &show(
+                r#"{"license":"x","template":"y","capabilities":["completion","tools","thinking"],
+                "details":{"family":"gptoss"},
+                "thinking":{"values":["low","medium","high"],"default":"medium"}}"#,
+            ),
+        );
+        assert!(caps.thinking);
+        assert!(caps.tools);
+        assert_eq!(
+            caps.think_style,
+            ThinkStyle::Levels {
+                levels: GPT_OSS_LEVELS.to_vec(),
+                default: ThinkLevel::Medium,
+                can_disable: false,
+            }
+        );
+    }
+
+    #[test]
+    fn show_drops_unknown_levels_and_reads_off_switch() {
+        let caps = ModelCapabilities::from_show(
+            "custom",
+            &show(
+                r#"{"capabilities":["completion","thinking"],
+                "thinking":{"values":[false,"low","max","high"],"default":"max"}}"#,
+            ),
+        );
+        assert_eq!(
+            caps.think_style,
+            ThinkStyle::Levels {
+                levels: vec![ThinkLevel::Low, ThinkLevel::High],
+                default: ThinkLevel::High,
+                can_disable: true,
+            }
+        );
+    }
+
+    #[test]
+    fn show_parses_boolean_thinking() {
+        let caps = ModelCapabilities::from_show(
+            "qwen3:8b",
+            &show(
+                r#"{"capabilities":["completion","thinking"],"details":{"family":"qwen3"},
+                "thinking":{"values":[true,false],"default":true}}"#,
+            ),
+        );
+        assert!(caps.thinking);
+        assert_eq!(caps.think_style, ThinkStyle::Bool);
+    }
+
+    #[test]
+    fn show_falls_back_to_family_heuristic() {
+        for (model, family) in [("gpt-oss:20b", "other"), ("renamed", "gptoss")] {
+            let caps = ModelCapabilities::from_show(
+                model,
+                &show(&format!(
+                    r#"{{"capabilities":["completion","thinking"],"details":{{"family":"{family}"}}}}"#
+                )),
+            );
+            assert!(
+                matches!(caps.think_style, ThinkStyle::Levels { .. }),
+                "{model}"
+            );
+        }
+        let caps = ModelCapabilities::from_show(
+            "qwen3:8b",
+            &show(r#"{"capabilities":["completion","thinking"],"details":{"family":"qwen3"}}"#),
+        );
+        assert!(caps.thinking);
+        assert_eq!(caps.think_style, ThinkStyle::Bool);
+    }
+
+    #[test]
+    fn show_values_false_means_not_thinking() {
+        let caps = ModelCapabilities::from_show(
+            "m",
+            &show(r#"{"capabilities":["completion","thinking"],"thinking":{"values":[false]}}"#),
+        );
+        assert!(!caps.thinking);
+        let caps = ModelCapabilities::from_show(
+            "llama3.2",
+            &show(r#"{"capabilities":["completion","tools"]}"#),
+        );
+        assert!(!caps.thinking);
+    }
+
+    #[test]
+    fn show_embedding_only_and_vision() {
+        let caps = ModelCapabilities::from_show(
+            "nomic-embed-text",
+            &show(r#"{"capabilities":["embedding"]}"#),
+        );
+        assert!(caps.embedding_only);
+        let caps = ModelCapabilities::from_show(
+            "llava",
+            &show(r#"{"capabilities":["completion","vision"]}"#),
+        );
+        assert!(caps.vision);
+        assert!(!caps.embedding_only);
+    }
+
+    fn caps(thinking: bool, think_style: ThinkStyle) -> ModelCapabilities {
+        ModelCapabilities {
+            thinking,
+            vision: false,
+            tools: false,
+            embedding_only: false,
+            think_style,
+        }
+    }
+
+    #[test]
+    fn resolve_think_table() {
+        use Think::{Enabled, Level};
+        use ThinkLevel::{High, Low, Medium};
+        let levels = |can_disable| ThinkStyle::Levels {
+            levels: vec![Low, Medium],
+            default: Medium,
+            can_disable,
+        };
+        let cases = [
+            // A model that cannot think gets nothing, whatever was asked.
+            (caps(false, ThinkStyle::Bool), Some(Enabled(true)), Ok(None)),
+            (caps(false, levels(false)), Some(Level(High)), Ok(None)),
+            // Boolean models always get an explicit value.
+            (caps(true, ThinkStyle::Bool), None, Ok(Some(Enabled(false)))),
+            (
+                caps(true, ThinkStyle::Bool),
+                Some(Enabled(true)),
+                Ok(Some(Enabled(true))),
+            ),
+            (
+                caps(true, ThinkStyle::Bool),
+                Some(Level(Low)),
+                Ok(Some(Enabled(true))),
+            ),
+            // Levels: only advertised ones are sent.
+            (
+                caps(true, levels(false)),
+                Some(Level(Low)),
+                Ok(Some(Level(Low))),
+            ),
+            (
+                caps(true, levels(false)),
+                Some(Level(High)),
+                Ok(Some(Level(Medium))),
+            ),
+            (
+                caps(true, levels(false)),
+                Some(Enabled(true)),
+                Ok(Some(Level(Medium))),
+            ),
+            (caps(true, levels(false)), None, Ok(Some(Level(Medium)))),
+            (caps(true, levels(true)), None, Ok(Some(Enabled(false)))),
+            (
+                caps(true, levels(true)),
+                Some(Enabled(false)),
+                Ok(Some(Enabled(false))),
+            ),
+        ];
+        for (caps, requested, expected) in cases {
+            assert_eq!(resolve_think(&caps, requested), expected, "{requested:?}");
+        }
+        assert!(matches!(
+            resolve_think(&caps(true, levels(false)), Some(Enabled(false))),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn think_deserializes_from_ipc() {
+        assert_eq!(
+            serde_json::from_str::<Think>("false").unwrap(),
+            Think::Enabled(false)
+        );
+        assert_eq!(
+            serde_json::from_str::<Think>(r#""low""#).unwrap(),
+            Think::Level(ThinkLevel::Low)
+        );
+        assert!(serde_json::from_str::<Think>(r#""max""#).is_err());
+    }
+
+    #[test]
+    fn capabilities_serialize_camel_case() {
+        let value = serde_json::to_value(caps(
+            true,
+            ThinkStyle::Levels {
+                levels: vec![ThinkLevel::Low],
+                default: ThinkLevel::Low,
+                can_disable: false,
+            },
+        ))
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "thinking": true,
+                "vision": false,
+                "tools": false,
+                "embeddingOnly": false,
+                "thinkStyle": {
+                    "kind": "levels",
+                    "levels": ["low"],
+                    "default": "low",
+                    "canDisable": false
+                }
+            })
+        );
     }
 
     #[test]
@@ -314,11 +755,20 @@ mod tests {
             serde_json::json!({ "type": "token", "content": "Hel" })
         );
 
+        let thinking = ChatEvent::Thinking {
+            content: Redacted::new("hmm"),
+        };
+        assert_eq!(
+            serde_json::to_value(&thinking).unwrap(),
+            serde_json::json!({ "type": "thinking", "content": "hmm" })
+        );
+
         let done = ChatEvent::Done {
             prompt_tokens: Some(3),
             completion_tokens: Some(5),
             duration_ms: Some(120),
             done_reason: Some("stop".into()),
+            thinking_ms: Some(40),
         };
         assert_eq!(
             serde_json::to_value(&done).unwrap(),
@@ -327,7 +777,8 @@ mod tests {
                 "promptTokens": 3,
                 "completionTokens": 5,
                 "durationMs": 120,
-                "doneReason": "stop"
+                "doneReason": "stop",
+                "thinkingMs": 40
             })
         );
 

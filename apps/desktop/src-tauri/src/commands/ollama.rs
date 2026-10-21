@@ -11,9 +11,12 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::ollama::Ollama;
 use crate::ollama::stream::ChatEnd;
-use crate::ollama::types::{ChatEvent, ChatOptions, ModelInfo, OllamaStatus, validate_model};
+use crate::ollama::types::{
+    ChatEvent, ChatOptions, ModelCapabilities, ModelInfo, OllamaStatus, Think, resolve_think,
+    validate_model,
+};
 use crate::redacted::Redacted;
-use crate::storage::messages::{FlushPolicy, MessageStatus, TurnRecorder};
+use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnRecorder};
 use crate::storage::{Storage, StorageState};
 
 #[tauri::command]
@@ -28,10 +31,19 @@ pub async fn ollama_list_models(
     ollama.list_models().await
 }
 
+#[tauri::command]
+pub async fn ollama_model_capabilities(
+    ollama: State<'_, Arc<Ollama>>,
+    model: String,
+) -> Result<ModelCapabilities, AppError> {
+    ollama.model_capabilities(&model).await
+}
+
 /// Saves `prompt` to the conversation, starts streaming the reply into
 /// `on_event` and returns the request id at once. Rust builds the history
 /// from the database.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn chat_send(
     ollama: State<'_, Arc<Ollama>>,
     storage: State<'_, StorageState>,
@@ -39,9 +51,11 @@ pub async fn chat_send(
     model: String,
     prompt: Redacted,
     options: Option<ChatOptions>,
+    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<Uuid, AppError> {
     let storage = Arc::clone(storage.get()?);
+    let think = think_for(&ollama, &model, think).await?;
     // A failed send means the webview is gone; the worker then cancels.
     send_turn(
         &ollama,
@@ -50,9 +64,31 @@ pub async fn chat_send(
         &model,
         &prompt,
         options,
+        think,
         FlushPolicy::default(),
         move |event| on_event.send(event).is_ok(),
     )
+}
+
+/// The `think` value to send, from the model's (cached, audited)
+/// capabilities. When the lookup fails, a send that asked for nothing goes
+/// ahead without `think`; one that asked for thinking reports the failure.
+async fn think_for(
+    ollama: &Ollama,
+    model: &str,
+    requested: Option<Think>,
+) -> Result<Option<Think>, AppError> {
+    match ollama.model_capabilities(model).await {
+        Ok(caps) => resolve_think(&caps, requested),
+        Err(error) if requested.is_none() => {
+            tracing::warn!(
+                kind = error.kind(),
+                "could not read the model's capabilities"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -68,7 +104,8 @@ fn lock(recorder: &SharedRecorder) -> MutexGuard<'_, TurnRecorder> {
 
 /// The body of `chat_send`, without Tauri. Order matters: the slot is taken
 /// before anything is written, and nothing is written when the history is
-/// refused, so a refused send leaves no rows behind.
+/// refused, so a refused send leaves no rows behind. `think` is already
+/// resolved for the model.
 #[allow(clippy::too_many_arguments)]
 pub fn send_turn<S>(
     ollama: &Arc<Ollama>,
@@ -77,6 +114,7 @@ pub fn send_turn<S>(
     model: &str,
     prompt: &Redacted,
     options: Option<ChatOptions>,
+    think: Option<Think>,
     policy: FlushPolicy,
     send: S,
 ) -> Result<Uuid, AppError>
@@ -108,6 +146,7 @@ where
         model,
         &turn.history,
         options.as_ref(),
+        think,
         sink,
         move |end| {
             stop_ticker.cancel();
@@ -130,12 +169,19 @@ where
     move |event| {
         let saved = match &event {
             ChatEvent::Token { content } => lock(&recorder).push(content),
+            ChatEvent::Thinking { content } => lock(&recorder).push_thinking(content),
             ChatEvent::Done {
                 prompt_tokens,
                 completion_tokens,
                 duration_ms,
+                thinking_ms,
                 ..
-            } => lock(&recorder).complete(*prompt_tokens, *completion_tokens, *duration_ms),
+            } => lock(&recorder).complete(ReplyStats {
+                prompt_tokens: *prompt_tokens,
+                completion_tokens: *completion_tokens,
+                duration_ms: *duration_ms,
+                thinking_ms: *thinking_ms,
+            }),
             // `on_end` saves the error status, but a save failure the ticker
             // already hit matters more than why Ollama stopped.
             ChatEvent::Error { .. } => lock(&recorder).ensure_saved(),
@@ -160,7 +206,13 @@ fn finish_turn(recorder: &SharedRecorder, end: &ChatEnd) {
             prompt_tokens,
             completion_tokens,
             duration_ms,
-        } => recorder.complete(*prompt_tokens, *completion_tokens, *duration_ms),
+            thinking_ms,
+        } => recorder.complete(ReplyStats {
+            prompt_tokens: *prompt_tokens,
+            completion_tokens: *completion_tokens,
+            duration_ms: *duration_ms,
+            thinking_ms: *thinking_ms,
+        }),
         ChatEnd::Cancelled => recorder.finish(MessageStatus::Cancelled),
         ChatEnd::Failed(_) => recorder.finish(MessageStatus::Error),
     };
@@ -252,7 +304,28 @@ mod tests {
             completion_tokens: Some(2),
             duration_ms: Some(3),
             done_reason: Some("stop".into()),
+            thinking_ms: Some(4),
         }
+    }
+
+    #[test]
+    fn sink_saves_thinking() {
+        let (storage, _dir) = temp_storage();
+        let (conversation, recorder) = started_turn(&storage);
+        let (events, send) = collector(true);
+        let sink = recording_sink(recorder, send);
+
+        assert!(sink(ChatEvent::Thinking {
+            content: Redacted::new("Hmm")
+        }));
+        assert!(sink(token("Hi")));
+        assert!(sink(done()));
+
+        assert_eq!(events.lock().unwrap().len(), 3);
+        let saved = assistant(&storage, conversation);
+        assert_eq!(saved.thinking.unwrap().expose(), "Hmm");
+        assert_eq!(saved.thinking_ms, Some(4));
+        assert_eq!(saved.content.expose(), "Hi");
     }
 
     #[test]
@@ -410,6 +483,7 @@ mod tests {
             "llama3.2",
             &Redacted::new("Hi"),
             None,
+            None,
             FlushPolicy::default(),
             |_| true,
         )
@@ -427,6 +501,7 @@ mod tests {
             conversation,
             "llama3.2",
             &Redacted::new("x".repeat(2 * 1024 * 1024)),
+            None,
             None,
             FlushPolicy::default(),
             |_| true,
@@ -474,6 +549,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn think_for_falls_back_only_when_nothing_was_asked() {
+        // Nothing listens, so the capability lookup fails.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = OllamaBaseUrl::parse(&format!("http://{}", listener.local_addr().unwrap()));
+        drop(listener);
+        let ollama = Ollama::new(base, Arc::new(Audit::new()));
+
+        assert_eq!(think_for(&ollama, "qwen3", None).await, Ok(None));
+        assert!(matches!(
+            think_for(&ollama, "qwen3", Some(Think::Enabled(true))).await,
+            Err(AppError::Unreachable(_) | AppError::Timeout(_))
+        ));
+    }
+
+    #[tokio::test]
     async fn empty_prompt_is_rejected() {
         let (ollama, _listener) = silent_ollama().await;
         let (storage, _dir) = temp_storage();
@@ -485,6 +575,7 @@ mod tests {
             conversation,
             "llama3.2",
             &Redacted::new("  \n"),
+            None,
             None,
             FlushPolicy::default(),
             |_| true,

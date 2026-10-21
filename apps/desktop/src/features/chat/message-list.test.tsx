@@ -24,6 +24,29 @@ describe("MessageList", () => {
     expect(html).not.toContain("Copy message");
   });
 
+  it("shows thinking above the reply, without the typing indicator", () => {
+    const thinking: UiMessage = {
+      ...message("assistant", "", "streaming"),
+      thinking: "Pondering",
+    };
+    const html = render([thinking]);
+    expect(html).toContain("Thinking…");
+    expect(html).toContain("Pondering");
+    expect(html).not.toContain("Assistant is typing");
+
+    const answered = render([
+      {
+        ...message("assistant", "Done"),
+        thinking: "Pondering",
+        thinkingMs: 2000,
+      },
+    ]);
+    expect(answered).toContain("Thought for 2s");
+    expect(answered.indexOf("Pondering")).toBeLessThan(
+      answered.indexOf("Done")
+    );
+  });
+
   it("renders a user message as plain text", () => {
     const html = render([message("user", "**not bold** <b>x</b>")]);
     expect(html).toContain("**not bold** &lt;b&gt;x&lt;/b&gt;");
