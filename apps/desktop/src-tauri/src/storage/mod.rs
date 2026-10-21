@@ -1,12 +1,14 @@
 //! Encrypted chat storage: one SQLCipher database whose key lives in the OS
 //! keychain and never reaches the webview.
 
+pub mod audit;
 pub mod conversations;
 pub mod db;
 pub mod key;
 pub mod lock;
 pub mod messages;
 mod migrations;
+pub mod settings;
 
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};

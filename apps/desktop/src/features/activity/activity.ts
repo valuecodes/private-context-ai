@@ -1,0 +1,42 @@
+import type { AuditEvent, AuditStatus } from "~/lib/types";
+
+/**
+ * The summary line. `hosts` comes from every retained audit row, so the line
+ * never depends on which page of the table is loaded.
+ */
+const hostsSummary = (hosts: string[]): string =>
+  `Hosts contacted: ${hosts.length === 0 ? "none" : hosts.join(", ")}`;
+
+/** `3 / 2` (prompt / completion), or an em dash when neither is known. */
+const formatTokens = (event: AuditEvent): string =>
+  event.promptTokens === null && event.completionTokens === null
+    ? "—"
+    : `${event.promptTokens ?? "?"} / ${event.completionTokens ?? "?"}`;
+
+const formatDuration = (ms: number | null): string => {
+  if (ms === null) {
+    return "—";
+  }
+  return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
+};
+
+/** Local date and time, to the second. */
+const formatTime = (at: string): string => {
+  const date = new Date(at);
+  return Number.isNaN(date.getTime()) ? at : date.toLocaleString();
+};
+
+const STATUS_LABEL: Record<AuditStatus, string> = {
+  // The app stopped before the request ended, or it is still running.
+  attempt: "no outcome",
+  ok: "ok",
+  error: "error",
+  cancelled: "cancelled",
+};
+
+const statusLabel = (event: AuditEvent): string => {
+  const label = STATUS_LABEL[event.status];
+  return event.detail === null ? label : `${label} (${event.detail})`;
+};
+
+export { formatDuration, formatTime, formatTokens, hostsSummary, statusLabel };

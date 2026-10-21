@@ -57,7 +57,7 @@ pub struct StoredMessage {
     pub duration_ms: Option<u64>,
 }
 
-fn bad_text(index: usize, what: &str) -> rusqlite::Error {
+pub(super) fn bad_text(index: usize, what: &str) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
         index,
         rusqlite::types::Type::Text,
@@ -65,13 +65,13 @@ fn bad_text(index: usize, what: &str) -> rusqlite::Error {
     )
 }
 
-fn count_column(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
+pub(super) fn count_column(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<u64>> {
     Ok(row
         .get::<_, Option<i64>>(index)?
         .and_then(|value| u64::try_from(value).ok()))
 }
 
-fn to_sql_count(value: Option<u64>) -> Option<i64> {
+pub(super) fn to_sql_count(value: Option<u64>) -> Option<i64> {
     value.and_then(|value| i64::try_from(value).ok())
 }
 
