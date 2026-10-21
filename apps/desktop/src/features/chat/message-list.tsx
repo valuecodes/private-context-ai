@@ -1,4 +1,10 @@
+import { Check, Copy } from "lucide-react";
+import { memo, useDeferredValue, useState } from "react";
+
+import { Markdown } from "~/features/chat/markdown";
+import { TypingIndicator } from "~/features/chat/typing-indicator";
 import type { UiMessage } from "~/features/chat/use-chat-stream";
+import { copyText } from "~/lib/clipboard";
 
 const STATUS_NOTE: Record<UiMessage["status"], string> = {
   complete: "",
@@ -7,42 +13,92 @@ const STATUS_NOTE: Record<UiMessage["status"], string> = {
   error: "Failed",
 };
 
-const bubbleClass = (message: UiMessage): string =>
-  message.role === "user"
-    ? "self-end bg-zinc-200 dark:bg-zinc-800"
-    : "self-start bg-white ring-1 ring-zinc-200 dark:bg-zinc-900 dark:ring-zinc-800";
+const COPIED_MS = 1500;
+
+const CopyMessage = ({ text }: { text: string }) => {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={() => {
+        void copyText(text).then((ok) => {
+          if (ok) {
+            setCopied(true);
+            setTimeout(() => {
+              setCopied(false);
+            }, COPIED_MS);
+          }
+        });
+      }}
+      aria-label={copied ? "Copied" : "Copy message"}
+      title="Copy message"
+      className="rounded p-1 text-zinc-500 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-800"
+    >
+      {copied ? (
+        <Check aria-hidden="true" className="size-4" />
+      ) : (
+        <Copy aria-hidden="true" className="size-4" />
+      )}
+    </button>
+  );
+};
+
+const AssistantReply = ({ message }: { message: UiMessage }) => {
+  // Re-parsing the Markdown on every token is low priority: React drops
+  // stale values, so a long reply never blocks typing or Stop.
+  const text = useDeferredValue(message.content);
+  if (message.status === "streaming" && message.content === "") {
+    return <TypingIndicator />;
+  }
+  return <Markdown text={text} highlight={message.status !== "streaming"} />;
+};
+
+/**
+ * One message. Memoized: the reducer keeps unchanged messages as the same
+ * objects, so only the streaming one re-renders per token.
+ */
+const MessageItem = memo(({ message }: { message: UiMessage }) => {
+  const note = STATUS_NOTE[message.status];
+  const user = message.role === "user";
+  const waiting = message.status === "streaming" && message.content === "";
+  return (
+    <li
+      className={`group flex flex-col ${user ? "items-end" : "items-stretch"}`}
+    >
+      <div
+        className={
+          user
+            ? "max-w-[80%] rounded-2xl bg-zinc-200 px-4 py-2 text-sm whitespace-pre-wrap dark:bg-zinc-800"
+            : "text-sm"
+        }
+      >
+        <span className="sr-only">{user ? "You: " : "Assistant: "}</span>
+        {user ? message.content : <AssistantReply message={message} />}
+      </div>
+      {note !== "" && (
+        <span className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+          {note}
+        </span>
+      )}
+      {!waiting && (
+        <div className="mt-1 flex opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+          <CopyMessage text={message.content} />
+        </div>
+      )}
+    </li>
+  );
+});
+MessageItem.displayName = "MessageItem";
 
 const MessageList = ({ messages }: { messages: UiMessage[] }) => {
   if (messages.length === 0) {
-    return (
-      <p className="m-auto text-sm text-zinc-500 dark:text-zinc-400">
-        Pick a model and send a message to start.
-      </p>
-    );
+    return null;
   }
   return (
-    <ol aria-label="Messages" className="flex flex-col gap-3">
-      {messages.map((message) => {
-        const note = STATUS_NOTE[message.status];
-        const waiting =
-          message.status === "streaming" && message.content === "";
-        return (
-          <li
-            key={message.id}
-            className={`max-w-[80%] rounded-lg px-3 py-2 text-sm whitespace-pre-wrap ${bubbleClass(message)}`}
-          >
-            <span className="sr-only">
-              {message.role === "user" ? "You: " : "Assistant: "}
-            </span>
-            {waiting ? "…" : message.content}
-            {note !== "" && (
-              <span className="mt-1 block text-xs text-zinc-500 dark:text-zinc-400">
-                {note}
-              </span>
-            )}
-          </li>
-        );
-      })}
+    <ol aria-label="Messages" className="flex flex-col gap-4">
+      {messages.map((message) => (
+        <MessageItem key={message.id} message={message} />
+      ))}
     </ol>
   );
 };

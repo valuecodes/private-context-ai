@@ -78,7 +78,7 @@ describe("Sidebar", () => {
       { conversations: [conversation("a", "First")] },
       true
     );
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>New chat</);
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*aria-label="New chat"/);
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>First</);
     expect(html).toMatch(/disabled=""[^>]*aria-label="Rename First"/);
     expect(html).toMatch(/disabled=""[^>]*aria-label="Delete First"/);

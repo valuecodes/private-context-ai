@@ -1,5 +1,6 @@
+import { ArrowUp, Square } from "lucide-react";
 import type { KeyboardEvent, SubmitEvent } from "react";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { sendsMessage } from "~/features/chat/chat-keys";
 
@@ -12,12 +13,23 @@ type ComposerProps = {
   onStop: () => void;
 };
 
-const button = "rounded-lg px-4 py-2 text-sm font-medium text-white";
+const button =
+  "flex size-9 shrink-0 items-center justify-center rounded-full text-white";
 
 const Composer = ({ streaming, canSend, onSend, onStop }: ComposerProps) => {
   const [draft, setDraft] = useState("");
+  const textarea = useRef<HTMLTextAreaElement>(null);
   const text = draft.trim();
   const sendable = canSend && text !== "";
+
+  // Grow with the draft up to `max-h-48`, then scroll; shrink after a send.
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (element !== null) {
+      element.style.height = "auto";
+      element.style.height = `${String(element.scrollHeight)}px`;
+    }
+  }, [draft]);
 
   const submit = () => {
     if (!sendable) {
@@ -48,20 +60,25 @@ const Composer = ({ streaming, canSend, onSend, onStop }: ComposerProps) => {
   };
 
   return (
-    <form onSubmit={onSubmit} className="flex items-end gap-2">
+    <form
+      onSubmit={onSubmit}
+      className="flex items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-2 pl-4 has-[textarea:focus]:ring-2 has-[textarea:focus]:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+    >
       <label htmlFor="composer" className="sr-only">
         Message
       </label>
       <textarea
         id="composer"
+        ref={textarea}
         value={draft}
         onChange={(event) => {
           setDraft(event.target.value);
         }}
         onKeyDown={onKeyDown}
-        rows={3}
+        rows={1}
         placeholder="Send a message (Enter to send, Shift+Enter for a new line, Esc to stop)"
-        className="flex-1 resize-none rounded-lg border border-zinc-300 bg-white p-2 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+        // No outline of its own: the form's ring shows the focus.
+        className="max-h-48 flex-1 resize-none overflow-y-auto bg-transparent py-2 text-sm outline-none"
       />
       {/* One button for Send and Stop: swapping two would drop the focus to
           the page when a reply starts or ends. `aria-disabled` rather than
@@ -76,11 +93,17 @@ const Composer = ({ streaming, canSend, onSend, onStop }: ComposerProps) => {
             onStop();
           }
         }}
+        aria-label={streaming ? "Stop reply" : "Send message"}
+        title={streaming ? "Stop reply (Esc)" : "Send message (Enter)"}
         aria-keyshortcuts={streaming ? "Escape" : undefined}
         aria-disabled={streaming || sendable ? undefined : true}
         className={`${button} ${streaming ? "bg-red-600 hover:bg-red-700" : "bg-zinc-900 hover:bg-zinc-700 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"}`}
       >
-        {streaming ? "Stop" : "Send"}
+        {streaming ? (
+          <Square aria-hidden="true" className="size-3.5 fill-current" />
+        ) : (
+          <ArrowUp aria-hidden="true" className="size-5" />
+        )}
       </button>
     </form>
   );

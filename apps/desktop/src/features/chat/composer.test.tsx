@@ -17,15 +17,16 @@ describe("Composer", () => {
   it("renders Send as aria-disabled, not disabled, when it cannot send", () => {
     // The draft starts empty, so Send cannot send yet.
     const html = renderComposer(false);
-    expect(html).toMatch(/<button type="submit"[^>]*aria-disabled="true"/);
-    expect(html).toMatch(/>Send<\/button>/);
+    expect(html).toMatch(
+      /<button type="submit"[^>]*aria-label="Send message"[^>]*aria-disabled="true"/
+    );
     expect(html).not.toContain('disabled=""');
   });
 
   it("renders the same button as Stop with its Escape shortcut while streaming", () => {
     const html = renderComposer(true);
     expect(html).toMatch(
-      /<button type="button"[^>]*aria-keyshortcuts="Escape"[^>]*>Stop<\/button>/
+      /<button type="button"[^>]*aria-label="Stop reply"[^>]*aria-keyshortcuts="Escape"/
     );
     expect(html).not.toContain("aria-disabled");
     expect(html.match(/<button/g)).toHaveLength(1);

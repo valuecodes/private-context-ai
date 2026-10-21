@@ -19,7 +19,7 @@ describe("Workspace", () => {
 
   it("renders the conversation sidebar while it loads", () => {
     expect(html).toContain("<aside");
-    expect(html).toMatch(/<button[^>]*>New chat<\/button>/);
+    expect(html).toMatch(/<button[^>]*aria-label="New chat"/);
     expect(html).toContain("Loading…");
   });
 

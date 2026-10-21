@@ -1,3 +1,4 @@
+import { Pencil, SquarePen, Trash } from "lucide-react";
 import type { KeyboardEvent, SubmitEvent } from "react";
 import { useState } from "react";
 
@@ -20,6 +21,9 @@ type SidebarItemProps = {
 
 const smallButton =
   "rounded px-1.5 py-0.5 text-xs text-zinc-500 hover:bg-zinc-200 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800";
+
+const iconButton =
+  "rounded p-1 text-zinc-500 hover:bg-zinc-200 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800";
 
 const SidebarItem = ({
   conversation,
@@ -126,9 +130,10 @@ const SidebarItem = ({
         }}
         disabled={disabled}
         aria-label={`Rename ${conversation.title}`}
-        className={smallButton}
+        title="Rename"
+        className={iconButton}
       >
-        Rename
+        <Pencil aria-hidden="true" className="size-3.5" />
       </button>
       <button
         type="button"
@@ -137,9 +142,10 @@ const SidebarItem = ({
         }}
         disabled={disabled}
         aria-label={`Delete ${conversation.title}`}
-        className={smallButton}
+        title="Delete"
+        className={iconButton}
       >
-        Delete
+        <Trash aria-hidden="true" className="size-3.5" />
       </button>
     </li>
   );
@@ -226,9 +232,11 @@ const Sidebar = ({
           type="button"
           onClick={onNew}
           disabled={disabled}
-          className="rounded border border-zinc-300 px-2 py-0.5 text-xs hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          aria-label="New chat"
+          title="New chat"
+          className={iconButton}
         >
-          New chat
+          <SquarePen aria-hidden="true" className="size-4" />
         </button>
       </div>
       {state.error !== null && (

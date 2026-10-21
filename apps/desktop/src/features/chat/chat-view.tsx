@@ -91,6 +91,7 @@ const ChatView = ({
   // An opened conversation may name a model that is no longer installed.
   const selected = pickModel(modelList, model, defaultModel);
   const streaming = state.phase === "streaming";
+  const empty = state.messages.length === 0 && !state.loading;
 
   // Esc stops the reply wherever focus is, not only in the composer.
   useEffect(() => {
@@ -150,17 +151,33 @@ const ChatView = ({
           </>
         )}
       </div>
-      {/* WebView2 makes an overflowing scroller keyboard-focusable on its
-          own; the label names it when it gets focus. */}
-      <div
-        ref={scroller}
-        onScroll={onScroll}
-        role="region"
-        aria-label="Conversation"
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
-      >
-        <MessageList messages={state.messages} />
-      </div>
+      {/* Only this slot switches between the empty state and the messages,
+          so the composer below stays mounted and keeps its focus on the
+          first send. WebView2 makes an overflowing scroller
+          keyboard-focusable on its own; the label names it when it gets
+          focus. */}
+      {empty ? (
+        <div className="flex flex-1 flex-col items-center justify-end gap-2 pb-4 text-center">
+          <h2 className="text-2xl font-semibold">How can I help?</h2>
+          {selected === "" && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              Pick a model and send a message to start.
+            </p>
+          )}
+        </div>
+      ) : (
+        <div
+          ref={scroller}
+          onScroll={onScroll}
+          role="region"
+          aria-label="Conversation"
+          className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
+        >
+          <div className="mx-auto w-full max-w-3xl">
+            <MessageList messages={state.messages} />
+          </div>
+        </div>
+      )}
       {state.notice !== null && (
         <p role="status" className="text-sm text-amber-700 dark:text-amber-400">
           {NOTICE_TEXT[state.notice]}
@@ -171,12 +188,14 @@ const ChatView = ({
           {state.error.message}
         </p>
       )}
-      <Composer
-        streaming={streaming}
-        canSend={selected !== "" && !state.loading}
-        onSend={(text) => send(selected, text)}
-        onStop={stop}
-      />
+      <div className={`mx-auto w-full max-w-3xl ${empty ? "flex-1" : ""}`}>
+        <Composer
+          streaming={streaming}
+          canSend={selected !== "" && !state.loading}
+          onSend={(text) => send(selected, text)}
+          onStop={stop}
+        />
+      </div>
     </div>
   );
 };
