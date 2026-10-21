@@ -6,6 +6,9 @@ const copyWithTextarea = (text: string): boolean => {
   if (typeof document === "undefined") {
     return false;
   }
+  // `select()` moves the focus; give it back so a keyboard user stays put.
+  // HTML and SVG elements both have `focus()`.
+  const focused = document.activeElement as HTMLElement | null;
   const textarea = document.createElement("textarea");
   textarea.value = text;
   textarea.setAttribute("readonly", "");
@@ -20,6 +23,7 @@ const copyWithTextarea = (text: string): boolean => {
     return false;
   } finally {
     textarea.remove();
+    focused?.focus();
   }
 };
 

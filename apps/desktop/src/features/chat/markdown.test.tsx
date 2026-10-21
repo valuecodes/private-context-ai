@@ -34,6 +34,13 @@ describe("Markdown", () => {
     expect(html).toContain("click");
   });
 
+  it("renders footnote links without a copy-link button", () => {
+    const html = render("Claim[^1]\n\n[^1]: Source");
+    expect(html).not.toContain("href=");
+    expect(html).not.toContain("Copy link");
+    expect(html).toContain("Source");
+  });
+
   it("renders an image as its alt text", () => {
     const html = render("![a cat](https://example.com/cat.png)");
     expect(html).not.toContain("<img");
