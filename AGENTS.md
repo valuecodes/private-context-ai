@@ -97,9 +97,27 @@ which rustup only honours when cargo runs inside `src-tauri`, so the `rust:*` sc
 the MSI installer. Linux: webkit2gtk 4.1, and later `perl`, `make` and a C compiler for
 SQLCipher.
 
-WSL2 lacks the webkit2gtk libraries and an OS keychain, so `tauri dev`, clippy and the
-tests do not run there. From WSL2 only `rust:fmt` works; say so in the PR description
-and run the rest from a Windows checkout.
+WSL2 runs `tauri dev` (through WSLg), clippy and the tests once webkit2gtk 4.1, the
+SQLCipher build tools and a Secret Service (such as GNOME Keyring) are installed, with
+Ollama on WSL's own loopback. A WSL2 setup without them can only run `rust:fmt`; say
+which checks ran in the PR description. `build:app` for the Windows installer always
+runs on Windows.
+
+### Security invariants
+
+The README's "Security model" section explains these; a change that breaks one needs
+discussion first.
+
+- **No egress except Ollama on loopback.** The webview has no network (strict CSP, no
+  Tauri plugins). Only Rust talks to Ollama, through `ollama/client.rs`, which refuses
+  non-loopback hosts, proxies and redirects; `reqwest` has no TLS feature.
+- **The model gets no tools.** `/api/chat` is called without `tools`, `format` or
+  `think`; replies are rendered as text, never as HTML.
+- **Encrypted at rest.** All chat data lives in the SQLCipher database, only Rust opens
+  it, and its key never reaches the webview.
+- **Observable.** Every outbound request writes an audit row before its socket opens.
+  Logs hold metadata only; prompt and reply text stay in `Redacted`.
+- **One IPC seam.** Only `apps/desktop/src/lib/ipc.ts` imports `@tauri-apps/api`.
 
 ---
 

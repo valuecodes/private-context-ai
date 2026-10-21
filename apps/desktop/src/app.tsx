@@ -3,7 +3,10 @@ import { useEffect, useState } from "react";
 import { loadVersion } from "~/app-version";
 import { ActivityPanel } from "~/features/activity/activity-panel";
 import { ChatView } from "~/features/chat/chat-view";
-import { useChatStream } from "~/features/chat/use-chat-stream";
+import {
+  replyAnnouncement,
+  useChatStream,
+} from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
 import { SettingsView } from "~/features/settings/settings-view";
@@ -116,6 +119,11 @@ const Workspace = () => {
         </nav>
         <main className="flex min-h-0 flex-1 flex-col">
           <h1 className="sr-only">Private Context AI</h1>
+          {/* Outside the views, so a reply that ends while Activity or
+              Settings is open is still read out. */}
+          <p role="status" className="sr-only">
+            {replyAnnouncement(chat.state)}
+          </p>
           {view === "chat" && (
             <ChatView
               reachable={isReachable(status)}

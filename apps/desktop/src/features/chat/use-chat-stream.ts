@@ -64,8 +64,33 @@ const createChatState = (conversationId: string | null = null): ChatState => ({
   notice: null,
 });
 
+const ASSISTANT_SUFFIX = ":assistant";
+
 const userId = (streamId: string): string => `${streamId}:user`;
-const assistantId = (streamId: string): string => `${streamId}:assistant`;
+const assistantId = (streamId: string): string =>
+  `${streamId}${ASSISTANT_SUFFIX}`;
+
+/**
+ * What the screen reader's live region says: that a reply is coming, then the
+ * finished reply once. Only replies sent in this view are read: saved ones
+ * carry database ids, not `assistantId`s.
+ */
+const replyAnnouncement = (state: ChatState): string => {
+  if (state.phase === "streaming") {
+    return "Assistant is replying…";
+  }
+  const last = state.messages.at(-1);
+  if (last?.role !== "assistant" || !last.id.endsWith(ASSISTANT_SUFFIX)) {
+    return "";
+  }
+  if (last.status === "complete") {
+    return `Assistant replied: ${last.content}`;
+  }
+  if (last.status === "cancelled") {
+    return "Reply stopped.";
+  }
+  return last.status === "error" ? "Reply failed." : "";
+};
 
 const updateMessage = (
   messages: UiMessage[],
@@ -387,6 +412,7 @@ export {
   chatReducer,
   createChatState,
   fromStored,
+  replyAnnouncement,
   titleFromPrompt,
   useChatStream,
 };

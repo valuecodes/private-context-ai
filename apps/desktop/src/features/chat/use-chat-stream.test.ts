@@ -7,6 +7,7 @@ import {
   chatReducer,
   createChatState,
   fromStored,
+  replyAnnouncement,
   titleFromPrompt,
 } from "./use-chat-stream";
 
@@ -320,6 +321,47 @@ describe("fromStored", () => {
       ["c", "cancelled"],
       ["e", "error"],
     ]);
+  });
+});
+
+describe("replyAnnouncement", () => {
+  it("announces a reply in progress", () => {
+    expect(replyAnnouncement(sent())).toBe("Assistant is replying…");
+  });
+
+  it("reads a finished reply once", () => {
+    const state = event(
+      event(sent(), { type: "token", content: "Hello" }),
+      done()
+    );
+    expect(replyAnnouncement(state)).toBe("Assistant replied: Hello");
+  });
+
+  it("announces stopped and failed replies", () => {
+    expect(replyAnnouncement(chatReducer(sent(), { type: "cancel" }))).toBe(
+      "Reply stopped."
+    );
+    const failed = event(sent(), {
+      type: "error",
+      error: { kind: "timeout", message: "slow" },
+    });
+    expect(replyAnnouncement(failed)).toBe("Reply failed.");
+  });
+
+  it("announces nothing for a loaded conversation", () => {
+    expect(replyAnnouncement(createChatState())).toBe("");
+    const loaded = chatReducer(
+      chatReducer(createChatState(), { type: "open", conversationId: "c1" }),
+      {
+        type: "loaded",
+        conversationId: "c1",
+        messages: fromStored([
+          stored("u", "user", "complete"),
+          stored("a", "assistant", "complete"),
+        ]),
+      }
+    );
+    expect(replyAnnouncement(loaded)).toBe("");
   });
 });
 

@@ -1,6 +1,7 @@
 import type { Dispatch, SetStateAction, UIEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
+import { stopsReply } from "~/features/chat/chat-keys";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
@@ -91,6 +92,25 @@ const ChatView = ({
   const selected = pickModel(modelList, model, defaultModel);
   const streaming = state.phase === "streaming";
 
+  // Esc stops the reply wherever focus is, not only in the composer.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        stopsReply(event, {
+          streaming,
+          inTextField: event.target instanceof HTMLInputElement,
+        })
+      ) {
+        event.preventDefault();
+        stop();
+      }
+    };
+    globalThis.addEventListener("keydown", onKeyDown);
+    return () => {
+      globalThis.removeEventListener("keydown", onKeyDown);
+    };
+  }, [streaming, stop]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <div className="flex items-center gap-2">
@@ -130,15 +150,19 @@ const ChatView = ({
           </>
         )}
       </div>
+      {/* WebView2 makes an overflowing scroller keyboard-focusable on its
+          own; the label names it when it gets focus. */}
       <div
         ref={scroller}
         onScroll={onScroll}
-        className="flex min-h-0 flex-1 flex-col overflow-y-auto"
+        role="region"
+        aria-label="Conversation"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
       >
         <MessageList messages={state.messages} />
       </div>
       {state.notice !== null && (
-        <p className="text-sm text-amber-700 dark:text-amber-400">
+        <p role="status" className="text-sm text-amber-700 dark:text-amber-400">
           {NOTICE_TEXT[state.notice]}
         </p>
       )}
