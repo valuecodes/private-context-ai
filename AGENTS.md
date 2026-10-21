@@ -83,13 +83,15 @@ to `main` and on PRs.
 build or check Rust at all. Crates are pinned exactly (`=x.y.z`) and `Cargo.lock` is
 committed. Before a PR that touches the desktop app merges, run on a Windows checkout:
 the three `rust:*` scripts above, `pnpm --filter desktop dev` (window opens, `invoke`
-works), and `pnpm --filter desktop build:app`, then open the built app and check its
-devtools console for CSP violations.
+works), and `pnpm --filter desktop build:app`. For the CSP check, also build
+`pnpm --filter desktop build:app --debug`, open that bundle and check its devtools
+console for CSP violations: release builds have no devtools (the `devtools` Cargo
+feature is off).
 
 On desktop, `tauri dev` loads the Vite server directly, so Tauri applies neither `csp`
 nor `devCsp` there (Tauri proxies the dev server, and so applies `devCsp`, only on
-mobile). The production CSP is enforced only in the bundled app, which is why the CSP
-check runs against the `build:app` output.
+mobile). The production CSP is enforced only in a bundled app, release or debug, which
+is why the CSP check runs against the `build:app --debug` output.
 
 Prerequisites: rustup. The toolchain is pinned by `src-tauri/rust-toolchain.toml`,
 which rustup only honours when cargo runs inside `src-tauri`, so the `rust:*` scripts

@@ -153,9 +153,12 @@ pnpm --filter desktop build:app
 
 On Windows this writes an MSI and an NSIS setup program under
 `apps/desktop/src-tauri/target/release/bundle/` (`msi/` and `nsis/`). The installers
-are not code-signed, so Windows SmartScreen warns before the first run. After
-installing, open the app and check its devtools console for CSP violations: only the
-bundled app enforces the production CSP.
+are not code-signed, so Windows SmartScreen warns before the first run.
+
+Only a bundled app enforces the production CSP, and release builds have no devtools.
+To check for CSP violations, build a debug bundle with
+`pnpm --filter desktop build:app --debug` (written under `target/debug/bundle/`), run
+it, and open its devtools console (right-click → Inspect).
 
 ## Where is my data
 
