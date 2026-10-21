@@ -71,24 +71,15 @@ pub async fn chat_send(
 }
 
 /// The `think` value to send, from the model's (cached, audited)
-/// capabilities. When the lookup fails, a send that asked for nothing goes
-/// ahead without `think`; one that asked for thinking reports the failure.
+/// capabilities. A failed lookup fails the send: without it a thinking model
+/// would get Ollama's default instead of an explicit `false`.
 async fn think_for(
     ollama: &Ollama,
     model: &str,
     requested: Option<Think>,
 ) -> Result<Option<Think>, AppError> {
-    match ollama.model_capabilities(model).await {
-        Ok(caps) => resolve_think(&caps, requested),
-        Err(error) if requested.is_none() => {
-            tracing::warn!(
-                kind = error.kind(),
-                "could not read the model's capabilities"
-            );
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
+    let caps = ollama.model_capabilities(model).await?;
+    resolve_think(&caps, requested)
 }
 
 #[tauri::command]
@@ -549,18 +540,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn think_for_falls_back_only_when_nothing_was_asked() {
+    async fn think_for_fails_closed_when_lookup_fails() {
         // Nothing listens, so the capability lookup fails.
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = OllamaBaseUrl::parse(&format!("http://{}", listener.local_addr().unwrap()));
         drop(listener);
         let ollama = Ollama::new(base, Arc::new(Audit::new()));
 
-        assert_eq!(think_for(&ollama, "qwen3", None).await, Ok(None));
-        assert!(matches!(
-            think_for(&ollama, "qwen3", Some(Think::Enabled(true))).await,
-            Err(AppError::Unreachable(_) | AppError::Timeout(_))
-        ));
+        // Never a send without `think` to a model that might think.
+        for requested in [
+            None,
+            Some(Think::Enabled(false)),
+            Some(Think::Enabled(true)),
+        ] {
+            assert!(
+                matches!(
+                    think_for(&ollama, "qwen3", requested).await,
+                    Err(AppError::Unreachable(_) | AppError::Timeout(_))
+                ),
+                "{requested:?}"
+            );
+        }
     }
 
     #[tokio::test]
