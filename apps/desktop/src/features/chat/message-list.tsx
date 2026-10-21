@@ -43,14 +43,24 @@ const CopyMessage = ({ text }: { text: string }) => {
   );
 };
 
+/**
+ * Past this, a streaming reply is shown as plain text until it ends: each
+ * Markdown parse is synchronous and covers the whole reply.
+ */
+const STREAM_MARKDOWN_MAX_CHARS = 16 * 1024;
+
 const AssistantReply = ({ message }: { message: UiMessage }) => {
   // Re-parsing the Markdown on every token is low priority: React drops
-  // stale values, so a long reply never blocks typing or Stop.
+  // stale values, so a short reply never blocks typing or Stop.
   const text = useDeferredValue(message.content);
-  if (message.status === "streaming" && message.content === "") {
+  const streaming = message.status === "streaming";
+  if (streaming && message.content === "") {
     return <TypingIndicator />;
   }
-  return <Markdown text={text} highlight={message.status !== "streaming"} />;
+  if (streaming && text.length > STREAM_MARKDOWN_MAX_CHARS) {
+    return <p className="whitespace-pre-wrap">{text}</p>;
+  }
+  return <Markdown text={text} highlight={!streaming} />;
 };
 
 /**
@@ -103,4 +113,4 @@ const MessageList = ({ messages }: { messages: UiMessage[] }) => {
   );
 };
 
-export { MessageList };
+export { MessageList, STREAM_MARKDOWN_MAX_CHARS };
