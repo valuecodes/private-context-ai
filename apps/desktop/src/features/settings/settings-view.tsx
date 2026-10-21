@@ -260,6 +260,10 @@ const SettingsView = ({ onSaved }: SettingsViewProps) => {
         onChange={(next) => {
           setDraft(next);
           setSaved(false);
+          // An edited URL is no longer the one that was rejected.
+          if (next.ollamaBaseUrl !== draft.ollamaBaseUrl) {
+            setErrors((current) => ({ ...current, url: null }));
+          }
         }}
         onSubmit={() => {
           void save(draft);
