@@ -1,6 +1,8 @@
 /** What the `app_info` command returns. */
 type AppInfo = {
   version: string;
+  /** Where the log files are, shown as text. */
+  logDir: string;
 };
 
 /** Mirror of the Rust `AppError`: every rejected command carries one. */
@@ -92,15 +94,54 @@ type ChatEvent =
 /** The id `chat_send` returns, for `chat_cancel`. */
 type RequestId = string;
 
+/** `attempt`: started, no outcome yet (or the app stopped while it ran). */
+type AuditStatus = "attempt" | "ok" | "error" | "cancelled";
+
+/** One row of `activity_list`. Metadata only, never message content. */
+type AuditEvent = {
+  id: number;
+  /** ISO-8601 UTC. */
+  at: string;
+  /** `ollama.chat`, `ollama.tags`, `ollama.version`, `app.start`, `db.open`. */
+  kind: string;
+  /** `host:port`; null for lifecycle events. */
+  host: string | null;
+  endpoint: string | null;
+  model: string | null;
+  status: AuditStatus;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  durationMs: number | null;
+  detail: string | null;
+};
+
+type LogLevel = "error" | "warn" | "info" | "debug" | "trace";
+
+/** What `settings_get` and `settings_set` return. */
+type Settings = {
+  ollamaBaseUrl: string;
+  /** Empty when none was picked. */
+  defaultModel: string;
+  logLevel: LogLevel;
+};
+
+/** What `settings_set` takes: only the fields to change. */
+type SettingsPatch = Partial<Settings>;
+
 export type {
   AppError,
   AppInfo,
+  AuditEvent,
+  AuditStatus,
   ChatEvent,
   Conversation,
   ConversationWithMessages,
+  LogLevel,
   ModelInfo,
   OllamaStatus,
   RequestId,
+  Settings,
+  SettingsPatch,
   StorageStatus,
   StoredMessage,
 };

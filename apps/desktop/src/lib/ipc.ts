@@ -4,12 +4,15 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 
 import type {
   AppInfo,
+  AuditEvent,
   ChatEvent,
   Conversation,
   ConversationWithMessages,
   ModelInfo,
   OllamaStatus,
   RequestId,
+  Settings,
+  SettingsPatch,
   StorageStatus,
 } from "~/lib/types";
 
@@ -69,7 +72,25 @@ const chatSend = (
 const chatCancel = (requestId: RequestId): Promise<void> =>
   invoke<undefined>("chat_cancel", { requestId });
 
+/** Newest first; `before` is the id of the last row already shown. */
+const activityList = (
+  limit: number,
+  before: number | null = null
+): Promise<AuditEvent[]> =>
+  invoke<AuditEvent[]>("activity_list", { limit, before });
+
+/** Every host in the retained audit rows, sorted. */
+const activityHosts = (): Promise<string[]> =>
+  invoke<string[]>("activity_hosts");
+
+const settingsGet = (): Promise<Settings> => invoke<Settings>("settings_get");
+
+const settingsSet = (patch: SettingsPatch): Promise<Settings> =>
+  invoke<Settings>("settings_set", { patch });
+
 export {
+  activityHosts,
+  activityList,
   appInfo,
   chatCancel,
   chatSend,
@@ -80,5 +101,7 @@ export {
   conversationRename,
   ollamaListModels,
   ollamaStatus,
+  settingsGet,
+  settingsSet,
   storageStatus,
 };

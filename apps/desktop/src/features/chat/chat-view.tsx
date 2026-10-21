@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
+import { pickModel } from "~/features/chat/pick-model";
 import type { ChatState } from "~/features/chat/use-chat-stream";
 import { toAppError } from "~/lib/app-error";
 import { ollamaListModels } from "~/lib/ipc";
@@ -23,12 +24,6 @@ const modelLabel = (model: ModelInfo): string =>
     ? model.name
     : `${model.name} (${model.parameterSize})`;
 
-/** The selected model if it is still listed, else the first one. */
-const pickModel = (models: ModelInfo[], current: string): string =>
-  models.some((model) => model.name === current)
-    ? current
-    : (models[0]?.name ?? "");
-
 type ChatViewProps = {
   reachable: boolean;
   state: ChatState;
@@ -37,6 +32,8 @@ type ChatViewProps = {
   /** Owned by the parent, so opening a conversation can pick its model. */
   model: string;
   setModel: Dispatch<SetStateAction<string>>;
+  /** From Settings; used when `model` is empty or not installed. */
+  defaultModel: string;
 };
 
 const ChatView = ({
@@ -46,6 +43,7 @@ const ChatView = ({
   stop,
   model,
   setModel,
+  defaultModel,
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
@@ -74,7 +72,6 @@ const ChatView = ({
         (list) => {
           if (!cancelled) {
             setModels({ phase: "ready", models: list });
-            setModel((current) => pickModel(list, current));
           }
         },
         (error: unknown) => {
@@ -87,11 +84,11 @@ const ChatView = ({
     return () => {
       cancelled = true;
     };
-  }, [reachable, modelsAttempt, setModel]);
+  }, [reachable, modelsAttempt]);
 
   const modelList = models.phase === "ready" ? models.models : [];
   // An opened conversation may name a model that is no longer installed.
-  const selected = pickModel(modelList, model);
+  const selected = pickModel(modelList, model, defaultModel);
   const streaming = state.phase === "streaming";
 
   return (

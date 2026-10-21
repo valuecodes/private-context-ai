@@ -8,7 +8,10 @@ vi.mock("~/lib/ipc");
 
 describe("loadVersion", () => {
   it("returns the version from the app_info command", async () => {
-    vi.mocked(appInfo).mockResolvedValueOnce({ version: "1.2.3" });
+    vi.mocked(appInfo).mockResolvedValueOnce({
+      version: "1.2.3",
+      logDir: "/logs",
+    });
     await expect(loadVersion()).resolves.toBe("1.2.3");
   });
 

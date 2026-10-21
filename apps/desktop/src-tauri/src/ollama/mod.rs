@@ -8,10 +8,11 @@ pub mod stream;
 pub mod types;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 use uuid::Uuid;
 
 use self::client::{OllamaBaseUrl, build_http, get_json};
@@ -20,7 +21,7 @@ use self::types::{
     ChatEvent, ChatMessage, ChatOptions, ChatRequest, ModelInfo, OllamaStatus, TagsResponse,
     VersionResponse, validate_chat_input,
 };
-use crate::audit::{AuditEvent, AuditSink, now_ms};
+use crate::audit::{Audit, AuditId, AuditOutcome, AuditStatus, NewAuditEvent};
 use crate::error::AppError;
 
 const MIB: usize = 1024 * 1024;
@@ -102,60 +103,143 @@ pub struct Admission {
     cancel: CancellationToken,
 }
 
-/// The Ollama side of the app state, managed by Tauri as `Arc<Ollama>`.
-pub struct Ollama {
-    /// An invalid URL is kept as the error so the app still starts and every
-    /// command reports it before opening a socket.
+/// A base URL and the client built for it. An invalid URL is kept as the
+/// error so the app still starts and every command reports it before opening
+/// a socket.
+struct Connection {
     base_url: Result<OllamaBaseUrl, AppError>,
     http: Result<reqwest::Client, AppError>,
+}
+
+impl Connection {
+    fn new(base_url: Result<OllamaBaseUrl, AppError>) -> Self {
+        let http = match &base_url {
+            Ok(base) => build_http(base),
+            Err(err) => Err(err.clone()),
+        };
+        Self { base_url, http }
+    }
+
+    fn get(&self) -> Result<(&OllamaBaseUrl, &reqwest::Client), AppError> {
+        let base = self.base_url.as_ref().map_err(Clone::clone)?;
+        let http = self.http.as_ref().map_err(Clone::clone)?;
+        Ok((base, http))
+    }
+}
+
+/// One outbound request: its audit row, written before the socket opens, and
+/// its log span.
+struct Tracked {
+    audit: Arc<Audit>,
+    id: AuditId,
+    started: Instant,
+    span: tracing::Span,
+}
+
+impl Tracked {
+    fn begin(
+        audit: &Arc<Audit>,
+        kind: &'static str,
+        base: &OllamaBaseUrl,
+        endpoint: &'static str,
+        model: Option<&str>,
+    ) -> Result<Self, AppError> {
+        let host = base.host_port();
+        let span = tracing::info_span!("ollama_request", kind, host = %host, endpoint);
+        let id = audit.begin(NewAuditEvent::request(kind, host, endpoint, model))?;
+        Ok(Self {
+            audit: Arc::clone(audit),
+            id,
+            started: Instant::now(),
+            span,
+        })
+    }
+
+    /// Logs counts and duration (never content) and writes the outcome.
+    fn finish(self, mut outcome: AuditOutcome) {
+        let duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        outcome.duration_ms = Some(duration_ms);
+        self.span.in_scope(|| {
+            tracing::info!(
+                status = outcome.status.as_str(),
+                duration_ms,
+                prompt_tokens = outcome.prompt_tokens,
+                completion_tokens = outcome.completion_tokens,
+                detail = outcome.detail.as_deref(),
+                "request finished"
+            );
+        });
+        self.audit.finish(self.id, &outcome);
+    }
+}
+
+fn result_outcome<T>(result: &Result<T, AppError>, http_status: Option<u16>) -> AuditOutcome {
+    match result {
+        Ok(_) => AuditOutcome::new(AuditStatus::Ok),
+        Err(err) => AuditOutcome::failed(err, http_status),
+    }
+}
+
+/// The Ollama side of the app state, managed by Tauri as `Arc<Ollama>`.
+pub struct Ollama {
+    /// Swapped by [`Self::set_base_url`]; a request keeps the one it started
+    /// with.
+    connection: RwLock<Arc<Connection>>,
     inflight: Inflight,
-    audit: Arc<dyn AuditSink>,
+    audit: Arc<Audit>,
     limits: Limits,
 }
 
 impl Ollama {
-    pub fn new(base_url: Result<OllamaBaseUrl, AppError>, audit: Arc<dyn AuditSink>) -> Self {
+    pub fn new(base_url: Result<OllamaBaseUrl, AppError>, audit: Arc<Audit>) -> Self {
         Self::with_limits(base_url, audit, Limits::default())
     }
 
     pub fn with_limits(
         base_url: Result<OllamaBaseUrl, AppError>,
-        audit: Arc<dyn AuditSink>,
+        audit: Arc<Audit>,
         limits: Limits,
     ) -> Self {
-        let http = match &base_url {
-            Ok(base) => build_http(base),
-            Err(err) => Err(err.clone()),
-        };
         Self {
-            base_url,
-            http,
+            connection: RwLock::new(Arc::new(Connection::new(base_url))),
             inflight: Arc::default(),
             audit,
             limits,
         }
     }
 
-    fn connection(&self) -> Result<(&OllamaBaseUrl, &reqwest::Client), AppError> {
-        let base = self.base_url.as_ref().map_err(Clone::clone)?;
-        let http = self.http.as_ref().map_err(Clone::clone)?;
-        Ok((base, http))
+    fn connection(&self) -> Arc<Connection> {
+        // Every critical section is one assignment or one clone, so a
+        // poisoned lock is still consistent.
+        Arc::clone(
+            &self
+                .connection
+                .read()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
+    }
+
+    /// Points later requests at `base_url`. Requests already running keep
+    /// their target.
+    pub fn set_base_url(&self, base_url: Result<OllamaBaseUrl, AppError>) {
+        let connection = Arc::new(Connection::new(base_url));
+        *self
+            .connection
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = connection;
     }
 
     /// `reachable: false` when nothing answers; an error only for a rejected
-    /// base URL or a broken reply.
+    /// base URL, a broken reply or no audit log.
     pub async fn status(&self) -> Result<OllamaStatus, AppError> {
-        let (base, http) = self.connection()?;
-        let started = Instant::now();
+        let connection = self.connection();
+        let (base, http) = connection.get()?;
+        let tracked = Tracked::begin(&self.audit, "ollama.version", base, "/api/version", None)?;
         let (http_status, result) =
-            get_json::<VersionResponse>(http, base.endpoint("/api/version"), VERSION_TIMEOUT).await;
-        self.audit.record(audit_event(
-            "ollama.version",
-            base,
-            started,
-            http_status,
-            outcome(&result),
-        ));
+            get_json::<VersionResponse>(http, base.endpoint("/api/version"), VERSION_TIMEOUT)
+                .instrument(tracked.span.clone())
+                .await;
+        tracked.finish(result_outcome(&result, http_status));
         let base_url = base.to_string();
         match result {
             Ok(version) => Ok(OllamaStatus {
@@ -173,17 +257,14 @@ impl Ollama {
     }
 
     pub async fn list_models(&self) -> Result<Vec<ModelInfo>, AppError> {
-        let (base, http) = self.connection()?;
-        let started = Instant::now();
+        let connection = self.connection();
+        let (base, http) = connection.get()?;
+        let tracked = Tracked::begin(&self.audit, "ollama.tags", base, "/api/tags", None)?;
         let (http_status, result) =
-            get_json::<TagsResponse>(http, base.endpoint("/api/tags"), TAGS_TIMEOUT).await;
-        self.audit.record(audit_event(
-            "ollama.tags",
-            base,
-            started,
-            http_status,
-            outcome(&result),
-        ));
+            get_json::<TagsResponse>(http, base.endpoint("/api/tags"), TAGS_TIMEOUT)
+                .instrument(tracked.span.clone())
+                .await;
+        tracked.finish(result_outcome(&result, http_status));
         Ok(result?.models.into_iter().map(ModelInfo::from).collect())
     }
 
@@ -208,7 +289,7 @@ impl Ollama {
     /// in total). The slot is visible to `chat_cancel` and
     /// `cancel_conversation` at once; dropping the admission frees it.
     pub fn admit(&self, conversation_id: Uuid) -> Result<Admission, AppError> {
-        self.connection()?;
+        self.connection().get()?;
         let request_id = Uuid::new_v4();
         let cancel = CancellationToken::new();
         let finished = CancellationToken::new();
@@ -247,10 +328,32 @@ impl Ollama {
         })
     }
 
-    /// Spawns the streaming worker for an admitted request and returns its
-    /// id. `on_end` runs exactly once, on every path, before the audit record.
-    /// A request cancelled while admitted ends at once as `Cancelled`. Must be
-    /// called inside a tokio runtime.
+    /// Everything `start` needs before spawning; the audit row is written
+    /// last, so a request refused here leaves no `attempt` behind.
+    fn prepare_chat(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        options: Option<&ChatOptions>,
+    ) -> Result<(reqwest::Client, url::Url, Vec<u8>, Tracked), AppError> {
+        let connection = self.connection();
+        let (base, http) = connection.get()?;
+        let body = serde_json::to_vec(&ChatRequest {
+            model,
+            messages,
+            stream: true,
+            options,
+        })
+        .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
+        let tracked = Tracked::begin(&self.audit, "ollama.chat", base, "/api/chat", Some(model))?;
+        Ok((http.clone(), base.endpoint("/api/chat"), body, tracked))
+    }
+
+    /// Writes the request's `attempt` row, spawns the streaming worker for an
+    /// admitted request and returns its id. `on_end` runs exactly once, on
+    /// every path, before the outcome is written. A request cancelled while
+    /// admitted ends at once as `Cancelled`. Must be called inside a tokio
+    /// runtime.
     pub fn start<F, E>(
         self: &Arc<Self>,
         admission: Admission,
@@ -264,59 +367,47 @@ impl Ollama {
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
         E: FnOnce(&ChatEnd) + Send + 'static,
     {
-        let (base, http) = match self.connection() {
-            Ok(connection) => connection,
+        let (http, url, body, tracked) = match self.prepare_chat(model, messages, options) {
+            Ok(prepared) => prepared,
             Err(err) => {
                 on_end(&ChatEnd::Failed(err.clone()));
                 return Err(err);
             }
         };
-        let body = match serde_json::to_vec(&ChatRequest {
-            model,
-            messages,
-            stream: true,
-            options,
-        }) {
-            Ok(body) => body,
-            Err(err) => {
-                let err = AppError::Internal(format!("request body: {err}"));
-                on_end(&ChatEnd::Failed(err.clone()));
-                return Err(err);
-            }
-        };
-        let url = base.endpoint("/api/chat");
-        let base = base.clone();
-        let http = http.clone();
         let Admission { guard, cancel } = admission;
         let request_id = guard.request_id;
 
         let this = Arc::clone(self);
-        tokio::spawn(async move {
-            let _guard = guard;
-            let started = Instant::now();
-            let run = run_chat(&http, url, body, &this.limits, &cancel, &sink).await;
-            if let ChatEnd::Failed(error) = &run.end
-                && !cancel.is_cancelled()
-            {
-                sink(ChatEvent::Error {
-                    error: error.clone(),
-                });
+        let span = tracked.span.clone();
+        tokio::spawn(
+            async move {
+                let _guard = guard;
+                let run = run_chat(&http, url, body, &this.limits, &cancel, &sink).await;
+                if let ChatEnd::Failed(error) = &run.end
+                    && !cancel.is_cancelled()
+                {
+                    sink(ChatEvent::Error {
+                        error: error.clone(),
+                    });
+                }
+                on_end(&run.end);
+                let outcome = match &run.end {
+                    ChatEnd::Done {
+                        prompt_tokens,
+                        completion_tokens,
+                        ..
+                    } => AuditOutcome {
+                        prompt_tokens: *prompt_tokens,
+                        completion_tokens: *completion_tokens,
+                        ..AuditOutcome::new(AuditStatus::Ok)
+                    },
+                    ChatEnd::Cancelled => AuditOutcome::new(AuditStatus::Cancelled),
+                    ChatEnd::Failed(error) => AuditOutcome::failed(error, run.http_status),
+                };
+                tracked.finish(outcome);
             }
-            on_end(&run.end);
-            let (outcome, prompt_tokens, completion_tokens) = match run.end {
-                ChatEnd::Done {
-                    prompt_tokens,
-                    completion_tokens,
-                    ..
-                } => ("ok".to_owned(), prompt_tokens, completion_tokens),
-                ChatEnd::Cancelled => ("cancelled".to_owned(), None, None),
-                ChatEnd::Failed(error) => (format!("error:{}", error.kind()), None, None),
-            };
-            let mut event = audit_event("ollama.chat", &base, started, run.http_status, outcome);
-            event.prompt_tokens = prompt_tokens;
-            event.completion_tokens = completion_tokens;
-            this.audit.record(event);
-        });
+            .instrument(span),
+        );
         Ok(request_id)
     }
 
@@ -356,31 +447,15 @@ impl Ollama {
     pub(crate) fn inflight_len(&self) -> usize {
         lock(&self.inflight).len()
     }
-}
 
-fn outcome<T>(result: &Result<T, AppError>) -> String {
-    match result {
-        Ok(_) => "ok".to_owned(),
-        Err(err) => format!("error:{}", err.kind()),
-    }
-}
-
-fn audit_event(
-    action: &str,
-    base: &OllamaBaseUrl,
-    started: Instant,
-    http_status: Option<u16>,
-    outcome: String,
-) -> AuditEvent {
-    AuditEvent {
-        at_ms: now_ms(),
-        action: action.to_owned(),
-        target: base.host_port(),
-        outcome,
-        duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-        http_status,
-        prompt_tokens: None,
-        completion_tokens: None,
+    /// The current target, or `None` for a rejected URL.
+    #[cfg(test)]
+    pub(crate) fn current_base_url(&self) -> Option<String> {
+        self.connection()
+            .base_url
+            .as_ref()
+            .ok()
+            .map(ToString::to_string)
     }
 }
 
@@ -393,9 +468,11 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
 
     use super::*;
-    use crate::audit::MemorySink;
+    use crate::audit::AuditEvent;
     use crate::ollama::types::ChatRole;
     use crate::redacted::Redacted;
+    use crate::storage::Storage;
+    use crate::storage::testing::{break_writes, temp_storage};
 
     /// What the fake Ollama answers to every connection.
     #[derive(Clone)]
@@ -511,11 +588,43 @@ mod tests {
         }
     }
 
-    fn ollama_at(addr: SocketAddr, limits: Limits) -> (Arc<Ollama>, Arc<MemorySink>) {
-        let sink = Arc::new(MemorySink::new());
-        let base = OllamaBaseUrl::parse(&format!("http://{addr}"));
-        let ollama = Arc::new(Ollama::with_limits(base, sink.clone(), limits));
-        (ollama, sink)
+    /// The audit rows of a test's database.
+    struct Log {
+        storage: Arc<Storage>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Log {
+        fn new() -> Self {
+            let (storage, dir) = temp_storage();
+            Self { storage, _dir: dir }
+        }
+
+        fn audit(&self) -> Arc<Audit> {
+            Arc::new(Audit::over(Arc::clone(&self.storage)))
+        }
+
+        /// Newest first.
+        fn all(&self) -> Vec<AuditEvent> {
+            self.storage.list_audit(usize::MAX, None).unwrap()
+        }
+
+        fn last(&self) -> AuditEvent {
+            self.all().into_iter().next().expect("no audit rows")
+        }
+    }
+
+    fn ollama_with_base(
+        base: Result<OllamaBaseUrl, AppError>,
+        limits: Limits,
+    ) -> (Arc<Ollama>, Log) {
+        let log = Log::new();
+        let ollama = Arc::new(Ollama::with_limits(base, log.audit(), limits));
+        (ollama, log)
+    }
+
+    fn ollama_at(addr: SocketAddr, limits: Limits) -> (Arc<Ollama>, Log) {
+        ollama_with_base(OllamaBaseUrl::parse(&format!("http://{addr}")), limits)
     }
 
     type Events = Arc<Mutex<Vec<ChatEvent>>>;
@@ -647,9 +756,8 @@ mod tests {
     #[tokio::test]
     async fn invalid_base_url_rejected_without_socket() {
         let fake = fake_ollama(Reply::Lines(vec![DONE], Duration::ZERO)).await;
-        let sink = Arc::new(MemorySink::new());
         let base = OllamaBaseUrl::parse(&format!("http://10.0.0.1:{}", fake.addr.port()));
-        let ollama = Arc::new(Ollama::with_limits(base, sink.clone(), test_limits()));
+        let (ollama, log) = ollama_with_base(base, test_limits());
         let (events, emit) = collector();
 
         let err = send(&ollama, Uuid::new_v4(), emit).unwrap_err();
@@ -665,14 +773,14 @@ mod tests {
 
         assert_eq!(ollama.inflight_len(), 0);
         assert!(snapshot(&events).is_empty());
-        assert!(sink.recent(usize::MAX).is_empty());
+        assert!(log.all().is_empty());
         assert_eq!(fake.accepted.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
     async fn cancel_before_first_chunk_frees_slot() {
         let fake = fake_ollama(Reply::Silent).await;
-        let (ollama, audit) = ollama_at(fake.addr, test_limits());
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
         let (events, sink) = collector();
 
         let id = send(&ollama, Uuid::new_v4(), sink).unwrap();
@@ -680,7 +788,80 @@ mod tests {
 
         assert_eq!(ollama.inflight_len(), 0);
         assert!(snapshot(&events).is_empty());
-        assert_eq!(audit.recent(1)[0].outcome, "cancelled");
+        assert_eq!(log.last().status, AuditStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn attempt_row_written_before_reply() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+
+        let id = send(&ollama, Uuid::new_v4(), |_| true).unwrap();
+        // `start` returned, so the row exists whether or not the worker has
+        // connected yet.
+        let row = log.last();
+        assert_eq!(row.kind, "ollama.chat");
+        assert_eq!(row.status, AuditStatus::Attempt);
+        assert_eq!(row.host, Some(fake.addr.to_string()));
+        assert_eq!(row.endpoint.as_deref(), Some("/api/chat"));
+        assert_eq!(row.model.as_deref(), Some("llama3.2"));
+        assert_eq!(row.duration_ms, None);
+
+        ollama.chat_cancel(id).await.unwrap();
+        let row = log.last();
+        assert_eq!(row.status, AuditStatus::Cancelled);
+        assert!(row.duration_ms.is_some());
+        assert_eq!(log.all().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn audit_write_failure_refuses_request() {
+        let fake = fake_ollama(Reply::Json(r#"{"version":"0.12.3"}"#)).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+        let ends = Ends::default();
+        break_writes(&log.storage);
+
+        let err = send_with_end(&ollama, Uuid::new_v4(), |_| true, &ends).unwrap_err();
+        assert!(matches!(err, AppError::Database(_)));
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Failed(AppError::Database(_))]
+        ));
+        assert!(matches!(ollama.status().await, Err(AppError::Database(_))));
+        assert!(matches!(
+            ollama.list_models().await,
+            Err(AppError::Database(_))
+        ));
+
+        assert_eq!(ollama.inflight_len(), 0);
+        assert_eq!(fake.accepted.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn set_base_url_switches_target() {
+        let first = fake_ollama(Reply::Json(r#"{"version":"1"}"#)).await;
+        let second = fake_ollama(Reply::Json(r#"{"version":"2"}"#)).await;
+        let (ollama, log) = ollama_at(first.addr, test_limits());
+
+        assert_eq!(ollama.status().await.unwrap().version.as_deref(), Some("1"));
+        ollama.set_base_url(OllamaBaseUrl::parse(&format!("http://{}", second.addr)));
+        let status = ollama.status().await.unwrap();
+        assert_eq!(status.version.as_deref(), Some("2"));
+        assert_eq!(status.base_url, format!("http://{}", second.addr));
+
+        let mut hosts = log.storage.audit_hosts().unwrap();
+        hosts.sort();
+        let mut expected = vec![first.addr.to_string(), second.addr.to_string()];
+        expected.sort();
+        assert_eq!(hosts, expected);
+
+        ollama.set_base_url(OllamaBaseUrl::parse("http://10.0.0.1:11434"));
+        assert!(matches!(
+            ollama.status().await,
+            Err(AppError::InvalidBaseUrl(_))
+        ));
+        assert_eq!(first.accepted.load(Ordering::SeqCst), 1);
+        assert_eq!(second.accepted.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -776,7 +957,7 @@ mod tests {
             Duration::from_millis(20),
         ))
         .await;
-        let (ollama, audit) = ollama_at(fake.addr, test_limits());
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
 
@@ -788,7 +969,7 @@ mod tests {
         wait_idle(&ollama).await;
 
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-        assert_eq!(audit.recent(1)[0].outcome, "cancelled");
+        assert_eq!(log.last().status, AuditStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -827,7 +1008,7 @@ mod tests {
     #[tokio::test]
     async fn entry_removed_after_http_error() {
         let fake = fake_ollama(Reply::Status(404, r#"{"error":"model not found"}"#)).await;
-        let (ollama, audit) = ollama_at(fake.addr, test_limits());
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
         let (events, sink) = collector();
 
         send(&ollama, Uuid::new_v4(), sink).unwrap();
@@ -837,9 +1018,11 @@ mod tests {
             last_error(&events),
             AppError::Ollama("HTTP 404: model not found".into())
         );
-        let event = &audit.recent(1)[0];
-        assert_eq!(event.outcome, "error:ollama");
-        assert_eq!(event.http_status, Some(404));
+        let event = log.last();
+        assert_eq!(event.status, AuditStatus::Error);
+        assert_eq!(event.detail.as_deref(), Some("ollama, HTTP 404"));
+        // The error text from Ollama is not copied into the audit row.
+        assert_eq!(log.all().len(), 1);
     }
 
     #[tokio::test]
@@ -1002,7 +1185,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_while_admitted_ends_as_cancelled() {
         let fake = fake_ollama(Reply::Lines(vec![HEL, DONE], Duration::ZERO)).await;
-        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
         let conversation = Uuid::new_v4();
         let ends = Ends::default();
         let (events, sink) = collector();
@@ -1036,6 +1219,7 @@ mod tests {
             ends.lock().unwrap().as_slice(),
             [ChatEnd::Cancelled]
         ));
+        assert_eq!(log.last().status, AuditStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -1073,21 +1257,22 @@ mod tests {
     #[tokio::test]
     async fn audit_records_chat_outcome() {
         let fake = fake_ollama(Reply::Lines(vec![HEL, DONE], Duration::ZERO)).await;
-        let (ollama, audit) = ollama_at(fake.addr, test_limits());
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
 
         send(&ollama, Uuid::new_v4(), |_| true).unwrap();
         wait_idle(&ollama).await;
 
-        let events = audit.recent(usize::MAX);
+        let events = log.all();
         let [event] = events.as_slice() else {
             panic!("expected one audit event, got {events:?}");
         };
-        assert_eq!(event.action, "ollama.chat");
-        assert_eq!(event.target, fake.addr.to_string());
-        assert_eq!(event.outcome, "ok");
-        assert_eq!(event.http_status, Some(200));
+        assert_eq!(event.kind, "ollama.chat");
+        assert_eq!(event.host, Some(fake.addr.to_string()));
+        assert_eq!(event.status, AuditStatus::Ok);
+        assert_eq!(event.detail, None);
         assert_eq!(event.prompt_tokens, Some(3));
         assert_eq!(event.completion_tokens, Some(2));
+        assert!(event.duration_ms.is_some());
     }
 
     #[tokio::test]
@@ -1095,7 +1280,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
-        let (ollama, audit) = ollama_at(addr, test_limits());
+        let (ollama, log) = ollama_at(addr, test_limits());
 
         let status = ollama.status().await.unwrap();
         assert!(!status.reachable);
@@ -1103,11 +1288,11 @@ mod tests {
         assert_eq!(status.base_url, format!("http://{addr}"));
         // Windows takes about 2 s to refuse a loopback connect, so on a busy
         // machine the 3 s request timeout can win; both mean "not running".
-        let outcome = &audit.recent(1)[0].outcome;
-        assert!(
-            outcome == "error:unreachable" || outcome == "error:timeout",
-            "{outcome}"
-        );
+        let event = log.last();
+        assert_eq!(event.kind, "ollama.version");
+        assert_eq!(event.status, AuditStatus::Error);
+        let detail = event.detail.unwrap_or_default();
+        assert!(detail == "unreachable" || detail == "timeout", "{detail}");
     }
 
     #[tokio::test]
@@ -1126,7 +1311,7 @@ mod tests {
             r#"{"models":[{"name":"llama3.2:latest","model":"llama3.2:latest","size":2019393189,"digest":"abc","details":{"family":"llama","parameter_size":"3.2B","quantization_level":"Q4_K_M"}}]}"#,
         ))
         .await;
-        let (ollama, audit) = ollama_at(fake.addr, test_limits());
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
 
         let models = ollama.list_models().await.unwrap();
         assert_eq!(
@@ -1137,6 +1322,9 @@ mod tests {
                 parameter_size: Some("3.2B".into()),
             }]
         );
-        assert_eq!(audit.recent(1)[0].action, "ollama.tags");
+        let event = log.last();
+        assert_eq!(event.kind, "ollama.tags");
+        assert_eq!(event.endpoint.as_deref(), Some("/api/tags"));
+        assert_eq!(event.status, AuditStatus::Ok);
     }
 }

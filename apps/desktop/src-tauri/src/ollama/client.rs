@@ -92,15 +92,25 @@ impl fmt::Display for OllamaBaseUrl {
     }
 }
 
-/// `http://127.0.0.1:11434`, or in debug builds the value of
-/// [`BASE_URL_ENV`] when it is set.
-pub fn default_base_url() -> Result<OllamaBaseUrl, AppError> {
-    if cfg!(debug_assertions)
-        && let Ok(value) = std::env::var(BASE_URL_ENV)
-    {
-        return OllamaBaseUrl::parse(&value);
+/// The [`BASE_URL_ENV`] value, in debug builds only.
+fn env_base_url() -> Option<String> {
+    if cfg!(debug_assertions) {
+        std::env::var(BASE_URL_ENV).ok()
+    } else {
+        None
     }
-    OllamaBaseUrl::parse(DEFAULT_BASE_URL)
+}
+
+/// True when [`BASE_URL_ENV`] overrides the saved base URL.
+pub fn env_override_active() -> bool {
+    env_base_url().is_some()
+}
+
+/// In debug builds the value of [`BASE_URL_ENV`] when it is set, else
+/// `stored`, else `http://127.0.0.1:11434`. Always loopback-guarded.
+pub fn resolve_base_url(stored: Option<&str>) -> Result<OllamaBaseUrl, AppError> {
+    let value = env_base_url();
+    OllamaBaseUrl::parse(value.as_deref().or(stored).unwrap_or(DEFAULT_BASE_URL))
 }
 
 /// A client that ignores proxy settings, never follows redirects and pins

@@ -1,22 +1,35 @@
 import { useEffect, useState } from "react";
 
 import { loadVersion } from "~/app-version";
+import { ActivityPanel } from "~/features/activity/activity-panel";
 import { ChatView } from "~/features/chat/chat-view";
 import { useChatStream } from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
+import { SettingsView } from "~/features/settings/settings-view";
 import { OllamaStatus } from "~/features/status/ollama-status";
 import { isReachable } from "~/features/status/status-state";
 import { useOllamaStatus } from "~/features/status/use-ollama-status";
 import { StorageScreen } from "~/features/storage/storage-screen";
 import { toAppError } from "~/lib/app-error";
-import { storageStatus } from "~/lib/ipc";
+import { settingsGet, storageStatus } from "~/lib/ipc";
 import type { StorageStatus } from "~/lib/types";
 
-/** The sidebar and chat, shown once storage is open. */
+type View = "chat" | "activity" | "settings";
+
+const VIEWS: { id: View; label: string }[] = [
+  { id: "chat", label: "Chat" },
+  { id: "activity", label: "Activity" },
+  { id: "settings", label: "Settings" },
+];
+
+/** The sidebar and the chat, activity and settings views, shown once
+ * storage is open. Chat state lives here, so switching views keeps it. */
 const Workspace = () => {
   const [version, setVersion] = useState("");
   const [model, setModel] = useState("");
+  const [defaultModel, setDefaultModel] = useState("");
+  const [view, setView] = useState<View>("chat");
   const { status, retry } = useOllamaStatus();
   const conversations = useConversations();
   const chat = useChatStream({
@@ -32,6 +45,15 @@ const Workspace = () => {
         setVersion(value);
       }
     });
+    // Without settings the chat simply falls back to the first model.
+    void settingsGet().then(
+      (settings) => {
+        if (!cancelled) {
+          setDefaultModel(settings.defaultModel);
+        }
+      },
+      () => undefined
+    );
     return () => {
       cancelled = true;
     };
@@ -41,6 +63,7 @@ const Workspace = () => {
     if (streaming) {
       return;
     }
+    setView("chat");
     conversations.select(id);
     chat.open(id);
     const saved = conversations.state.conversations.find(
@@ -73,16 +96,47 @@ const Workspace = () => {
         onDelete={remove}
       />
       <div className="flex min-w-0 flex-1 flex-col">
+        <nav
+          aria-label="Views"
+          className="flex gap-1 border-b border-zinc-200 px-4 pt-2 dark:border-zinc-800"
+        >
+          {VIEWS.map(({ id, label }) => (
+            <button
+              key={id}
+              type="button"
+              aria-current={view === id ? "page" : undefined}
+              onClick={() => {
+                setView(id);
+              }}
+              className={`rounded-t px-3 py-1 text-sm ${view === id ? "border-b-2 border-zinc-900 font-medium dark:border-zinc-100" : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"}`}
+            >
+              {label}
+            </button>
+          ))}
+        </nav>
         <main className="flex min-h-0 flex-1 flex-col">
           <h1 className="sr-only">Private Context AI</h1>
-          <ChatView
-            reachable={isReachable(status)}
-            state={chat.state}
-            send={chat.send}
-            stop={chat.stop}
-            model={model}
-            setModel={setModel}
-          />
+          {view === "chat" && (
+            <ChatView
+              reachable={isReachable(status)}
+              state={chat.state}
+              send={chat.send}
+              stop={chat.stop}
+              model={model}
+              setModel={setModel}
+              defaultModel={defaultModel}
+            />
+          )}
+          {view === "activity" && <ActivityPanel />}
+          {view === "settings" && (
+            <SettingsView
+              onSaved={(settings) => {
+                setDefaultModel(settings.defaultModel);
+                // A new base URL shows in the status line and model list.
+                retry();
+              }}
+            />
+          )}
         </main>
         <footer className="border-t border-zinc-200 px-4 py-2 dark:border-zinc-800">
           <OllamaStatus status={status} onRetry={retry} />

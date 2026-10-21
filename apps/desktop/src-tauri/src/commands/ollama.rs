@@ -198,7 +198,7 @@ mod tests {
     use tokio::net::TcpListener;
 
     use super::*;
-    use crate::audit::MemorySink;
+    use crate::audit::Audit;
     use crate::ollama::client::OllamaBaseUrl;
     use crate::storage::messages::StoredMessage;
     use crate::storage::testing::{break_writes, temp_storage};
@@ -394,7 +394,7 @@ mod tests {
     async fn silent_ollama() -> (Arc<Ollama>, TcpListener) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = OllamaBaseUrl::parse(&format!("http://{}", listener.local_addr().unwrap()));
-        let ollama = Arc::new(Ollama::new(base, Arc::new(MemorySink::new())));
+        let ollama = Arc::new(Ollama::new(base, Arc::new(Audit::new())));
         (ollama, listener)
     }
 
