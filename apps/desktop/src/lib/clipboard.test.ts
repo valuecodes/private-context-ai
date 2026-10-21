@@ -10,9 +10,12 @@ const fakeDocument = (copied: boolean) => {
     select: vi.fn(),
     remove: vi.fn(),
   };
+  const button = { focus: vi.fn() };
   return {
     textarea,
+    button,
     document: {
+      activeElement: button,
       createElement: vi.fn(() => textarea),
       body: { append: vi.fn() },
       execCommand: vi.fn(() => copied),
@@ -42,6 +45,7 @@ describe("copyText", () => {
     expect(fake.textarea.value).toBe("hi");
     expect(fake.document.execCommand).toHaveBeenCalledWith("copy");
     expect(fake.textarea.remove).toHaveBeenCalled();
+    expect(fake.button.focus).toHaveBeenCalled();
   });
 
   it("resolves false when the fallback cannot copy either", async () => {

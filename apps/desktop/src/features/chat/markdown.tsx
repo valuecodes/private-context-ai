@@ -53,7 +53,8 @@ const Pre = ({ node }: ComponentProps<"pre"> & ExtraProps) => {
  * filter for `javascript:` and similar schemes.
  */
 const InertLink = ({ href, children }: ComponentProps<"a"> & ExtraProps) => {
-  if (href === undefined || href === "") {
+  // Footnote references link to `#fragments`: nothing worth copying.
+  if (href === undefined || href === "" || href.startsWith("#")) {
     return <span>{children}</span>;
   }
   return (

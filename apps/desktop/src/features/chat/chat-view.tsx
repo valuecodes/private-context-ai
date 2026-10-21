@@ -49,15 +49,29 @@ const ChatView = ({
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
   const scroller = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
   // Follow new tokens unless the user has scrolled up to read.
   const followBottom = useRef(true);
+  const empty = state.messages.length === 0 && !state.loading;
 
+  // Follows the content's height rather than `state.messages`: a reply's
+  // Markdown renders deferred, after the message state has changed.
   useEffect(() => {
     const element = scroller.current;
-    if (element !== null && followBottom.current) {
-      element.scrollTop = element.scrollHeight;
+    const inner = content.current;
+    if (empty || element === null || inner === null) {
+      return undefined;
     }
-  }, [state.messages]);
+    const observer = new ResizeObserver(() => {
+      if (followBottom.current) {
+        element.scrollTop = element.scrollHeight;
+      }
+    });
+    observer.observe(inner);
+    return () => {
+      observer.disconnect();
+    };
+  }, [empty]);
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
     const element = event.currentTarget;
@@ -91,7 +105,6 @@ const ChatView = ({
   // An opened conversation may name a model that is no longer installed.
   const selected = pickModel(modelList, model, defaultModel);
   const streaming = state.phase === "streaming";
-  const empty = state.messages.length === 0 && !state.loading;
 
   // Esc stops the reply wherever focus is, not only in the composer.
   useEffect(() => {
@@ -173,7 +186,7 @@ const ChatView = ({
           aria-label="Conversation"
           className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
         >
-          <div className="mx-auto w-full max-w-3xl">
+          <div ref={content} className="mx-auto w-full max-w-3xl">
             <MessageList messages={state.messages} />
           </div>
         </div>
