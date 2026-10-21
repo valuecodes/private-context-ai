@@ -1,7 +1,7 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { MessageList } from "./message-list";
+import { MessageList, STREAM_MARKDOWN_MAX_CHARS } from "./message-list";
 import type { UiMessage } from "./use-chat-stream";
 
 const message = (
@@ -44,6 +44,16 @@ describe("MessageList", () => {
     ]);
     expect(html).toContain(">Stopped<");
     expect(html).toContain(">Failed<");
+  });
+
+  it("shows a long streaming reply as plain text until it completes", () => {
+    const long = `**bold** ${"x".repeat(STREAM_MARKDOWN_MAX_CHARS)}`;
+    const streaming = render([message("assistant", long, "streaming")]);
+    expect(streaming).toContain("**bold**");
+    expect(streaming).not.toContain("<strong>");
+    expect(render([message("assistant", long)])).toContain(
+      "<strong>bold</strong>"
+    );
   });
 
   it("does not highlight code in a streaming reply", () => {
