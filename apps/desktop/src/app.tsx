@@ -6,8 +6,6 @@ import { loadVersion } from "~/app-version";
 import { ActivityPanel } from "~/features/activity/activity-panel";
 import { replyAnnouncement } from "~/features/chat/chat-reducer";
 import { ChatView } from "~/features/chat/chat-view";
-import { THINK_OFF } from "~/features/chat/think-choice";
-import type { ThinkChoice } from "~/features/chat/think-choice";
 import { useChatStream } from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
@@ -34,8 +32,6 @@ const Workspace = () => {
   const [version, setVersion] = useState("");
   const [model, setModel] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
-  // Not saved yet: every app start begins with thinking off.
-  const [think, setThink] = useState<ThinkChoice>(THINK_OFF);
   const [view, setView] = useState<View>("chat");
   const { status, retry } = useOllamaStatus();
   const conversations = useConversations();
@@ -148,12 +144,11 @@ const Workspace = () => {
               regenerate={chat.regenerate}
               edit={chat.edit}
               stop={chat.stop}
+              onSettings={chat.updateSettings}
               onTemporary={temporary}
               model={model}
               setModel={setModel}
               defaultModel={defaultModel}
-              think={think}
-              setThink={setThink}
             />
           )}
           {view === "activity" && <ActivityPanel />}

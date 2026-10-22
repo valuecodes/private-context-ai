@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use crate::commands::ollama::ReplyRecorder;
 use crate::error::AppError;
-use crate::ollama::types::{ChatMessage, ChatRole};
+use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
-use crate::storage::messages::{MessageStatus, ReplyStats, TurnInput};
+use crate::storage::conversations::ConversationSettings;
+use crate::storage::messages::{MessageStatus, ReplyStats, TurnInput, with_system_prompt};
 
 /// How many temporary chats may exist at once. The UI keeps one; the rest
 /// bound what a reloaded webview can leave behind.
@@ -33,6 +34,17 @@ struct Revision {
 struct Session {
     messages: Vec<TempMessage>,
     revision: Option<Revision>,
+    settings: ConversationSettings,
+}
+
+/// What [`TempChats::begin`] hands the send.
+#[derive(Debug)]
+pub struct TempTurn {
+    /// The prompt's id: new, or the existing one when regenerating.
+    pub user_id: Uuid,
+    /// The system prompt, earlier messages and the prompt.
+    pub history: Vec<ChatMessage>,
+    pub options: Option<ChatOptions>,
 }
 
 impl Session {
@@ -81,6 +93,12 @@ impl TempChats {
 
     /// A new, empty chat. `Busy` once `max_sessions` exist.
     pub fn start(&self) -> Result<Uuid, AppError> {
+        self.start_with(ConversationSettings::default())
+    }
+
+    /// Like [`Self::start`], with `settings` from the first send on.
+    pub fn start_with(&self, settings: ConversationSettings) -> Result<Uuid, AppError> {
+        settings.validate()?;
         let mut sessions = self.sessions();
         if sessions.len() >= self.max_sessions {
             return Err(AppError::Busy(format!(
@@ -89,8 +107,34 @@ impl TempChats {
             )));
         }
         let id = Uuid::new_v4();
-        sessions.insert(id, Session::default());
+        sessions.insert(
+            id,
+            Session {
+                settings,
+                ..Session::default()
+            },
+        );
         Ok(id)
+    }
+
+    pub fn settings(&self, id: Uuid) -> Result<ConversationSettings, AppError> {
+        self.sessions()
+            .get(&id)
+            .map(|session| session.settings.clone())
+            .ok_or_else(not_found)
+    }
+
+    /// Applies from the chat's next send.
+    pub fn update_settings(
+        &self,
+        id: Uuid,
+        settings: ConversationSettings,
+    ) -> Result<(), AppError> {
+        settings.validate()?;
+        let mut sessions = self.sessions();
+        let session = sessions.get_mut(&id).ok_or_else(not_found)?;
+        session.settings = settings;
+        Ok(())
     }
 
     /// Forgets a chat. `false` when there was no such chat.
@@ -98,18 +142,17 @@ impl TempChats {
         self.sessions().remove(&id).is_some()
     }
 
-    /// Under one lock, so a discard cannot land halfway: the history `input`
-    /// sends, which `check` may refuse (size limits) before anything
-    /// changes. Then the prompt is kept, and a regenerate or edit sets aside
-    /// the messages it replaces until its reply ends ([`MemoryRecorder`]).
-    /// Returns the prompt's id (the existing one when regenerating) and the
-    /// history.
+    /// Under one lock, so a discard or settings change cannot land halfway:
+    /// the history `input` sends with the chat's settings, which `check` may
+    /// refuse (size limits, settings changed) before anything changes. Then
+    /// the prompt is kept, and a regenerate or edit sets aside the messages
+    /// it replaces until its reply ends ([`MemoryRecorder`]).
     pub fn begin(
         &self,
         id: Uuid,
         input: &TurnInput,
-        check: impl FnOnce(&[ChatMessage]) -> Result<(), AppError>,
-    ) -> Result<(Uuid, Vec<ChatMessage>), AppError> {
+        check: impl FnOnce(&[ChatMessage], &ConversationSettings) -> Result<(), AppError>,
+    ) -> Result<TempTurn, AppError> {
         let mut sessions = self.sessions();
         let session = sessions.get_mut(&id).ok_or_else(not_found)?;
         let is_user = |message: &TempMessage| message.message.role == ChatRole::User;
@@ -143,13 +186,19 @@ impl TempChats {
             .chain(&prompt)
             .map(|message| message.message.clone())
             .collect();
-        check(&history)?;
+        let history = with_system_prompt(&session.settings, history);
+        check(&history, &session.settings)?;
+        let options = session.settings.options();
         if let Some(base) = cut {
             let tail = session.messages.split_off(base);
             session.revision = Some(Revision { base, tail });
         }
         session.messages.extend(prompt);
-        Ok((user_id, history))
+        Ok(TempTurn {
+            user_id,
+            history,
+            options,
+        })
     }
 
     /// Takes back the prompt [`Self::begin`] kept for a new message when the
@@ -290,7 +339,7 @@ mod tests {
 
     /// Runs one turn of `input` that ends with `reply`, or fails when `None`.
     fn run(chats: &Arc<TempChats>, id: Uuid, input: &TurnInput, reply: Option<&str>) {
-        chats.begin(id, input, |_| Ok(())).unwrap();
+        chats.begin(id, input, |_, _| Ok(())).unwrap();
         let revision = !matches!(input, TurnInput::New(_));
         let mut recorder = MemoryRecorder::new(chats, id, Uuid::new_v4(), revision);
         match reply {
@@ -317,10 +366,12 @@ mod tests {
         let (chats, id) = answered(&["One", "Two"]);
         let ids = chats.ids(id);
 
-        let (user_id, history) = chats.begin(id, &TurnInput::Regenerate, |_| Ok(())).unwrap();
-        assert_eq!(user_id, ids[2]);
+        let turn = chats
+            .begin(id, &TurnInput::Regenerate, |_, _| Ok(()))
+            .unwrap();
+        assert_eq!(turn.user_id, ids[2]);
         assert_eq!(
-            texts(&history),
+            texts(&turn.history),
             [
                 (ChatRole::User, "One"),
                 (ChatRole::Assistant, "AOne"),
@@ -356,7 +407,7 @@ mod tests {
         run(&chats, id, &edit, None);
         assert_eq!(chats.history(id).unwrap(), before);
         assert_eq!(chats.ids(id), ids);
-        chats.begin(id, &edit, |_| Ok(())).unwrap();
+        chats.begin(id, &edit, |_, _| Ok(())).unwrap();
         let mut stopped = MemoryRecorder::new(&chats, id, Uuid::new_v4(), true);
         stopped.push(&Redacted::new("Half")).unwrap();
         stopped.finish(MessageStatus::Cancelled).unwrap();
@@ -384,14 +435,83 @@ mod tests {
                 prompt: Redacted::new("x"),
             };
             assert!(matches!(
-                chats.begin(id, &edit, |_| Ok(())),
+                chats.begin(id, &edit, |_, _| Ok(())),
                 Err(AppError::NotFound(_))
             ));
         }
         let empty = chats.start().unwrap();
         assert!(matches!(
-            chats.begin(empty, &TurnInput::Regenerate, |_| Ok(())),
+            chats.begin(empty, &TurnInput::Regenerate, |_, _| Ok(())),
             Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn temp_settings_apply_to_session() {
+        let chats = TempChats::default();
+        let finnish = ConversationSettings {
+            system_prompt: Redacted::new("Answer only in Finnish"),
+            ..ConversationSettings::default()
+        };
+        let id = chats.start_with(finnish.clone()).unwrap();
+        assert_eq!(chats.settings(id).unwrap(), finnish);
+
+        let mut seen = None;
+        let turn = chats
+            .begin(id, &new("Hi"), |_, settings| {
+                seen = Some(settings.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen.as_ref(), Some(&finnish));
+        assert_eq!(
+            texts(&turn.history),
+            [
+                (ChatRole::System, "Answer only in Finnish"),
+                (ChatRole::User, "Hi")
+            ]
+        );
+        assert_eq!(turn.options, None);
+        // The system prompt is sent, never kept as a message.
+        assert_eq!(texts(&chats.history(id).unwrap()), [(ChatRole::User, "Hi")]);
+
+        let warm = ConversationSettings {
+            options: ChatOptions {
+                temperature: Some(1.5),
+                ..ChatOptions::default()
+            },
+            ..ConversationSettings::default()
+        };
+        chats.update_settings(id, warm.clone()).unwrap();
+        chats.rollback(id);
+        let turn = chats.begin(id, &new("Again"), |_, _| Ok(())).unwrap();
+        assert_eq!(texts(&turn.history), [(ChatRole::User, "Again")]);
+        assert_eq!(turn.options, warm.options());
+
+        let bad = ConversationSettings {
+            options: ChatOptions {
+                temperature: Some(3.0),
+                ..ChatOptions::default()
+            },
+            ..ConversationSettings::default()
+        };
+        assert!(matches!(
+            chats.update_settings(id, bad.clone()),
+            Err(AppError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            chats.start_with(bad),
+            Err(AppError::InvalidInput(_))
+        ));
+        assert_eq!(chats.settings(id).unwrap(), warm);
+        let unknown = Uuid::new_v4();
+        assert!(matches!(
+            chats.update_settings(unknown, warm),
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            chats.settings(unknown),
+            Err(AppError::NotFound(_))
         ));
     }
 
@@ -412,7 +532,7 @@ mod tests {
         let id = chats.start().unwrap();
 
         let err = chats
-            .begin(id, &new("Hi"), |_| Err(AppError::TooLarge("big".into())))
+            .begin(id, &new("Hi"), |_, _| Err(AppError::TooLarge("big".into())))
             .unwrap_err();
 
         assert!(matches!(err, AppError::TooLarge(_)));
@@ -427,7 +547,7 @@ mod tests {
         };
         assert!(
             chats
-                .begin(id, &edit, |_| Err(AppError::TooLarge("big".into())))
+                .begin(id, &edit, |_, _| Err(AppError::TooLarge("big".into())))
                 .is_err()
         );
         assert_eq!(chats.history(id).unwrap(), before);
@@ -437,7 +557,7 @@ mod tests {
     fn begin_unknown_chat_is_not_found() {
         let chats = TempChats::default();
         assert!(matches!(
-            chats.begin(Uuid::new_v4(), &new("Hi"), |_| Ok(())),
+            chats.begin(Uuid::new_v4(), &new("Hi"), |_, _| Ok(())),
             Err(AppError::NotFound(_))
         ));
     }
@@ -446,7 +566,7 @@ mod tests {
     fn rollback_takes_back_the_prompt() {
         let chats = TempChats::default();
         let id = chats.start().unwrap();
-        chats.begin(id, &new("Hi"), |_| Ok(())).unwrap();
+        chats.begin(id, &new("Hi"), |_, _| Ok(())).unwrap();
 
         chats.rollback(id);
 
@@ -458,7 +578,7 @@ mod tests {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
         let turn = |prompt: &str, reply: &str, status: Option<MessageStatus>| {
-            chats.begin(id, &new(prompt), |_| Ok(())).unwrap();
+            chats.begin(id, &new(prompt), |_, _| Ok(())).unwrap();
             let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
             recorder.push_thinking(&Redacted::new("hmm")).unwrap();
             recorder.push(&Redacted::new(reply)).unwrap();
@@ -492,7 +612,7 @@ mod tests {
     fn discard_then_late_finish_is_noop() {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
-        chats.begin(id, &new("Hi"), |_| Ok(())).unwrap();
+        chats.begin(id, &new("Hi"), |_, _| Ok(())).unwrap();
         let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
         recorder.push(&Redacted::new("Late")).unwrap();
 

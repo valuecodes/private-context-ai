@@ -93,6 +93,46 @@ pub enum Think {
     Level(String),
 }
 
+/// What a conversation saves as its Think setting. Off unless the user turns
+/// it on; [`resolve_think`] decides what a model is actually sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "level", rename_all = "camelCase")]
+pub enum ThinkChoice {
+    #[default]
+    Off,
+    On,
+    Level(String),
+}
+
+impl ThinkChoice {
+    /// What [`resolve_think`] is asked for. Off asks for nothing, so a model
+    /// that always thinks gets its default level instead of a refusal.
+    pub fn requested(&self) -> Option<Think> {
+        match self {
+            Self::Off => None,
+            Self::On => Some(Think::Enabled(true)),
+            Self::Level(level) => Some(Think::Level(level.clone())),
+        }
+    }
+
+    /// A level follows the rule for advertised levels.
+    pub fn validate(&self) -> Result<(), AppError> {
+        match self {
+            Self::Level(level) if !is_level_name(level) => {
+                Err(invalid("thinking level is invalid"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Non-empty, at most [`MAX_LEVEL_CHARS`], no control characters.
+fn is_level_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= MAX_LEVEL_CHARS
+        && !name.chars().any(char::is_control)
+}
+
 /// The `/api/chat` request body. Deliberately has no `tools` or `format`
 /// field: the model gets no tools and no structured-output hooks. `think` is
 /// only ever what [`resolve_think`] allowed for the model.
@@ -245,13 +285,7 @@ impl ThinkValue {
     /// overlong or control-character names are ignored.
     fn level(&self) -> Option<&str> {
         match self {
-            Self::Name(name)
-                if !name.is_empty()
-                    && name.chars().count() <= MAX_LEVEL_CHARS
-                    && !name.chars().any(char::is_control) =>
-            {
-                Some(name)
-            }
+            Self::Name(name) if is_level_name(name) => Some(name),
             _ => None,
         }
     }
@@ -705,6 +739,52 @@ mod tests {
             Think::Level("max".into())
         );
         assert!(serde_json::from_str::<Think>("3").is_err());
+    }
+
+    #[test]
+    fn think_choice_ipc_and_request() {
+        let cases = [
+            (ThinkChoice::Off, r#"{"kind":"off"}"#, None),
+            (
+                ThinkChoice::On,
+                r#"{"kind":"on"}"#,
+                Some(Think::Enabled(true)),
+            ),
+            (
+                ThinkChoice::Level("high".into()),
+                r#"{"kind":"level","level":"high"}"#,
+                Some(Think::Level("high".into())),
+            ),
+        ];
+        for (choice, json, requested) in cases {
+            assert_eq!(serde_json::to_string(&choice).unwrap(), json);
+            assert_eq!(serde_json::from_str::<ThinkChoice>(json).unwrap(), choice);
+            assert_eq!(choice.requested(), requested);
+            assert!(choice.validate().is_ok());
+        }
+        // Off on a model that always thinks is its default level, not an error.
+        let always = caps(
+            true,
+            ThinkStyle::Levels {
+                levels: names(&["low", "medium"]),
+                default: "medium".into(),
+                can_disable: false,
+            },
+        );
+        assert_eq!(
+            resolve_think(&always, ThinkChoice::Off.requested()),
+            Ok(Some(Think::Level("medium".into())))
+        );
+        for level in [
+            String::new(),
+            "x".repeat(MAX_LEVEL_CHARS + 1),
+            "a\nb".into(),
+        ] {
+            assert!(matches!(
+                ThinkChoice::Level(level).validate(),
+                Err(AppError::InvalidInput(_))
+            ));
+        }
     }
 
     #[test]

@@ -69,7 +69,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -141,7 +141,8 @@ mod tests {
         let key = new_key();
         let conn = open(&path, &key).unwrap();
         conn.execute_batch(
-            "INSERT INTO conversations VALUES ('c', 't', 'm', 'x', 'x');
+            "INSERT INTO conversations (id, title, model, created_at, updated_at)
+               VALUES ('c', 't', 'm', 'x', 'x');
              INSERT INTO messages (id, conversation_id, role, content, created_at, status)
                VALUES ('a', 'c', 'assistant', 'half', 'x', 'pending'),
                       ('b', 'c', 'assistant', 'done', 'x', 'complete');",
@@ -174,7 +175,11 @@ mod tests {
         let conn = open(&path, &key).unwrap();
         // Back to what the first release wrote.
         conn.execute_batch(
-            "ALTER TABLE messages DROP COLUMN superseded_by;
+            "ALTER TABLE conversations DROP COLUMN system_prompt;
+             ALTER TABLE conversations DROP COLUMN temperature;
+             ALTER TABLE conversations DROP COLUMN num_ctx;
+             ALTER TABLE conversations DROP COLUMN think;
+             ALTER TABLE messages DROP COLUMN superseded_by;
              ALTER TABLE messages DROP COLUMN thinking;
              ALTER TABLE messages DROP COLUMN thinking_ms;
              PRAGMA user_version = 1;
@@ -194,6 +199,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("old".to_owned(), None, None));
+    }
+
+    #[test]
+    fn version_three_db_gains_settings_columns() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        conn.execute_batch(
+            "ALTER TABLE conversations DROP COLUMN system_prompt;
+             ALTER TABLE conversations DROP COLUMN temperature;
+             ALTER TABLE conversations DROP COLUMN num_ctx;
+             ALTER TABLE conversations DROP COLUMN think;
+             PRAGMA user_version = 3;
+             INSERT INTO conversations VALUES ('c', 't', 'm', 'x', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let row: (String, Option<f64>, Option<i64>, String) = conn
+            .query_row(
+                "SELECT system_prompt, temperature, num_ctx, think FROM conversations
+                 WHERE id = 'c'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (String::new(), None, None, "off".to_owned()));
     }
 
     #[test]

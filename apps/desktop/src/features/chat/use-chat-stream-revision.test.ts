@@ -4,6 +4,7 @@ import type { ChatEvent, StoredMessage } from "~/lib/types";
 
 import type { ChatState } from "./chat-reducer";
 import { chatReducer, createChatState, fromStored } from "./chat-reducer";
+import { DEFAULT_SETTINGS } from "./default-settings";
 
 vi.mock("~/lib/ipc");
 
@@ -69,6 +70,7 @@ const twoTurns = (): ChatState =>
         stored("u2", "user", "Two"),
         stored("a2", "assistant", "A2"),
       ]),
+      settings: DEFAULT_SETTINGS,
     }
   );
 

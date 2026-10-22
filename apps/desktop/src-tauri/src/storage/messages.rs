@@ -9,9 +9,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::Storage;
-use super::conversations::{NOW, not_found, uuid_column};
+use super::conversations::{ConversationSettings, NOW, load_settings, uuid_column};
 use crate::error::AppError;
-use crate::ollama::types::{ChatMessage, ChatRole};
+use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -222,32 +222,49 @@ pub struct Turn {
     /// The prompt the reply answers: new, or the existing one when
     /// regenerating.
     pub user_id: Uuid,
-    /// Everything Ollama gets: earlier turns plus the prompt.
+    /// Everything Ollama gets: the system prompt, earlier turns and the
+    /// prompt.
     pub history: Vec<ChatMessage>,
+    /// From the conversation's settings.
+    pub options: Option<ChatOptions>,
+}
+
+/// The conversation's system prompt as the first message, when not blank.
+pub(crate) fn with_system_prompt(
+    settings: &ConversationSettings,
+    history: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    if settings.system_prompt.expose().trim().is_empty() {
+        return history;
+    }
+    let system = ChatMessage {
+        role: ChatRole::System,
+        content: settings.system_prompt.clone(),
+    };
+    std::iter::once(system).chain(history).collect()
 }
 
 impl Storage {
-    /// In one transaction: reads the history, lets `check` refuse it (size
-    /// limits) before anything is written, then saves the turn and marks the
-    /// conversation used. A new prompt is added after the last message.
-    /// Regenerate and Edit mark the rows they replace `superseded_by` the new
-    /// reply: they disappear from the conversation now and are deleted only
-    /// once that reply completes (see [`TurnRecorder`]).
+    /// In one transaction: reads the settings and the history, lets `check`
+    /// refuse them (size limits, settings changed since the send was
+    /// prepared) before anything is written, then saves the turn and marks
+    /// the conversation used. A non-blank system prompt goes first in the
+    /// history and is never saved as a row. A new prompt is added after the
+    /// last message. Regenerate and Edit mark the rows they replace
+    /// `superseded_by` the new reply: they disappear from the conversation
+    /// now and are deleted only once that reply completes (see
+    /// [`TurnRecorder`]).
     pub fn begin_turn(
         &self,
         conversation_id: Uuid,
         model: &str,
         input: &TurnInput,
-        check: impl FnOnce(&[ChatMessage]) -> Result<(), AppError>,
+        check: impl FnOnce(&[ChatMessage], &ConversationSettings) -> Result<(), AppError>,
     ) -> Result<Turn, AppError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
-        tx.query_row("SELECT 1 FROM conversations WHERE id = ?1", [&id], |_| {
-            Ok(())
-        })
-        .optional()?
-        .ok_or_else(not_found)?;
+        let settings = load_settings(&tx, &id)?;
 
         // `replaced`: the first row this turn replaces is after (`>`) or at
         // (`>=`) this position.
@@ -294,7 +311,8 @@ impl Storage {
                 content: prompt.clone(),
             });
         }
-        check(&history)?;
+        let history = with_system_prompt(&settings, history);
+        check(&history, &settings)?;
 
         let assistant_id = Uuid::new_v4();
         if let Some((position, op)) = &replaced {
@@ -356,6 +374,7 @@ impl Storage {
             assistant_id,
             user_id,
             history,
+            options: settings.options(),
         })
     }
 
@@ -600,7 +619,7 @@ mod tests {
     }
 
     fn begin(storage: &Storage, conversation_id: Uuid, input: TurnInput) -> Result<Turn, AppError> {
-        storage.begin_turn(conversation_id, "llama3.2", &input, |_| Ok(()))
+        storage.begin_turn(conversation_id, "llama3.2", &input, |_, _| Ok(()))
     }
 
     fn turn(storage: &Storage, conversation_id: Uuid, prompt: &str) -> Turn {
@@ -712,6 +731,59 @@ mod tests {
     }
 
     #[test]
+    fn begin_turn_prepends_system_prompt() {
+        use crate::storage::conversations::ConversationSettings;
+
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One"]);
+        let settings = ConversationSettings {
+            system_prompt: Redacted::new("Answer only in Finnish"),
+            ..ConversationSettings::default()
+        };
+        storage.update_settings(id, &settings).unwrap();
+
+        let mut seen = None;
+        let turn = storage
+            .begin_turn(id, "m", &TurnInput::New(Redacted::new("Two")), |_, s| {
+                seen = Some(s.clone());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(seen, Some(settings));
+        assert_eq!(
+            texts(&turn.history),
+            [
+                (ChatRole::System, "Answer only in Finnish"),
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Two"),
+            ]
+        );
+        assert_eq!(turn.options, None);
+        // Never saved as a row.
+        assert!(
+            messages(&storage, id)
+                .iter()
+                .all(|message| message.role != ChatRole::System)
+        );
+        assert_eq!(count_rows(&storage, "messages"), 4);
+
+        // A blank prompt sends nothing; options come along.
+        let blank = ConversationSettings {
+            system_prompt: Redacted::new("  \n"),
+            options: ChatOptions {
+                temperature: Some(0.2),
+                ..ChatOptions::default()
+            },
+            ..ConversationSettings::default()
+        };
+        storage.update_settings(id, &blank).unwrap();
+        let turn = begin(&storage, id, TurnInput::Regenerate).unwrap();
+        assert_eq!(turn.history[0].role, ChatRole::User);
+        assert_eq!(turn.options, blank.options());
+    }
+
+    #[test]
     fn history_skips_error_pending_and_empty_cancelled() {
         let (storage, _dir) = temp_storage();
         let id = conversation(&storage);
@@ -772,7 +844,7 @@ mod tests {
                 id,
                 "other",
                 &TurnInput::New(Redacted::new("Hi")),
-                |history| {
+                |history, _| {
                     assert_eq!(history.len(), 1);
                     Err(AppError::TooLarge("too big".into()))
                 },
@@ -872,9 +944,12 @@ mod tests {
         let before = storage.get_conversation(id).unwrap();
 
         let err = storage
-            .begin_turn(id, "other", &edit(user_ids(&storage, id)[0], "x"), |_| {
-                Err(AppError::TooLarge("too big".into()))
-            })
+            .begin_turn(
+                id,
+                "other",
+                &edit(user_ids(&storage, id)[0], "x"),
+                |_, _| Err(AppError::TooLarge("too big".into())),
+            )
             .unwrap_err();
 
         assert!(matches!(err, AppError::TooLarge(_)));

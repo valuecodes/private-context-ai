@@ -11,14 +11,22 @@ import {
   tempChatSend,
   tempChatStart,
 } from "~/lib/ipc";
+import type { Conversation, ConversationSettings } from "~/lib/types";
 
+import { DEFAULT_SETTINGS } from "./default-settings";
 import { startRequest, tempSession } from "./send-request";
 
 vi.mock("~/lib/ipc");
 
+const finnish: ConversationSettings = {
+  systemPrompt: "Answer only in Finnish",
+  options: { temperature: 0.7 },
+  think: { kind: "on" },
+};
+
 const request = {
   model: "m",
-  think: null,
+  settings: DEFAULT_SETTINGS,
   input: { kind: "send", prompt: "Hi" },
 } as const;
 
@@ -36,6 +44,41 @@ const flush = () =>
   new Promise((resolve) => {
     setTimeout(resolve, 0);
   });
+
+describe("new chat requests", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(chatSend).mockResolvedValue(started);
+  });
+
+  it("creates the chat with its settings, then sends without them", async () => {
+    const created: Conversation = {
+      id: "c1",
+      title: "Hi",
+      model: "m",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      settings: finnish,
+    };
+    vi.mocked(conversationCreate).mockResolvedValue(created);
+    const onEvent = vi.fn();
+    const callbacks = handlers();
+
+    await startRequest(
+      { kind: "new" },
+      { ...request, settings: finnish },
+      onEvent,
+      callbacks
+    );
+
+    expect(conversationCreate).toHaveBeenCalledWith("Hi", "m", finnish);
+    expect(chatSend).toHaveBeenCalledWith(
+      { conversationId: "c1", model: "m", prompt: "Hi" },
+      onEvent
+    );
+    expect(callbacks.onCreated).toHaveBeenCalledWith(created);
+  });
+});
 
 describe("regenerate and edit requests", () => {
   beforeEach(() => {
@@ -58,7 +101,7 @@ describe("regenerate and edit requests", () => {
     expect(
       await startRequest(
         saved,
-        { model: "m", think: true, input: { kind: "regenerate" } },
+        { model: "m", settings: finnish, input: { kind: "regenerate" } },
         onEvent,
         callbacks
       )
@@ -67,7 +110,7 @@ describe("regenerate and edit requests", () => {
       saved,
       {
         model: "m",
-        think: null,
+        settings: finnish,
         input: { kind: "edit", messageId: "u0", prompt: "Changed" },
       },
       onEvent,
@@ -75,7 +118,7 @@ describe("regenerate and edit requests", () => {
     );
 
     expect(chatRegenerate).toHaveBeenCalledWith(
-      { conversationId: "c1", model: "m", think: true },
+      { conversationId: "c1", model: "m" },
       onEvent
     );
     expect(chatEdit).toHaveBeenCalledWith(
@@ -84,11 +127,11 @@ describe("regenerate and edit requests", () => {
         messageId: "u0",
         model: "m",
         prompt: "Changed",
-        think: null,
       },
       onEvent
     );
     expect(chatSend).not.toHaveBeenCalled();
+    expect(conversationCreate).not.toHaveBeenCalled();
     expect(callbacks.onStarted).toHaveBeenCalledWith("c1", "m");
   });
 
@@ -101,15 +144,14 @@ describe("regenerate and edit requests", () => {
 
     await startRequest(
       temporary,
-      { model: "m", think: null, input: { kind: "regenerate" } },
+      { ...request, input: { kind: "regenerate" } },
       onEvent,
       handlers()
     );
     await startRequest(
       temporary,
       {
-        model: "m",
-        think: null,
+        ...request,
         input: { kind: "edit", messageId: "u0", prompt: "Changed" },
       },
       onEvent,
@@ -117,7 +159,7 @@ describe("regenerate and edit requests", () => {
     );
 
     expect(tempChatRegenerate).toHaveBeenCalledWith(
-      { sessionId: "t1", model: "m", think: null },
+      { sessionId: "t1", model: "m" },
       onEvent
     );
     expect(tempChatEdit).toHaveBeenCalledWith(
@@ -126,7 +168,6 @@ describe("regenerate and edit requests", () => {
         messageId: "u0",
         model: "m",
         prompt: "Changed",
-        think: null,
       },
       onEvent
     );
@@ -155,7 +196,7 @@ describe("temporary chat requests", () => {
 
     expect(result).toEqual(started);
     expect(tempChatSend).toHaveBeenCalledWith(
-      { sessionId: "t1", model: "m", prompt: "Hi", think: null },
+      { sessionId: "t1", model: "m", prompt: "Hi" },
       onEvent
     );
     expect(conversationCreate).not.toHaveBeenCalled();
@@ -164,13 +205,14 @@ describe("temporary chat requests", () => {
     expect(callbacks.onStarted).not.toHaveBeenCalled();
   });
 
-  it("starts one session and reuses it", async () => {
+  it("starts one session with the first settings and reuses it", async () => {
     vi.mocked(tempChatStart).mockResolvedValue("t1");
     const session = tempSession();
 
-    expect(await session.id()).toBe("t1");
-    expect(await session.id()).toBe("t1");
+    expect(await session.id(finnish)).toBe("t1");
+    expect(await session.id(DEFAULT_SETTINGS)).toBe("t1");
     expect(tempChatStart).toHaveBeenCalledTimes(1);
+    expect(tempChatStart).toHaveBeenCalledWith(finnish);
   });
 
   it("discards a session still being created, then starts a fresh one", async () => {
@@ -183,10 +225,10 @@ describe("temporary chat requests", () => {
       )
       .mockResolvedValueOnce("t2");
     const session = tempSession();
-    void session.id();
+    void session.id(DEFAULT_SETTINGS);
 
     session.discard();
-    const next = session.id();
+    const next = session.id(DEFAULT_SETTINGS);
     resolveFirst("t1");
 
     expect(await next).toBe("t2");
@@ -201,8 +243,9 @@ describe("temporary chat requests", () => {
       .mockResolvedValueOnce("t2");
     const session = tempSession();
 
-    await expect(session.id()).rejects.toThrow("busy");
-    expect(await session.id()).toBe("t2");
+    await expect(session.id(DEFAULT_SETTINGS)).rejects.toThrow("busy");
+    expect(await session.id(finnish)).toBe("t2");
+    expect(tempChatStart).toHaveBeenLastCalledWith(finnish);
   });
 
   it("does nothing on discard before any send", () => {

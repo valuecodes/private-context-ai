@@ -13,21 +13,28 @@ import type {
   TempSession,
   TurnInput,
 } from "~/features/chat/send-request";
+import { settingsSync } from "~/features/chat/settings-sync";
+import type { SettingsSync } from "~/features/chat/settings-sync";
 import { toAppError } from "~/lib/app-error";
 import { chatCancel, conversationGet } from "~/lib/ipc";
-import type { AppError, ChatEvent, RequestId, Think } from "~/lib/types";
+import type {
+  AppError,
+  ChatEvent,
+  ConversationSettings,
+  RequestId,
+} from "~/lib/types";
 
 const newStreamId = (): string => crypto.randomUUID();
 
-/** Loads a saved conversation's messages as bubbles. */
+/** Loads a saved conversation's messages as bubbles, and its settings. */
 const loadConversation = (
   conversationId: string,
-  loaded: (messages: UiMessage[]) => void,
+  loaded: (messages: UiMessage[], settings: ConversationSettings) => void,
   failed: (error: AppError) => void
 ) => {
   void conversationGet(conversationId).then(
     (saved) => {
-      loaded(fromStored(saved.messages));
+      loaded(fromStored(saved.messages), saved.conversation.settings);
     },
     (error: unknown) => {
       failed(toAppError(error));
@@ -39,6 +46,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const [state, dispatch] = useReducer(chatReducer, null, createChatState);
   // One per chat view; `tempSession` itself starts nothing until a send.
   const session = useRef<TempSession>(tempSession()).current;
+  const sync = useRef<SettingsSync>(settingsSync()).current;
   // The latest send: its request id once Rust admits it, `null` if refused.
   // Stop can then cancel even before `chatSend` has resolved.
   const pending = useRef<{
@@ -60,14 +68,16 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
       return;
     }
     session.discard();
+    const opened = sync.open(conversationId);
     dispatch({ type: "open", conversationId });
     if (conversationId === null) {
       return;
     }
     loadConversation(
       conversationId,
-      (messages) => {
-        dispatch({ type: "loaded", conversationId, messages });
+      (messages, settings) => {
+        opened.saved = settings;
+        dispatch({ type: "loaded", conversationId, messages, settings });
       },
       (error) => {
         dispatch({ type: "loadFailed", conversationId, error });
@@ -81,12 +91,34 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
       return;
     }
     session.discard();
+    sync.open(null);
     dispatch({ type: "openTemporary" });
   };
 
   /** Clears the view if the deleted conversation is still the open one. */
   const forget = (conversationId: string) => {
+    // The reducer's condition: the view resets only when idle.
+    if (
+      sync.current().conversationId === conversationId &&
+      state.phase === "idle"
+    ) {
+      sync.open(null);
+    }
     dispatch({ type: "deleted", conversationId });
+  };
+
+  /**
+   * Shows `settings` at once and saves them for the open chat. A failed
+   * save shows the error and the settings Rust kept.
+   */
+  const updateSettings = (settings: ConversationSettings) => {
+    if (state.loading) {
+      return;
+    }
+    dispatch({ type: "settings", settings });
+    sync.save(settings, (saved, error) => {
+      dispatch({ type: "settings", settings: saved, error });
+    });
   };
 
   /**
@@ -97,7 +129,6 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const startTurnRequest = (
     action: TurnAction,
     model: string,
-    think: Think | null,
     input: TurnInput
   ): boolean => {
     const { streamId } = action;
@@ -107,6 +138,8 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
       return false;
     }
     const saved = state.conversationId;
+    const { settings } = state;
+    const current = sync.current();
     // A refused regenerate or edit was undone in Rust before the refusal
     // arrived, and a stopped one may have completed there first: show the
     // saved conversation as it really is. A reply still pending there (the
@@ -137,22 +170,30 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     };
     let target: SendTarget = { kind: "new" };
     if (state.temporary) {
-      target = { kind: "temporary", sessionId: session.id() };
+      // The same session every send; a refused start is tried again.
+      current.session = session.id(settings);
+      target = { kind: "temporary", sessionId: current.session };
     } else if (saved !== null) {
       target = { kind: "saved", conversationId: saved };
     }
+    // A send waits for the settings saved before it, and for a Stop.
+    const ready = Promise.all([cancelling.current, sync.settled()]).then(
+      () => undefined
+    );
     const requestId = startRequest(
       target,
-      { model, think, input },
+      { model, settings, input },
       onEvent,
       {
         onCreated: (created) => {
+          current.conversationId = created.id;
+          current.saved = created.settings;
           dispatch({ type: "created", streamId, conversationId: created.id });
           onCreated(created);
         },
         onStarted,
       },
-      cancelling.current
+      ready
     ).then(
       (started) => {
         dispatch({ type: "started", streamId, started });
@@ -164,38 +205,28 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
         return null;
       }
     );
+    current.started = requestId;
     pending.current = { streamId, requestId, reload };
     return true;
   };
 
-  const send = (model: string, text: string, think: Think | null): boolean =>
-    startTurnRequest(
-      { type: "send", streamId: newStreamId(), text },
-      model,
-      think,
-      { kind: "send", prompt: text }
-    );
+  const send = (model: string, text: string): boolean =>
+    startTurnRequest({ type: "send", streamId: newStreamId(), text }, model, {
+      kind: "send",
+      prompt: text,
+    });
 
   /** A new reply to the last prompt, replacing the last reply. */
-  const regenerate = (model: string, think: Think | null): boolean =>
-    startTurnRequest(
-      { type: "regenerate", streamId: newStreamId() },
-      model,
-      think,
-      { kind: "regenerate" }
-    );
+  const regenerate = (model: string): boolean =>
+    startTurnRequest({ type: "regenerate", streamId: newStreamId() }, model, {
+      kind: "regenerate",
+    });
 
   /** Replaces the user message `messageId`, and everything after it. */
-  const edit = (
-    model: string,
-    messageId: string,
-    text: string,
-    think: Think | null
-  ): boolean =>
+  const edit = (model: string, messageId: string, text: string): boolean =>
     startTurnRequest(
       { type: "edit", streamId: newStreamId(), messageId, text },
       model,
-      think,
       { kind: "edit", messageId, prompt: text }
     );
 
@@ -221,6 +252,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     open,
     openTemporary,
     forget,
+    updateSettings,
     send,
     regenerate,
     edit,

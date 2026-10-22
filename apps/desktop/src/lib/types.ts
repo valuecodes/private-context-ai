@@ -50,8 +50,31 @@ type ModelInfo = {
 /** A model-defined level (`low`, `high`, `max`, …), as `/api/show` lists it. */
 type ThinkLevel = string;
 
-/** Ollama's `think`: on/off, or a level for models that take one. */
-type Think = boolean | ThinkLevel;
+/**
+ * What a chat saves as its Think setting. Rust decides from the model what is
+ * actually sent; off sends `false`, or the default level to a model that
+ * always thinks.
+ */
+type ThinkChoice =
+  | { kind: "off" }
+  | { kind: "on" }
+  | { kind: "level"; level: ThinkLevel };
+
+/** Sampling options a chat saves. Field names are Ollama's. */
+type ChatOptions = {
+  /** 0 to 2; unset is the model's default. */
+  temperature?: number;
+  /** Context window in tokens; unset is the model's default. */
+  num_ctx?: number;
+};
+
+/** How a chat is sent, applied from its next send. */
+type ConversationSettings = {
+  /** Sent first as a system message when not blank; never shown as one. */
+  systemPrompt: string;
+  options: ChatOptions;
+  think: ThinkChoice;
+};
 
 /** How a thinking model is switched. */
 type ThinkStyle =
@@ -83,6 +106,7 @@ type Conversation = {
   model: string;
   createdAt: string;
   updatedAt: string;
+  settings: ConversationSettings;
 };
 
 /** `pending`: still streaming, or the app stopped while it was. */
@@ -177,7 +201,9 @@ export type {
   AuditEvent,
   AuditStatus,
   ChatEvent,
+  ChatOptions,
   Conversation,
+  ConversationSettings,
   ConversationWithMessages,
   LogLevel,
   ModelCapabilities,
@@ -189,7 +215,7 @@ export type {
   SettingsPatch,
   StorageStatus,
   StoredMessage,
-  Think,
+  ThinkChoice,
   ThinkLevel,
   ThinkStyle,
 };

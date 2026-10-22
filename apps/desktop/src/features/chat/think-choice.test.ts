@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { ModelCapabilities, ThinkStyle } from "~/lib/types";
 
-import { selectedLevel, THINK_OFF, thinkToSend } from "./think-choice";
+import { selectedLevel, THINK_OFF } from "./think-choice";
 
 const caps = (
   thinking: boolean,
@@ -22,32 +22,27 @@ const levels = (canDisable: boolean): ThinkStyle => ({
   canDisable,
 });
 
-describe("thinkToSend", () => {
-  it("sends nothing for unknown or non-thinking models", () => {
-    expect(thinkToSend(undefined, { on: true, level: null })).toBeNull();
-    expect(thinkToSend(caps(false), { on: true, level: "high" })).toBeNull();
+describe("selectedLevel", () => {
+  it("shows no level for boolean models", () => {
+    expect(selectedLevel(caps(true), { kind: "on" })).toBeNull();
   });
 
-  it("sends an explicit boolean to boolean models", () => {
-    expect(thinkToSend(caps(true), THINK_OFF)).toBe(false);
-    expect(thinkToSend(caps(true), { on: true, level: null })).toBe(true);
-  });
-
-  it("sends only advertised levels", () => {
+  it("shows only advertised levels", () => {
     const always = caps(true, levels(false));
-    expect(thinkToSend(always, THINK_OFF)).toBe("medium");
-    expect(thinkToSend(always, { on: true, level: "high" })).toBe("high");
+    expect(selectedLevel(always, { kind: "level", level: "high" })).toBe(
+      "high"
+    );
+    expect(selectedLevel(always, { kind: "on" })).toBe("medium");
     const narrow = caps(true, {
       kind: "levels",
       levels: ["low"],
       default: "low",
       canDisable: false,
     });
-    expect(thinkToSend(narrow, { on: true, level: "high" })).toBe("low");
+    expect(selectedLevel(narrow, { kind: "level", level: "high" })).toBe("low");
   });
 
-  it("turns off a levels model only when it allows it", () => {
-    expect(thinkToSend(caps(true, levels(true)), THINK_OFF)).toBe(false);
+  it("shows Off for a levels model only when it allows it", () => {
     expect(selectedLevel(caps(true, levels(true)), THINK_OFF)).toBeNull();
     expect(selectedLevel(caps(true, levels(false)), THINK_OFF)).toBe("medium");
   });
@@ -59,7 +54,9 @@ describe("thinkToSend", () => {
       default: "max",
       canDisable: false,
     });
-    expect(thinkToSend(custom, { on: true, level: "xhigh" })).toBe("xhigh");
-    expect(thinkToSend(custom, THINK_OFF)).toBe("max");
+    expect(selectedLevel(custom, { kind: "level", level: "xhigh" })).toBe(
+      "xhigh"
+    );
+    expect(selectedLevel(custom, THINK_OFF)).toBe("max");
   });
 });

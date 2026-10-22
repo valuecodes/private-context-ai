@@ -1,22 +1,60 @@
 //! Conversation CRUD.
 
-use rusqlite::{OptionalExtension, Row, params};
-use serde::Serialize;
+use rusqlite::{Connection, OptionalExtension, Row, params};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::Storage;
-use super::messages::{StoredMessage, load_messages};
+use super::messages::{StoredMessage, bad_text, load_messages};
 use crate::error::AppError;
-use crate::ollama::types::validate_model;
+use crate::ollama::types::{ChatOptions, ThinkChoice, validate_model};
 use crate::redacted::Redacted;
 
 /// Longest title accepted, in characters.
 pub const MAX_TITLE_CHARS: usize = 200;
 pub const DEFAULT_TITLE: &str = "New chat";
+/// Longest system prompt accepted, in bytes.
+pub const MAX_SYSTEM_PROMPT_BYTES: usize = 32 * 1024;
+
+/// How a conversation is sent, applied from its next send. Saved chats keep
+/// it in their row, temporary ones in memory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConversationSettings {
+    /// Sent first as a `system` message when not blank; never a message row.
+    pub system_prompt: Redacted,
+    /// Only `temperature` and `num_ctx` are kept.
+    pub options: ChatOptions,
+    pub think: ThinkChoice,
+}
+
+impl ConversationSettings {
+    pub fn validate(&self) -> Result<(), AppError> {
+        if self.system_prompt.len_bytes() > MAX_SYSTEM_PROMPT_BYTES
+            || self.system_prompt.expose().contains('\0')
+        {
+            return Err(AppError::InvalidInput(format!(
+                "a system prompt is at most {MAX_SYSTEM_PROMPT_BYTES} bytes of text"
+            )));
+        }
+        if self.options.num_predict.is_some() || self.options.seed.is_some() {
+            return Err(AppError::InvalidInput(
+                "only temperature and num_ctx can be saved".into(),
+            ));
+        }
+        self.options.validate()?;
+        self.think.validate()
+    }
+
+    /// The options Ollama is sent; `None` leaves the body without them.
+    pub fn options(&self) -> Option<ChatOptions> {
+        (self.options != ChatOptions::default()).then_some(self.options)
+    }
+}
 
 /// One conversation without its messages. The title is often taken from the
 /// first prompt, so it is redacted in logs like message text.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Conversation {
     pub id: Uuid,
@@ -24,16 +62,68 @@ pub struct Conversation {
     pub model: String,
     pub created_at: String,
     pub updated_at: String,
+    pub settings: ConversationSettings,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationWithMessages {
     pub conversation: Conversation,
     pub messages: Vec<StoredMessage>,
 }
 
-const COLUMNS: &str = "id, title, model, created_at, updated_at";
+const COLUMNS: &str =
+    "id, title, model, created_at, updated_at, system_prompt, temperature, num_ctx, think";
+const SETTINGS_COLUMNS: &str = "system_prompt, temperature, num_ctx, think";
+
+/// The `think` column: `off`, `on` or `level:<name>`.
+fn think_column(think: &ThinkChoice) -> String {
+    match think {
+        ThinkChoice::Off => "off".into(),
+        ThinkChoice::On => "on".into(),
+        ThinkChoice::Level(level) => format!("level:{level}"),
+    }
+}
+
+fn parse_think(value: &str) -> Option<ThinkChoice> {
+    match value {
+        "off" => Some(ThinkChoice::Off),
+        "on" => Some(ThinkChoice::On),
+        _ => value
+            .strip_prefix("level:")
+            .map(|level| ThinkChoice::Level(level.to_owned())),
+    }
+}
+
+/// The four settings columns, starting at `first`.
+fn settings_row(row: &Row<'_>, first: usize) -> rusqlite::Result<ConversationSettings> {
+    let think: String = row.get(first + 3)?;
+    // Saved from an `f32`, so it converts back exactly.
+    let temperature = row.get::<_, Option<f64>>(first + 1)?.map(|t| t as f32);
+    Ok(ConversationSettings {
+        system_prompt: Redacted::new(row.get::<_, String>(first)?),
+        options: ChatOptions {
+            temperature,
+            num_ctx: row
+                .get::<_, Option<i64>>(first + 2)?
+                .and_then(|n| u32::try_from(n).ok()),
+            ..ChatOptions::default()
+        },
+        think: parse_think(&think).ok_or_else(|| bad_text(first + 3, "think"))?,
+    })
+}
+
+/// The settings of conversation `id`, read on `conn` so a transaction sees
+/// its own snapshot.
+pub(super) fn load_settings(conn: &Connection, id: &str) -> Result<ConversationSettings, AppError> {
+    conn.query_row(
+        &format!("SELECT {SETTINGS_COLUMNS} FROM conversations WHERE id = ?1"),
+        [id],
+        |row| settings_row(row, 0),
+    )
+    .optional()?
+    .ok_or_else(not_found)
+}
 
 /// ISO 8601 UTC with milliseconds, computed by SQLite.
 pub(super) const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
@@ -52,6 +142,7 @@ fn conversation_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
         model: row.get(2)?,
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
+        settings: settings_row(row, 5)?,
     })
 }
 
@@ -81,20 +172,72 @@ impl Storage {
         title: Option<&str>,
         model: &str,
     ) -> Result<Conversation, AppError> {
+        self.create_conversation_with(title, model, &ConversationSettings::default())
+    }
+
+    /// Like [`Self::create_conversation`], saved with `settings` at once so
+    /// no later update can race the first send.
+    pub fn create_conversation_with(
+        &self,
+        title: Option<&str>,
+        model: &str,
+        settings: &ConversationSettings,
+    ) -> Result<Conversation, AppError> {
         let title = clean_title(title.unwrap_or(DEFAULT_TITLE))?;
         if !model.is_empty() {
             validate_model(model)?;
         }
+        settings.validate()?;
         let conn = self.conn();
         let conversation = conn.query_row(
             &format!(
-                "INSERT INTO conversations ({COLUMNS}) VALUES (?1, ?2, ?3, {NOW}, {NOW})
+                "INSERT INTO conversations ({COLUMNS})
+                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7)
                  RETURNING {COLUMNS}"
             ),
-            params![Uuid::new_v4().to_string(), title, model],
+            params![
+                Uuid::new_v4().to_string(),
+                title,
+                model,
+                settings.system_prompt.expose(),
+                settings.options.temperature.map(f64::from),
+                settings.options.num_ctx,
+                think_column(&settings.think)
+            ],
             conversation_row,
         )?;
         Ok(conversation)
+    }
+
+    pub fn conversation_settings(&self, id: Uuid) -> Result<ConversationSettings, AppError> {
+        load_settings(&self.conn(), &id.to_string())
+    }
+
+    /// Applies from the next send. Like renaming, not counted as use.
+    pub fn update_settings(
+        &self,
+        id: Uuid,
+        settings: &ConversationSettings,
+    ) -> Result<Conversation, AppError> {
+        settings.validate()?;
+        let conn = self.conn();
+        conn.query_row(
+            &format!(
+                "UPDATE conversations
+                 SET system_prompt = ?2, temperature = ?3, num_ctx = ?4, think = ?5
+                 WHERE id = ?1 RETURNING {COLUMNS}"
+            ),
+            params![
+                id.to_string(),
+                settings.system_prompt.expose(),
+                settings.options.temperature.map(f64::from),
+                settings.options.num_ctx,
+                think_column(&settings.think)
+            ],
+            conversation_row,
+        )
+        .optional()?
+        .ok_or_else(not_found)
     }
 
     /// Most recently used first.
@@ -225,6 +368,149 @@ mod tests {
             storage.rename_conversation(id, "x"),
             Err(AppError::NotFound(_))
         ));
+    }
+
+    fn settings(
+        prompt: &str,
+        temperature: Option<f32>,
+        think: ThinkChoice,
+    ) -> ConversationSettings {
+        ConversationSettings {
+            system_prompt: Redacted::new(prompt),
+            options: ChatOptions {
+                temperature,
+                num_ctx: Some(8192),
+                ..ChatOptions::default()
+            },
+            think,
+        }
+    }
+
+    #[test]
+    fn settings_round_trip() {
+        let (storage, _dir) = temp_storage();
+        let plain = storage.create_conversation(None, "m").unwrap();
+        assert_eq!(plain.settings, ConversationSettings::default());
+        assert_eq!(plain.settings.options(), None);
+
+        let first = settings("Answer only in Finnish", Some(0.7), ThinkChoice::On);
+        let created = storage
+            .create_conversation_with(Some("t"), "m", &first)
+            .unwrap();
+        assert_eq!(created.settings, first);
+        assert_eq!(
+            storage.get_conversation(created.id).unwrap().conversation,
+            created
+        );
+
+        let second = settings("", None, ThinkChoice::Level("high".into()));
+        let updated = storage.update_settings(created.id, &second).unwrap();
+        assert_eq!(updated.settings, second);
+        assert_eq!(updated.updated_at, created.updated_at);
+        assert_eq!(storage.conversation_settings(created.id).unwrap(), second);
+        assert_eq!(
+            storage.list_conversations().unwrap()[0].settings,
+            second,
+            "the list carries the settings too"
+        );
+    }
+
+    #[test]
+    fn settings_validation_rejects_out_of_range() {
+        let (storage, _dir) = temp_storage();
+        let id = storage.create_conversation(None, "m").unwrap().id;
+        let with_options = |options: ChatOptions| ConversationSettings {
+            options,
+            ..ConversationSettings::default()
+        };
+        let bad = [
+            settings("", Some(2.5), ThinkChoice::Off),
+            settings("", Some(-0.1), ThinkChoice::Off),
+            with_options(ChatOptions {
+                num_ctx: Some(100),
+                ..ChatOptions::default()
+            }),
+            with_options(ChatOptions {
+                num_ctx: Some(200_000),
+                ..ChatOptions::default()
+            }),
+            with_options(ChatOptions {
+                num_predict: Some(10),
+                ..ChatOptions::default()
+            }),
+            settings(
+                &"x".repeat(MAX_SYSTEM_PROMPT_BYTES + 1),
+                None,
+                ThinkChoice::Off,
+            ),
+            settings("a\0b", None, ThinkChoice::Off),
+            settings("", None, ThinkChoice::Level(String::new())),
+        ];
+        for settings in &bad {
+            assert!(matches!(
+                storage.update_settings(id, settings),
+                Err(AppError::InvalidInput(_))
+            ));
+            assert!(matches!(
+                storage.create_conversation_with(None, "m", settings),
+                Err(AppError::InvalidInput(_))
+            ));
+        }
+        assert_eq!(
+            storage.conversation_settings(id).unwrap(),
+            ConversationSettings::default()
+        );
+        assert_eq!(storage.list_conversations().unwrap().len(), 1);
+        let longest = settings(
+            &"x".repeat(MAX_SYSTEM_PROMPT_BYTES),
+            Some(2.0),
+            ThinkChoice::Off,
+        );
+        assert!(storage.update_settings(id, &longest).is_ok());
+    }
+
+    #[test]
+    fn update_settings_unknown_is_not_found() {
+        let (storage, _dir) = temp_storage();
+        let id = Uuid::new_v4();
+        assert!(matches!(
+            storage.update_settings(id, &ConversationSettings::default()),
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            storage.conversation_settings(id),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn migrated_conversation_sends_think_false_to_boolean_model() {
+        use crate::ollama::types::{ModelCapabilities, Think, ThinkStyle, resolve_think};
+
+        let (storage, _dir) = temp_storage();
+        // What a row written before the settings columns existed holds.
+        storage
+            .conn()
+            .execute(
+                "INSERT INTO conversations (id, title, model, created_at, updated_at)
+                 VALUES (?1, 'old', 'qwen3', 'x', 'x')",
+                [Uuid::nil().to_string()],
+            )
+            .unwrap();
+        let saved = storage.conversation_settings(Uuid::nil()).unwrap();
+        assert_eq!(saved, ConversationSettings::default());
+
+        let qwen3 = ModelCapabilities {
+            thinking: true,
+            vision: false,
+            tools: true,
+            embedding_only: false,
+            think_style: ThinkStyle::Bool,
+        };
+        assert_eq!(
+            resolve_think(&qwen3, saved.think.requested()),
+            Ok(Some(Think::Enabled(false)))
+        );
     }
 
     #[test]

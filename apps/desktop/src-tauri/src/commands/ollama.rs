@@ -12,10 +12,11 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{
-    ChatEvent, ChatOptions, ModelCapabilities, ModelInfo, OllamaStatus, Think, validate_model,
+    ChatEvent, ChatMessage, ModelCapabilities, ModelInfo, OllamaStatus, ThinkChoice, validate_model,
 };
 use crate::ollama::{ChatThink, Ollama};
 use crate::redacted::Redacted;
+use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnInput, TurnRecorder};
 use crate::storage::{Storage, StorageState};
 
@@ -52,14 +53,47 @@ pub struct SendStarted {
 }
 
 /// One send, saved or temporary. For a temporary chat `conversation_id` is
-/// its session id.
+/// its session id. Options and the system prompt come from the chat's
+/// settings when the turn begins.
 pub struct SendRequest {
     pub conversation_id: Uuid,
     pub model: String,
     pub input: TurnInput,
-    pub options: Option<ChatOptions>,
+    /// The chat's Think setting that `think` was resolved from.
+    pub think_choice: ThinkChoice,
     /// From [`Ollama::chat_think`].
     pub think: ChatThink,
+}
+
+/// Refuses a turn whose settings changed after its `think` was resolved,
+/// then checks the history against the client's limits.
+pub(crate) fn check_turn(
+    ollama: &Ollama,
+    model: &str,
+    think_choice: &ThinkChoice,
+    history: &[ChatMessage],
+    settings: &ConversationSettings,
+) -> Result<(), AppError> {
+    if settings.think != *think_choice {
+        return Err(AppError::InvalidInput(
+            "the chat settings changed while sending; send again".into(),
+        ));
+    }
+    ollama.validate(model, history, settings.options().as_ref())
+}
+
+/// The saved conversation's Think setting and what it resolves to for
+/// `model`. A failed lookup fails the send: without it a thinking model
+/// would get Ollama's default instead of an explicit `false`.
+async fn saved_think(
+    ollama: &Ollama,
+    storage: &Storage,
+    conversation_id: Uuid,
+    model: &str,
+) -> Result<(ThinkChoice, ChatThink), AppError> {
+    let choice = storage.conversation_settings(conversation_id)?.think;
+    let think = ollama.chat_think(model, choice.requested()).await?;
+    Ok((choice, think))
 }
 
 /// A failed send means the webview is gone; the worker then cancels.
@@ -82,23 +116,19 @@ pub(crate) fn check_prompt(input: &TurnInput) -> Result<(), AppError> {
 
 /// Saves `prompt` to the conversation, starts streaming the reply into
 /// `on_event` and returns the new rows' ids at once. Rust builds the
-/// history from the database.
+/// history from the database and sends it with the conversation's
+/// settings.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn chat_send(
     ollama: State<'_, Arc<Ollama>>,
     storage: State<'_, StorageState>,
     conversation_id: Uuid,
     model: String,
     prompt: Redacted,
-    options: Option<ChatOptions>,
-    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
-    // A failed lookup fails the send: without it a thinking model would get
-    // Ollama's default instead of an explicit `false`.
-    let think = ollama.chat_think(&model, think).await?;
+    let (think_choice, think) = saved_think(&ollama, &storage, conversation_id, &model).await?;
     send_turn(
         &ollama,
         storage,
@@ -106,7 +136,7 @@ pub async fn chat_send(
             conversation_id,
             model,
             input: TurnInput::New(prompt),
-            options,
+            think_choice,
             think,
         },
         FlushPolicy::default(),
@@ -122,11 +152,10 @@ pub async fn chat_regenerate(
     storage: State<'_, StorageState>,
     conversation_id: Uuid,
     model: String,
-    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
-    let think = ollama.chat_think(&model, think).await?;
+    let (think_choice, think) = saved_think(&ollama, &storage, conversation_id, &model).await?;
     send_turn(
         &ollama,
         storage,
@@ -134,7 +163,7 @@ pub async fn chat_regenerate(
             conversation_id,
             model,
             input: TurnInput::Regenerate,
-            options: None,
+            think_choice,
             think,
         },
         FlushPolicy::default(),
@@ -146,7 +175,6 @@ pub async fn chat_regenerate(
 /// everything after it with `prompt` and its reply. Nothing is deleted
 /// until that reply completes.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn chat_edit(
     ollama: State<'_, Arc<Ollama>>,
     storage: State<'_, StorageState>,
@@ -154,11 +182,10 @@ pub async fn chat_edit(
     message_id: Uuid,
     model: String,
     prompt: Redacted,
-    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
-    let think = ollama.chat_think(&model, think).await?;
+    let (think_choice, think) = saved_think(&ollama, &storage, conversation_id, &model).await?;
     send_turn(
         &ollama,
         storage,
@@ -166,7 +193,7 @@ pub async fn chat_edit(
             conversation_id,
             model,
             input: TurnInput::Edit { message_id, prompt },
-            options: None,
+            think_choice,
             think,
         },
         FlushPolicy::default(),
@@ -216,8 +243,9 @@ fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
 /// The body of the send commands, without Tauri. Order matters: the slot is
 /// taken before anything is written, and nothing is written when the
 /// history is refused, so a refused send leaves no rows behind and a
-/// refused regenerate or edit replaces nothing. A base URL switched since
-/// `think` was resolved is refused before anything is written.
+/// refused regenerate or edit replaces nothing. A base URL switched, or a
+/// Think setting changed, since `think` was resolved is refused before
+/// anything is written.
 pub fn send_turn<S>(
     ollama: &Arc<Ollama>,
     storage: Arc<Storage>,
@@ -232,18 +260,15 @@ where
         conversation_id,
         model,
         input,
-        options,
+        think_choice,
         think,
     } = request;
     check_prompt(&input)?;
     validate_model(&model)?;
-    if let Some(options) = &options {
-        options.validate()?;
-    }
     let admission = ollama.admit(conversation_id)?;
     ollama.check_connection(think.connection)?;
-    let turn = storage.begin_turn(conversation_id, &model, &input, |history| {
-        ollama.validate(&model, history, options.as_ref())
+    let turn = storage.begin_turn(conversation_id, &model, &input, |history, settings| {
+        check_turn(ollama, &model, &think_choice, history, settings)
     })?;
 
     let recorder: SharedRecorder = Arc::new(Mutex::new(TurnRecorder::new(
@@ -258,7 +283,7 @@ where
         admission,
         &model,
         &turn.history,
-        options.as_ref(),
+        turn.options.as_ref(),
         think,
         sink,
         move |end| {
@@ -368,10 +393,13 @@ fn spawn_ticker(recorder: SharedRecorder, every: Duration, stop: CancellationTok
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::Audit;
     use crate::commands::testing::{no_think, silent_ollama};
+    use crate::ollama::Limits;
     use crate::ollama::client::OllamaBaseUrl;
+    use crate::ollama::types::Think;
     use crate::storage::messages::StoredMessage;
-    use crate::storage::testing::{break_writes, temp_storage};
+    use crate::storage::testing::{break_writes, count_rows, temp_storage};
 
     type Events = Arc<Mutex<Vec<ChatEvent>>>;
 
@@ -395,7 +423,7 @@ mod tests {
                 conversation,
                 "m",
                 &TurnInput::New(Redacted::new("Hi")),
-                |_| Ok(()),
+                |_, _| Ok(()),
             )
             .unwrap();
         let recorder = Arc::new(Mutex::new(TurnRecorder::new(
@@ -591,7 +619,7 @@ mod tests {
             conversation_id: conversation,
             model: "llama3.2".into(),
             input,
-            options: None,
+            think_choice: ThinkChoice::Off,
             think: no_think(ollama),
         }
     }
@@ -642,7 +670,7 @@ mod tests {
         let (storage, _dir) = temp_storage();
         let (conversation, before) = answered(&storage);
         let turn = storage
-            .begin_turn(conversation, "m", &TurnInput::Regenerate, |_| Ok(()))
+            .begin_turn(conversation, "m", &TurnInput::Regenerate, |_, _| Ok(()))
             .unwrap();
         let recorder = Arc::new(Mutex::new(TurnRecorder::new(
             Arc::clone(&storage),
@@ -820,6 +848,67 @@ mod tests {
                 .messages
                 .is_empty()
         );
+        assert_eq!(ollama.inflight_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn system_prompt_counts_toward_size_limit() {
+        let (_, listener) = silent_ollama().await;
+        let base = OllamaBaseUrl::parse(&format!("http://{}", listener.local_addr().unwrap()));
+        let ollama = Arc::new(Ollama::with_limits(
+            base,
+            Arc::new(Audit::new()),
+            Limits {
+                max_prompt_bytes: 100,
+                ..Limits::default()
+            },
+        ));
+        let (storage, _dir) = temp_storage();
+        let conversation = storage.create_conversation(None, "m").unwrap().id;
+        let prompt = || TurnInput::New(Redacted::new("x".repeat(40)));
+        storage
+            .update_settings(
+                conversation,
+                &ConversationSettings {
+                    system_prompt: Redacted::new("s".repeat(80)),
+                    ..ConversationSettings::default()
+                },
+            )
+            .unwrap();
+
+        let err = send_input(&ollama, &storage, conversation, prompt()).unwrap_err();
+        assert!(matches!(err, AppError::TooLarge(_)));
+        assert_eq!(count_rows(&storage, "messages"), 0);
+        assert_eq!(ollama.inflight_len(), 0);
+
+        // The same prompt fits without the system prompt.
+        storage
+            .update_settings(conversation, &ConversationSettings::default())
+            .unwrap();
+        send_input(&ollama, &storage, conversation, prompt()).unwrap();
+        ollama.cancel_conversation(conversation).await;
+    }
+
+    #[tokio::test]
+    async fn settings_changed_while_sending_writes_nothing() {
+        let (ollama, _listener) = silent_ollama().await;
+        let (storage, _dir) = temp_storage();
+        let conversation = storage.create_conversation(None, "m").unwrap().id;
+        // `think` was resolved for Off; the user turned Think on meanwhile.
+        storage
+            .update_settings(
+                conversation,
+                &ConversationSettings {
+                    think: ThinkChoice::On,
+                    ..ConversationSettings::default()
+                },
+            )
+            .unwrap();
+
+        let err = send(&ollama, &storage, conversation).unwrap_err();
+
+        assert!(matches!(err, AppError::InvalidInput(_)));
+        assert_eq!(count_rows(&storage, "messages"), 0);
         assert_eq!(ollama.inflight_len(), 0);
     }
 
