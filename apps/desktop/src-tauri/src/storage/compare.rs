@@ -127,6 +127,18 @@ impl Storage {
         Ok(model)
     }
 
+    /// Marks every candidate still `pending` as `error`, once the worker
+    /// is done with the group. A candidate whose final write failed would
+    /// otherwise keep the group running, refusing every pick, discard and
+    /// turn until the next start.
+    pub fn settle_compare(&self, group: Uuid) -> Result<(), AppError> {
+        self.conn().execute(
+            "UPDATE messages SET status = 'error' WHERE compare_group = ?1 AND status = 'pending'",
+            [group.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// Deletes the compared prompt and all its candidates. Refused while any
     /// candidate is still running.
     pub fn compare_discard(&self, conversation_id: Uuid, group: Uuid) -> Result<(), AppError> {
@@ -448,6 +460,27 @@ mod tests {
             storage.compare_discard(other, turn.group),
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn settle_compare_unblocks_a_group_left_pending() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage);
+        let turn = compare(&storage, id, "Two");
+        end(
+            &storage,
+            turn.candidates[0].0,
+            "From a",
+            MessageStatus::Complete,
+        );
+        // b's final write failed: its row is still `pending`.
+
+        storage.settle_compare(turn.group).unwrap();
+
+        let rows = messages(&storage, id);
+        assert_eq!(rows[3].status, MessageStatus::Complete);
+        assert_eq!(rows[4].status, MessageStatus::Error);
+        assert_eq!(storage.compare_pick(id, turn.candidates[0].0).unwrap(), "a");
     }
 
     #[test]
