@@ -73,16 +73,20 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     if (conversationId === null) {
       return;
     }
-    loadConversation(
-      conversationId,
-      (messages, settings) => {
-        opened.saved = settings;
-        dispatch({ type: "loaded", conversationId, messages, settings });
-      },
-      (error) => {
-        dispatch({ type: "loadFailed", conversationId, error });
-      }
-    );
+    // After the saves still queued, which may be for this very chat, so the
+    // load reads what they wrote. The view stays loading meanwhile.
+    void sync.settled().then(() => {
+      loadConversation(
+        conversationId,
+        (messages, settings) => {
+          opened.saved = settings;
+          dispatch({ type: "loaded", conversationId, messages, settings });
+        },
+        (error) => {
+          dispatch({ type: "loadFailed", conversationId, error });
+        }
+      );
+    });
   };
 
   /** Starts an empty temporary chat; its session starts with the first send. */
