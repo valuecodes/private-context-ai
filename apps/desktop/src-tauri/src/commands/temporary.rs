@@ -55,10 +55,12 @@ pub async fn temp_chat_discard(
 }
 
 /// Forgets the chat, then cancels its reply if one runs, admitted or
-/// streaming. An unknown id is a no-op.
+/// streaming. An unknown id is a no-op, so a saved conversation's id never
+/// cancels that conversation's reply.
 pub async fn discard(ollama: &Ollama, chats: &TempChats, session_id: Uuid) {
-    chats.remove(session_id);
-    ollama.cancel_conversation(session_id).await;
+    if chats.remove(session_id) {
+        ollama.cancel_conversation(session_id).await;
+    }
 }
 
 /// The body of `temp_chat_send`, without Tauri. The slot is taken before the
@@ -211,6 +213,19 @@ mod tests {
 
         assert_eq!(ollama.inflight_len(), 0);
         assert!(chats.history(session).is_none());
+    }
+
+    #[tokio::test]
+    async fn discard_unknown_id_cancels_nothing() {
+        let (ollama, _listener) = silent_ollama().await;
+        let chats = Arc::new(TempChats::default());
+        // A saved conversation's reply, running under its own id.
+        let conversation = Uuid::new_v4();
+        let _admission = ollama.admit(conversation).unwrap();
+
+        discard(&ollama, &chats, conversation).await;
+
+        assert_eq!(ollama.inflight_len(), 1);
     }
 
     #[tokio::test]
