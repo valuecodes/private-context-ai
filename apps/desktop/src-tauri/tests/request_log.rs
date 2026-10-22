@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use private_context_ai_lib::audit::Audit;
 use private_context_ai_lib::observability;
-use private_context_ai_lib::ollama::Ollama;
 use private_context_ai_lib::ollama::client::OllamaBaseUrl;
 use private_context_ai_lib::ollama::types::{ChatMessage, ChatRole};
+use private_context_ai_lib::ollama::{ChatThink, Ollama};
 use private_context_ai_lib::redacted::Redacted;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -89,13 +89,18 @@ async fn request_log_has_counts_and_no_content() {
         content: Redacted::new("secret-prompt"),
     }];
     let admission = ollama.admit(Uuid::new_v4()).unwrap();
+    // A model that cannot think, on the current connection.
+    let think = ChatThink {
+        think: None,
+        connection: ollama.connection_id(),
+    };
     ollama
         .start(
             admission,
             "llama3.2",
             &messages,
             None,
-            None,
+            think,
             |_| true,
             |_| {},
         )

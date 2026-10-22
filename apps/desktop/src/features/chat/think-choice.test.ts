@@ -48,7 +48,18 @@ describe("thinkToSend", () => {
 
   it("turns off a levels model only when it allows it", () => {
     expect(thinkToSend(caps(true, levels(true)), THINK_OFF)).toBe(false);
-    expect(selectedLevel(caps(true, levels(true)), THINK_OFF)).toBe("off");
+    expect(selectedLevel(caps(true, levels(true)), THINK_OFF)).toBeNull();
     expect(selectedLevel(caps(true, levels(false)), THINK_OFF)).toBe("medium");
+  });
+
+  it("passes model-defined levels through exactly", () => {
+    const custom = caps(true, {
+      kind: "levels",
+      levels: ["low", "xhigh", "max"],
+      default: "max",
+      canDisable: false,
+    });
+    expect(thinkToSend(custom, { on: true, level: "xhigh" })).toBe("xhigh");
+    expect(thinkToSend(custom, THINK_OFF)).toBe("max");
   });
 });

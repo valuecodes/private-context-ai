@@ -8,6 +8,7 @@ pub mod stream;
 pub mod types;
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -19,7 +20,8 @@ use self::client::{MAX_SHOW_BODY, OllamaBaseUrl, build_http, get_json, post_json
 use self::stream::{ChatEnd, run_chat};
 use self::types::{
     ChatEvent, ChatMessage, ChatOptions, ChatRequest, ModelCapabilities, ModelInfo, OllamaStatus,
-    ShowResponse, TagsResponse, Think, VersionResponse, validate_chat_input, validate_model,
+    ShowResponse, TagsResponse, Think, VersionResponse, resolve_think, validate_chat_input,
+    validate_model,
 };
 use crate::audit::{Audit, AuditId, AuditOutcome, AuditStatus, NewAuditEvent};
 use crate::error::AppError;
@@ -108,21 +110,35 @@ pub struct Admission {
     cancel: CancellationToken,
 }
 
+/// Which [`Connection`] something was decided against. Every
+/// [`Ollama::set_base_url`] makes a new one, even for the same URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionId(u64);
+
+/// The `think` value for one chat, tied to the connection whose `/api/show`
+/// it was resolved from, so it is never sent to another Ollama.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatThink {
+    pub think: Option<Think>,
+    pub connection: ConnectionId,
+}
+
 /// A base URL and the client built for it. An invalid URL is kept as the
 /// error so the app still starts and every command reports it before opening
 /// a socket.
 struct Connection {
+    id: ConnectionId,
     base_url: Result<OllamaBaseUrl, AppError>,
     http: Result<reqwest::Client, AppError>,
 }
 
 impl Connection {
-    fn new(base_url: Result<OllamaBaseUrl, AppError>) -> Self {
+    fn new(id: ConnectionId, base_url: Result<OllamaBaseUrl, AppError>) -> Self {
         let http = match &base_url {
             Ok(base) => build_http(base),
             Err(err) => Err(err.clone()),
         };
-        Self { base_url, http }
+        Self { id, base_url, http }
     }
 
     fn get(&self) -> Result<(&OllamaBaseUrl, &reqwest::Client), AppError> {
@@ -178,6 +194,10 @@ impl Tracked {
     }
 }
 
+fn connection_changed() -> AppError {
+    AppError::Ollama("the Ollama address changed while sending; send again".into())
+}
+
 fn result_outcome<T>(result: &Result<T, AppError>, http_status: Option<u16>) -> AuditOutcome {
     match result {
         Ok(_) => AuditOutcome::new(AuditStatus::Ok),
@@ -194,6 +214,8 @@ pub struct Ollama {
     audit: Arc<Audit>,
     limits: Limits,
     capabilities: CapabilityCache,
+    /// The id the next connection gets.
+    next_connection: AtomicU64,
 }
 
 impl Ollama {
@@ -207,11 +229,12 @@ impl Ollama {
         limits: Limits,
     ) -> Self {
         Self {
-            connection: RwLock::new(Arc::new(Connection::new(base_url))),
+            connection: RwLock::new(Arc::new(Connection::new(ConnectionId(0), base_url))),
             inflight: Arc::default(),
             audit,
             limits,
             capabilities: Mutex::default(),
+            next_connection: AtomicU64::new(1),
         }
     }
 
@@ -236,7 +259,8 @@ impl Ollama {
     /// Points later requests at `base_url`. Requests already running keep
     /// their target.
     pub fn set_base_url(&self, base_url: Result<OllamaBaseUrl, AppError>) {
-        let connection = Arc::new(Connection::new(base_url));
+        let id = ConnectionId(self.next_connection.fetch_add(1, Ordering::Relaxed));
+        let connection = Arc::new(Connection::new(id, base_url));
         *self
             .connection
             .write()
@@ -284,11 +308,50 @@ impl Ollama {
         Ok(result?.models.into_iter().map(ModelInfo::from).collect())
     }
 
+    /// The connection requests start on now.
+    pub fn connection_id(&self) -> ConnectionId {
+        self.connection().id
+    }
+
+    /// Fails when the base URL changed since `id` was current, so a decision
+    /// made against one Ollama is never applied to another.
+    pub fn check_connection(&self, id: ConnectionId) -> Result<(), AppError> {
+        if self.connection_id() == id {
+            Ok(())
+        } else {
+            Err(connection_changed())
+        }
+    }
+
     /// What `model` can do, from an audited `/api/show`. Successful lookups
     /// are cached per base URL, so only the first costs a request.
     pub async fn model_capabilities(&self, model: &str) -> Result<ModelCapabilities, AppError> {
-        validate_model(model)?;
+        self.capabilities_on(&self.connection(), model).await
+    }
+
+    /// The `think` value for a chat with `model`, resolved from that model's
+    /// capabilities on the current connection. The chat must start on the
+    /// same connection: [`Self::start`] refuses it otherwise. A failed lookup
+    /// fails, since without it a thinking model would get Ollama's default.
+    pub async fn chat_think(
+        &self,
+        model: &str,
+        requested: Option<Think>,
+    ) -> Result<ChatThink, AppError> {
         let connection = self.connection();
+        let caps = self.capabilities_on(&connection, model).await?;
+        Ok(ChatThink {
+            think: resolve_think(&caps, requested)?,
+            connection: connection.id,
+        })
+    }
+
+    async fn capabilities_on(
+        &self,
+        connection: &Arc<Connection>,
+        model: &str,
+    ) -> Result<ModelCapabilities, AppError> {
+        validate_model(model)?;
         let (base, http) = connection.get()?;
         let key = (base.host_port(), model.to_owned());
         if let Some(cached) = self.capability_cache().get(&key) {
@@ -307,7 +370,7 @@ impl Ollama {
         tracked.finish(result_outcome(&result, http_status));
         let caps = ModelCapabilities::from_show(model, &result?);
         // A base URL switched during the lookup must not get this answer.
-        if Arc::ptr_eq(&connection, &self.connection()) {
+        if connection.id == self.connection_id() {
             self.capability_cache().insert(key, caps.clone());
         }
         Ok(caps)
@@ -380,16 +443,19 @@ impl Ollama {
         model: &str,
         messages: &[ChatMessage],
         options: Option<&ChatOptions>,
-        think: Option<Think>,
+        think: ChatThink,
     ) -> Result<(reqwest::Client, url::Url, Vec<u8>, Tracked), AppError> {
         let connection = self.connection();
+        if connection.id != think.connection {
+            return Err(connection_changed());
+        }
         let (base, http) = connection.get()?;
         let body = serde_json::to_vec(&ChatRequest {
             model,
             messages,
             stream: true,
             options,
-            think,
+            think: think.think,
         })
         .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
         let tracked = Tracked::begin(&self.audit, "ollama.chat", base, "/api/chat", Some(model))?;
@@ -400,7 +466,8 @@ impl Ollama {
     /// admitted request and returns its id. `on_end` runs exactly once, on
     /// every path, before the outcome is written. A request cancelled while
     /// admitted ends at once as `Cancelled`. Must be called inside a tokio
-    /// runtime. `think` must already be resolved for the model.
+    /// runtime. `think` comes from [`Self::chat_think`]; a request whose
+    /// connection is no longer current is refused before its socket opens.
     #[allow(clippy::too_many_arguments)]
     pub fn start<F, E>(
         self: &Arc<Self>,
@@ -408,7 +475,7 @@ impl Ollama {
         model: &str,
         messages: &[ChatMessage],
         options: Option<&ChatOptions>,
-        think: Option<Think>,
+        think: ChatThink,
         sink: F,
         on_end: E,
     ) -> Result<Uuid, AppError>
@@ -709,6 +776,14 @@ mod tests {
 
     type Ends = Arc<Mutex<Vec<ChatEnd>>>;
 
+    /// `think` as already resolved for the current connection.
+    fn current(ollama: &Ollama, think: Option<Think>) -> ChatThink {
+        ChatThink {
+            think,
+            connection: ollama.connection_id(),
+        }
+    }
+
     fn send_with_end<F>(
         ollama: &Arc<Ollama>,
         conversation: Uuid,
@@ -740,7 +815,7 @@ mod tests {
             "llama3.2",
             &messages,
             None,
-            think,
+            current(ollama, think),
             sink,
             move |end| {
                 ends.lock().unwrap().push(clone_end(end));
@@ -966,6 +1041,65 @@ mod tests {
         ollama.set_base_url(OllamaBaseUrl::parse(&format!("http://{}", fake.addr)));
         ollama.model_capabilities("qwen3:8b").await.unwrap();
         assert_eq!(log.all().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn chat_think_is_bound_to_its_connection() {
+        let first = fake_ollama(Reply::Json(SHOW_QWEN3)).await;
+        let (ollama, log) = ollama_at(first.addr, test_limits());
+
+        let think = ollama.chat_think("qwen3:8b", None).await.unwrap();
+        assert_eq!(think.think, Some(Think::Enabled(false)));
+        assert_eq!(ollama.check_connection(think.connection), Ok(()));
+
+        // Settings switch the URL after the lookup, before the chat starts.
+        let second = fake_ollama(Reply::Lines(vec![DONE], Duration::ZERO)).await;
+        ollama.set_base_url(OllamaBaseUrl::parse(&format!("http://{}", second.addr)));
+        assert!(matches!(
+            ollama.check_connection(think.connection),
+            Err(AppError::Ollama(_))
+        ));
+        let admission = ollama.admit(Uuid::new_v4()).unwrap();
+        let ends = Ends::default();
+        let recorded = Arc::clone(&ends);
+        let err = ollama
+            .start(
+                admission,
+                "qwen3:8b",
+                &prompt(),
+                None,
+                think,
+                |_| true,
+                move |end| recorded.lock().unwrap().push(clone_end(end)),
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, AppError::Ollama(_)));
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Failed(AppError::Ollama(_))]
+        ));
+        assert_eq!(ollama.inflight_len(), 0);
+        assert_eq!(second.accepted.load(Ordering::SeqCst), 0);
+        // Only the lookup was audited; the refused chat wrote nothing.
+        assert_eq!(log.all().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn chat_think_fails_when_lookup_fails() {
+        let fake = fake_ollama(Reply::Status(500, r#"{"error":"boom"}"#)).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        // Never a chat without `think` to a model that might think.
+        for requested in [
+            None,
+            Some(Think::Enabled(false)),
+            Some(Think::Enabled(true)),
+        ] {
+            assert!(matches!(
+                ollama.chat_think("qwen3", requested).await,
+                Err(AppError::Ollama(_))
+            ));
+        }
     }
 
     #[tokio::test]
@@ -1443,9 +1577,17 @@ mod tests {
         }
         let recorded = Arc::clone(&ends);
         ollama
-            .start(admission, "m", &prompt(), None, None, sink, move |end| {
-                recorded.lock().unwrap().push(clone_end(end));
-            })
+            .start(
+                admission,
+                "m",
+                &prompt(),
+                None,
+                current(&ollama, None),
+                sink,
+                move |end| {
+                    recorded.lock().unwrap().push(clone_end(end));
+                },
+            )
             .unwrap();
         canceller.await.unwrap();
 

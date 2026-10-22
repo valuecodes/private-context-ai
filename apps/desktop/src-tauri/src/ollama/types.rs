@@ -80,32 +80,17 @@ impl ChatOptions {
     }
 }
 
-/// A thinking level, for models that take one instead of a boolean.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ThinkLevel {
-    Low,
-    Medium,
-    High,
-}
+/// Longest thinking level name kept from `/api/show`, in characters.
+const MAX_LEVEL_CHARS: usize = 32;
 
-impl ThinkLevel {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "low" => Some(Self::Low),
-            "medium" => Some(Self::Medium),
-            "high" => Some(Self::High),
-            _ => None,
-        }
-    }
-}
-
-/// Ollama's `think` value: on/off, or a level.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// Ollama's `think` value: on/off, or a level. Levels are model-defined
+/// strings (`low`, `high`, `max`, …) and are only ever sent exactly as the
+/// model advertised them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Think {
     Enabled(bool),
-    Level(ThinkLevel),
+    Level(String),
 }
 
 /// The `/api/chat` request body. Deliberately has no `tools` or `format`
@@ -247,7 +232,7 @@ pub struct ShowThinking {
     pub default: Option<ThinkValue>,
 }
 
-/// A boolean or a level name; unknown names parse and are then ignored.
+/// A boolean or a level name.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub enum ThinkValue {
@@ -256,10 +241,18 @@ pub enum ThinkValue {
 }
 
 impl ThinkValue {
-    fn level(&self) -> Option<ThinkLevel> {
+    /// The level name, if it is one this app can show and send back: empty,
+    /// overlong or control-character names are ignored.
+    fn level(&self) -> Option<&str> {
         match self {
-            Self::Name(name) => ThinkLevel::parse(name),
-            Self::Bool(_) => None,
+            Self::Name(name)
+                if !name.is_empty()
+                    && name.chars().count() <= MAX_LEVEL_CHARS
+                    && !name.chars().any(char::is_control) =>
+            {
+                Some(name)
+            }
+            _ => None,
         }
     }
 }
@@ -274,8 +267,9 @@ impl ThinkValue {
 pub enum ThinkStyle {
     Bool,
     Levels {
-        levels: Vec<ThinkLevel>,
-        default: ThinkLevel,
+        /// In the order `/api/show` lists them.
+        levels: Vec<String>,
+        default: String,
         /// `false` turns thinking off; models that always think refuse it.
         can_disable: bool,
     },
@@ -292,7 +286,8 @@ pub struct ModelCapabilities {
     pub think_style: ThinkStyle,
 }
 
-const GPT_OSS_LEVELS: [ThinkLevel; 3] = [ThinkLevel::Low, ThinkLevel::Medium, ThinkLevel::High];
+/// gpt-oss levels, for an Ollama that does not advertise them.
+const GPT_OSS_LEVELS: [&str; 3] = ["low", "medium", "high"];
 
 impl ModelCapabilities {
     /// The think style comes from the values `/api/show` advertises. Only
@@ -301,11 +296,12 @@ impl ModelCapabilities {
         let has = |name: &str| show.capabilities.iter().any(|c| c == name);
         let (thinking, think_style) = match &show.thinking {
             Some(advertised) => {
-                let levels: Vec<ThinkLevel> = advertised
-                    .values
-                    .iter()
-                    .filter_map(ThinkValue::level)
-                    .collect();
+                let mut levels: Vec<String> = Vec::new();
+                for level in advertised.values.iter().filter_map(ThinkValue::level) {
+                    if !levels.iter().any(|known| known == level) {
+                        levels.push(level.to_owned());
+                    }
+                }
                 let can_enable =
                     !levels.is_empty() || advertised.values.contains(&ThinkValue::Bool(true));
                 let can_disable = advertised.values.contains(&ThinkValue::Bool(false));
@@ -316,8 +312,8 @@ impl ModelCapabilities {
                         .default
                         .as_ref()
                         .and_then(ThinkValue::level)
-                        .filter(|level| levels.contains(level))
-                        .unwrap_or(levels[levels.len() / 2]);
+                        .filter(|level| levels.iter().any(|known| known == level))
+                        .map_or_else(|| levels[levels.len() / 2].clone(), str::to_owned);
                     ThinkStyle::Levels {
                         levels,
                         default,
@@ -335,8 +331,8 @@ impl ModelCapabilities {
                     || model.to_ascii_lowercase().starts_with("gpt-oss");
                 let style = if gpt_oss {
                     ThinkStyle::Levels {
-                        levels: GPT_OSS_LEVELS.to_vec(),
-                        default: ThinkLevel::Medium,
+                        levels: GPT_OSS_LEVELS.map(str::to_owned).to_vec(),
+                        default: "medium".to_owned(),
                         can_disable: false,
                     }
                 } else {
@@ -378,9 +374,9 @@ pub fn resolve_think(
             can_disable,
         } => match requested {
             Some(Think::Level(level)) if levels.contains(&level) => Think::Level(level),
-            Some(Think::Level(_) | Think::Enabled(true)) => Think::Level(*default),
+            Some(Think::Level(_) | Think::Enabled(true)) => Think::Level(default.clone()),
             None | Some(Think::Enabled(false)) if *can_disable => Think::Enabled(false),
-            None => Think::Level(*default),
+            None => Think::Level(default.clone()),
             Some(Think::Enabled(false)) => {
                 return Err(invalid("this model always thinks"));
             }
@@ -478,7 +474,8 @@ mod tests {
         for (think, expected) in [
             (Think::Enabled(true), serde_json::json!(true)),
             (Think::Enabled(false), serde_json::json!(false)),
-            (Think::Level(ThinkLevel::High), serde_json::json!("high")),
+            (Think::Level("high".into()), serde_json::json!("high")),
+            (Think::Level("max".into()), serde_json::json!("max")),
         ] {
             let body = serde_json::to_value(ChatRequest {
                 model: "qwen3",
@@ -499,6 +496,10 @@ mod tests {
         serde_json::from_str(json).unwrap()
     }
 
+    fn names(levels: &[&str]) -> Vec<String> {
+        levels.iter().map(|&level| level.to_owned()).collect()
+    }
+
     #[test]
     fn show_parses_advertised_levels() {
         let caps = ModelCapabilities::from_show(
@@ -514,28 +515,48 @@ mod tests {
         assert_eq!(
             caps.think_style,
             ThinkStyle::Levels {
-                levels: GPT_OSS_LEVELS.to_vec(),
-                default: ThinkLevel::Medium,
+                levels: names(&GPT_OSS_LEVELS),
+                default: "medium".into(),
                 can_disable: false,
             }
         );
     }
 
     #[test]
-    fn show_drops_unknown_levels_and_reads_off_switch() {
+    fn show_keeps_model_defined_levels_and_reads_off_switch() {
         let caps = ModelCapabilities::from_show(
             "custom",
             &show(
                 r#"{"capabilities":["completion","thinking"],
-                "thinking":{"values":[false,"low","max","high"],"default":"max"}}"#,
+                "thinking":{"values":[false,"low","high","xhigh","max","low"],"default":"max"}}"#,
             ),
         );
         assert_eq!(
             caps.think_style,
             ThinkStyle::Levels {
-                levels: vec![ThinkLevel::Low, ThinkLevel::High],
-                default: ThinkLevel::High,
+                levels: names(&["low", "high", "xhigh", "max"]),
+                default: "max".into(),
                 can_disable: true,
+            }
+        );
+    }
+
+    #[test]
+    fn show_ignores_unusable_level_names_and_bad_default() {
+        let long = "x".repeat(MAX_LEVEL_CHARS + 1);
+        let caps = ModelCapabilities::from_show(
+            "custom",
+            &show(&format!(
+                r#"{{"capabilities":["completion","thinking"],
+                "thinking":{{"values":["","bad\nname","{long}","low","medium","high"],"default":"turbo"}}}}"#
+            )),
+        );
+        assert_eq!(
+            caps.think_style,
+            ThinkStyle::Levels {
+                levels: names(&GPT_OSS_LEVELS),
+                default: "medium".into(),
+                can_disable: false,
             }
         );
     }
@@ -616,17 +637,17 @@ mod tests {
 
     #[test]
     fn resolve_think_table() {
-        use Think::{Enabled, Level};
-        use ThinkLevel::{High, Low, Medium};
+        use Think::Enabled;
+        let level = |name: &str| Think::Level(name.to_owned());
         let levels = |can_disable| ThinkStyle::Levels {
-            levels: vec![Low, Medium],
-            default: Medium,
+            levels: names(&["low", "medium"]),
+            default: "medium".into(),
             can_disable,
         };
         let cases = [
             // A model that cannot think gets nothing, whatever was asked.
             (caps(false, ThinkStyle::Bool), Some(Enabled(true)), Ok(None)),
-            (caps(false, levels(false)), Some(Level(High)), Ok(None)),
+            (caps(false, levels(false)), Some(level("high")), Ok(None)),
             // Boolean models always get an explicit value.
             (caps(true, ThinkStyle::Bool), None, Ok(Some(Enabled(false)))),
             (
@@ -636,26 +657,26 @@ mod tests {
             ),
             (
                 caps(true, ThinkStyle::Bool),
-                Some(Level(Low)),
+                Some(level("low")),
                 Ok(Some(Enabled(true))),
             ),
             // Levels: only advertised ones are sent.
             (
                 caps(true, levels(false)),
-                Some(Level(Low)),
-                Ok(Some(Level(Low))),
+                Some(level("low")),
+                Ok(Some(level("low"))),
             ),
             (
                 caps(true, levels(false)),
-                Some(Level(High)),
-                Ok(Some(Level(Medium))),
+                Some(level("high")),
+                Ok(Some(level("medium"))),
             ),
             (
                 caps(true, levels(false)),
                 Some(Enabled(true)),
-                Ok(Some(Level(Medium))),
+                Ok(Some(level("medium"))),
             ),
-            (caps(true, levels(false)), None, Ok(Some(Level(Medium)))),
+            (caps(true, levels(false)), None, Ok(Some(level("medium")))),
             (caps(true, levels(true)), None, Ok(Some(Enabled(false)))),
             (
                 caps(true, levels(true)),
@@ -664,7 +685,8 @@ mod tests {
             ),
         ];
         for (caps, requested, expected) in cases {
-            assert_eq!(resolve_think(&caps, requested), expected, "{requested:?}");
+            let label = format!("{requested:?}");
+            assert_eq!(resolve_think(&caps, requested), expected, "{label}");
         }
         assert!(matches!(
             resolve_think(&caps(true, levels(false)), Some(Enabled(false))),
@@ -679,10 +701,10 @@ mod tests {
             Think::Enabled(false)
         );
         assert_eq!(
-            serde_json::from_str::<Think>(r#""low""#).unwrap(),
-            Think::Level(ThinkLevel::Low)
+            serde_json::from_str::<Think>(r#""max""#).unwrap(),
+            Think::Level("max".into())
         );
-        assert!(serde_json::from_str::<Think>(r#""max""#).is_err());
+        assert!(serde_json::from_str::<Think>("3").is_err());
     }
 
     #[test]
@@ -690,8 +712,8 @@ mod tests {
         let value = serde_json::to_value(caps(
             true,
             ThinkStyle::Levels {
-                levels: vec![ThinkLevel::Low],
-                default: ThinkLevel::Low,
+                levels: names(&["low"]),
+                default: "low".into(),
                 can_disable: false,
             },
         ))

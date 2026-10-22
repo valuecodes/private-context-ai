@@ -9,12 +9,11 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::ollama::Ollama;
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{
-    ChatEvent, ChatOptions, ModelCapabilities, ModelInfo, OllamaStatus, Think, resolve_think,
-    validate_model,
+    ChatEvent, ChatOptions, ModelCapabilities, ModelInfo, OllamaStatus, Think, validate_model,
 };
+use crate::ollama::{ChatThink, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnRecorder};
 use crate::storage::{Storage, StorageState};
@@ -55,7 +54,9 @@ pub async fn chat_send(
     on_event: Channel<ChatEvent>,
 ) -> Result<Uuid, AppError> {
     let storage = Arc::clone(storage.get()?);
-    let think = think_for(&ollama, &model, think).await?;
+    // A failed lookup fails the send: without it a thinking model would get
+    // Ollama's default instead of an explicit `false`.
+    let think = ollama.chat_think(&model, think).await?;
     // A failed send means the webview is gone; the worker then cancels.
     send_turn(
         &ollama,
@@ -68,18 +69,6 @@ pub async fn chat_send(
         FlushPolicy::default(),
         move |event| on_event.send(event).is_ok(),
     )
-}
-
-/// The `think` value to send, from the model's (cached, audited)
-/// capabilities. A failed lookup fails the send: without it a thinking model
-/// would get Ollama's default instead of an explicit `false`.
-async fn think_for(
-    ollama: &Ollama,
-    model: &str,
-    requested: Option<Think>,
-) -> Result<Option<Think>, AppError> {
-    let caps = ollama.model_capabilities(model).await?;
-    resolve_think(&caps, requested)
 }
 
 #[tauri::command]
@@ -95,8 +84,9 @@ fn lock(recorder: &SharedRecorder) -> MutexGuard<'_, TurnRecorder> {
 
 /// The body of `chat_send`, without Tauri. Order matters: the slot is taken
 /// before anything is written, and nothing is written when the history is
-/// refused, so a refused send leaves no rows behind. `think` is already
-/// resolved for the model.
+/// refused, so a refused send leaves no rows behind. `think` comes from
+/// [`Ollama::chat_think`]; a base URL switched since then is refused before
+/// anything is written.
 #[allow(clippy::too_many_arguments)]
 pub fn send_turn<S>(
     ollama: &Arc<Ollama>,
@@ -105,7 +95,7 @@ pub fn send_turn<S>(
     model: &str,
     prompt: &Redacted,
     options: Option<ChatOptions>,
-    think: Option<Think>,
+    think: ChatThink,
     policy: FlushPolicy,
     send: S,
 ) -> Result<Uuid, AppError>
@@ -120,6 +110,7 @@ where
         options.validate()?;
     }
     let admission = ollama.admit(conversation_id)?;
+    ollama.check_connection(think.connection)?;
     let turn = storage.begin_turn(conversation_id, model, prompt, |history| {
         ollama.validate(model, history, options.as_ref())
     })?;
@@ -462,6 +453,14 @@ mod tests {
         (ollama, listener)
     }
 
+    /// What `chat_think` gives a model that cannot think.
+    fn no_think(ollama: &Ollama) -> ChatThink {
+        ChatThink {
+            think: None,
+            connection: ollama.connection_id(),
+        }
+    }
+
     fn send(
         ollama: &Arc<Ollama>,
         storage: &Arc<Storage>,
@@ -474,7 +473,7 @@ mod tests {
             "llama3.2",
             &Redacted::new("Hi"),
             None,
-            None,
+            no_think(ollama),
             FlushPolicy::default(),
             |_| true,
         )
@@ -493,7 +492,7 @@ mod tests {
             "llama3.2",
             &Redacted::new("x".repeat(2 * 1024 * 1024)),
             None,
-            None,
+            no_think(&ollama),
             FlushPolicy::default(),
             |_| true,
         )
@@ -540,27 +539,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn think_for_fails_closed_when_lookup_fails() {
-        // Nothing listens, so the capability lookup fails.
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = OllamaBaseUrl::parse(&format!("http://{}", listener.local_addr().unwrap()));
-        drop(listener);
-        let ollama = Ollama::new(base, Arc::new(Audit::new()));
+    async fn send_after_url_switch_writes_nothing() {
+        let (ollama, listener) = silent_ollama().await;
+        let (storage, _dir) = temp_storage();
+        let conversation = storage.create_conversation(None, "m").unwrap().id;
+        let think = ChatThink {
+            think: Some(Think::Enabled(false)),
+            connection: ollama.connection_id(),
+        };
+        // Settings switch the URL between the lookup and the send.
+        ollama.set_base_url(OllamaBaseUrl::parse(&format!(
+            "http://{}",
+            listener.local_addr().unwrap()
+        )));
 
-        // Never a send without `think` to a model that might think.
-        for requested in [
+        let err = send_turn(
+            &ollama,
+            Arc::clone(&storage),
+            conversation,
+            "llama3.2",
+            &Redacted::new("Hi"),
             None,
-            Some(Think::Enabled(false)),
-            Some(Think::Enabled(true)),
-        ] {
-            assert!(
-                matches!(
-                    think_for(&ollama, "qwen3", requested).await,
-                    Err(AppError::Unreachable(_) | AppError::Timeout(_))
-                ),
-                "{requested:?}"
-            );
-        }
+            think,
+            FlushPolicy::default(),
+            |_| true,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, AppError::Ollama(_)));
+        assert!(
+            storage
+                .get_conversation(conversation)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert_eq!(ollama.inflight_len(), 0);
     }
 
     #[tokio::test]
@@ -576,7 +590,7 @@ mod tests {
             "llama3.2",
             &Redacted::new("  \n"),
             None,
-            None,
+            no_think(&ollama),
             FlushPolicy::default(),
             |_| true,
         )

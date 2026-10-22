@@ -32,13 +32,13 @@ const thinkToSend = (
     : style.default;
 };
 
-/** The level the control shows as selected for a levels model. */
+/** The level the control shows as selected for a levels model; null is Off. */
 const selectedLevel = (
   caps: ModelCapabilities,
   choice: ThinkChoice
-): ThinkLevel | "off" => {
+): ThinkLevel | null => {
   const think = thinkToSend(caps, choice);
-  return typeof think === "string" ? think : "off";
+  return typeof think === "string" ? think : null;
 };
 
 export type { ThinkChoice };
