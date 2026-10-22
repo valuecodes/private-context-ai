@@ -33,14 +33,16 @@ const filterConversations = (
 
 /**
  * Searches message content for `query` after a pause in typing, and again
- * whenever `conversations` changes (a send moves its chat to the top). One
- * search runs at a time, so typing never queues work on the database: a
- * query typed meanwhile waits, and only the newest one runs next. A failed
- * search finds nothing, so the title matches still show.
+ * whenever `conversations` changes (a send moves its chat to the top) or a
+ * saved reply stops `streaming`, so its saved text is searched. One search
+ * runs at a time, so typing never queues work on the database: a query
+ * typed meanwhile waits, and only the newest one runs next. A failed search
+ * finds nothing, so the title matches still show.
  */
 const useConversationSearch = (
   query: string,
-  conversations: Conversation[]
+  conversations: Conversation[],
+  streaming: boolean
 ): ContentMatches | null => {
   const wanted = query.trim();
   const [matches, setMatches] = useState<ContentMatches | null>(null);
@@ -91,7 +93,7 @@ const useConversationSearch = (
     return () => {
       clearTimeout(timer);
     };
-  }, [wanted, conversations]);
+  }, [wanted, conversations, streaming]);
 
   return wanted === "" ? null : matches;
 };
