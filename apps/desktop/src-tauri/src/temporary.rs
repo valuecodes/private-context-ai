@@ -62,9 +62,9 @@ impl TempChats {
         Ok(id)
     }
 
-    /// Forgets a chat; an unknown id is a no-op.
-    pub fn remove(&self, id: Uuid) {
-        self.sessions().remove(&id);
+    /// Forgets a chat. `false` when there was no such chat.
+    pub fn remove(&self, id: Uuid) -> bool {
+        self.sessions().remove(&id).is_some()
     }
 
     /// Under one lock, so a discard cannot land halfway: the chat's history
