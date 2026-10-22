@@ -135,6 +135,32 @@ describe("copyConversationMarkdown", () => {
     expect(writeText).toHaveBeenCalledWith("# Trip");
   });
 
+  it("copies prepared Markdown inside the click, without fetching", async () => {
+    vi.mocked(conversationMarkdown).mockClear();
+    vi.stubGlobal("navigator", {});
+    const textarea = {
+      value: "",
+      className: "",
+      setAttribute: vi.fn(),
+      select: vi.fn(),
+      remove: vi.fn(),
+    };
+    const execCommand = vi.fn(() => true);
+    vi.stubGlobal("document", {
+      activeElement: null,
+      createElement: () => textarea,
+      body: { append: vi.fn() },
+      execCommand,
+    });
+
+    const copied = copyConversationMarkdown("a", "# Ready");
+    // The textarea fallback ran synchronously, still inside the click.
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    expect(textarea.value).toBe("# Ready");
+    await expect(copied).resolves.toBeNull();
+    expect(conversationMarkdown).not.toHaveBeenCalled();
+  });
+
   it("reports why nothing was copied", async () => {
     vi.stubGlobal("navigator", {});
     vi.mocked(conversationMarkdown).mockResolvedValueOnce("# Trip");

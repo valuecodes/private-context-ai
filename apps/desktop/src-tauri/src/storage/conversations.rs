@@ -168,20 +168,6 @@ pub(super) fn not_found() -> AppError {
     AppError::NotFound("no such conversation".into())
 }
 
-/// A `LIKE … ESCAPE '\'` pattern that matches `query` literally anywhere.
-fn like_pattern(query: &str) -> String {
-    let mut pattern = String::with_capacity(query.len() + 2);
-    pattern.push('%');
-    for c in query.chars() {
-        if matches!(c, '\\' | '%' | '_') {
-            pattern.push('\\');
-        }
-        pattern.push(c);
-    }
-    pattern.push('%');
-    pattern
-}
-
 impl Storage {
     /// `model` may be empty when no model is installed yet; the first send
     /// sets it.
@@ -270,9 +256,14 @@ impl Storage {
         Ok(conversations)
     }
 
-    /// The conversations whose shown messages contain `query`, most recently
-    /// used first, each once. Titles are matched by the sidebar, and
-    /// thinking is never searched. Only ids come back, never message text.
+    /// The conversations whose shown messages contain `query`, ignoring
+    /// case, most recently used first, each once. Titles are matched by the
+    /// sidebar, and thinking is never searched. Only ids come back, never
+    /// message text.
+    ///
+    /// Matched in Rust: SQLite's `LIKE` folds ASCII only, so `äiti` would
+    /// miss `Äiti`. Like a `LIKE` scan, this reads every shown message of
+    /// the conversations it looks at.
     pub fn search_conversations(&self, query: &str) -> Result<Vec<Uuid>, AppError> {
         let query = query.trim();
         if query.chars().count() > MAX_SEARCH_CHARS {
@@ -283,17 +274,30 @@ impl Storage {
         if query.is_empty() {
             return Ok(Vec::new());
         }
+        let needle = query.to_lowercase();
         let conn = self.conn();
-        let mut statement = conn.prepare(&format!(
-            "SELECT c.id FROM conversations c
-             WHERE c.id IN (SELECT conversation_id FROM messages
-                            WHERE content LIKE ?1 ESCAPE '\\' AND superseded_by IS NULL)
-             ORDER BY c.updated_at DESC, c.rowid DESC LIMIT {SEARCH_LIMIT}"
-        ))?;
-        let ids = statement
-            .query_map([like_pattern(query)], |row| uuid_column(row, 0))?
+        let ids: Vec<Uuid> = conn
+            .prepare("SELECT id FROM conversations ORDER BY updated_at DESC, rowid DESC")?
+            .query_map([], |row| uuid_column(row, 0))?
             .collect::<Result<_, _>>()?;
-        Ok(ids)
+        let mut contents = conn.prepare(
+            "SELECT content FROM messages WHERE conversation_id = ?1 AND superseded_by IS NULL",
+        )?;
+        let mut found = Vec::new();
+        for id in ids {
+            let mut rows = contents.query([id.to_string()])?;
+            while let Some(row) = rows.next()? {
+                let content: String = row.get(0)?;
+                if content.to_lowercase().contains(&needle) {
+                    found.push(id);
+                    break;
+                }
+            }
+            if found.len() == SEARCH_LIMIT {
+                break;
+            }
+        }
+        Ok(found)
     }
 
     pub fn get_conversation(&self, id: Uuid) -> Result<ConversationWithMessages, AppError> {
@@ -591,7 +595,16 @@ mod tests {
     }
 
     #[test]
-    fn search_escapes_like_wildcards() {
+    fn search_ignores_case_beyond_ascii() {
+        let (storage, _dir) = temp_storage();
+        let finnish = chat_with(&storage, "a", &["Äiti soitti"]);
+        let greek = chat_with(&storage, "b", &["ΣΟΦΙΑ"]);
+        assert_eq!(storage.search_conversations("äITI").unwrap(), [finnish]);
+        assert_eq!(storage.search_conversations("σοφια").unwrap(), [greek]);
+    }
+
+    #[test]
+    fn search_matches_wildcard_characters_literally() {
         let (storage, _dir) = temp_storage();
         let percent = chat_with(&storage, "a", &["a 50% discount"]);
         let plain = chat_with(&storage, "b", &["a 500 discount"]);

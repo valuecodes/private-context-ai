@@ -23,6 +23,8 @@ type SidebarItemProps = {
   onMode: (mode: ItemMode) => void;
   onRename: (title: string) => void;
   onDelete: () => void;
+  /** Fetches what a copy would put on the clipboard, ahead of the click. */
+  onPrepareCopy: () => void;
   /** Resolves `false` when nothing was copied. */
   onCopy: () => Promise<boolean>;
 };
@@ -42,6 +44,7 @@ const SidebarItem = ({
   onMode,
   onRename,
   onDelete,
+  onPrepareCopy,
   onCopy,
 }: SidebarItemProps) => {
   const [copied, setCopied] = useState(false);
@@ -148,6 +151,8 @@ const SidebarItem = ({
       {/* Read-only, so it works while a reply streams. */}
       <button
         type="button"
+        onPointerEnter={onPrepareCopy}
+        onFocus={onPrepareCopy}
         onClick={() => {
           void onCopy().then((ok) => {
             if (ok) {
@@ -195,6 +200,8 @@ type SidebarProps = {
   /** Resolves `false` when the title was refused, keeping the editor open. */
   onRename: (id: string, title: string) => Promise<boolean>;
   onDelete: (id: string) => void;
+  /** Fetches a conversation's Markdown when its copy button is pointed at. */
+  onPrepareCopy: (id: string) => void;
   /** Copies the conversation as Markdown; resolves `false` on failure. */
   onCopy: (id: string) => Promise<boolean>;
 };
@@ -207,6 +214,7 @@ const Sidebar = ({
   onSelect,
   onRename,
   onDelete,
+  onPrepareCopy,
   onCopy,
 }: SidebarProps) => {
   // At most one conversation is being renamed or confirmed at a time.
@@ -215,7 +223,7 @@ const Sidebar = ({
     mode: ItemMode;
   } | null>(null);
   const [query, setQuery] = useState("");
-  const matches = useConversationSearch(query);
+  const matches = useConversationSearch(query, state.conversations);
   const shown = filterConversations(state.conversations, query, matches);
 
   const modeOf = (id: string): ItemMode =>
@@ -264,6 +272,9 @@ const Sidebar = ({
             onDelete={() => {
               setEditing(null);
               onDelete(conversation.id);
+            }}
+            onPrepareCopy={() => {
+              onPrepareCopy(conversation.id);
             }}
             onCopy={() => onCopy(conversation.id)}
           />
