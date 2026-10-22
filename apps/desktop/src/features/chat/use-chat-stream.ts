@@ -1,10 +1,6 @@
 import { useReducer, useRef } from "react";
 
-import {
-  chatReducer,
-  createChatState,
-  fromStored,
-} from "~/features/chat/chat-reducer";
+import { chatReducer, createChatState } from "~/features/chat/chat-reducer";
 import type { TurnAction, UiMessage } from "~/features/chat/chat-reducer";
 import { startRequest, tempSession } from "~/features/chat/send-request";
 import type {
@@ -15,6 +11,7 @@ import type {
 } from "~/features/chat/send-request";
 import { settingsSync } from "~/features/chat/settings-sync";
 import type { SettingsSync } from "~/features/chat/settings-sync";
+import { fromStored } from "~/features/chat/stored-messages";
 import { toAppError } from "~/lib/app-error";
 import { chatCancel, conversationGet } from "~/lib/ipc";
 import type {

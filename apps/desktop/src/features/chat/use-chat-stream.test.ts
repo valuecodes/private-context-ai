@@ -10,11 +10,11 @@ import type { ChatState } from "./chat-reducer";
 import {
   chatReducer,
   createChatState,
-  fromStored,
   replyAnnouncement,
 } from "./chat-reducer";
 import { DEFAULT_SETTINGS } from "./default-settings";
 import { titleFromPrompt } from "./send-request";
+import { fromStored } from "./stored-messages";
 
 vi.mock("~/lib/ipc");
 
@@ -43,6 +43,7 @@ const stored = (
   durationMs: null,
   thinking: null,
   thinkingMs: null,
+  evalMs: null,
 });
 
 const event = (
@@ -67,6 +68,7 @@ const done = (doneReason: string | null = "stop"): ChatEvent => ({
   durationMs: 3,
   doneReason,
   thinkingMs: null,
+  evalMs: 4,
 });
 
 describe("chatReducer", () => {

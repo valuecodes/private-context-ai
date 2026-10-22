@@ -837,11 +837,13 @@ mod tests {
                 completion_tokens,
                 duration_ms,
                 thinking_ms,
+                eval_ms,
             } => ChatEnd::Done {
                 prompt_tokens: *prompt_tokens,
                 completion_tokens: *completion_tokens,
                 duration_ms: *duration_ms,
                 thinking_ms: *thinking_ms,
+                eval_ms: *eval_ms,
             },
             ChatEnd::Cancelled => ChatEnd::Cancelled,
             ChatEnd::Failed(error) => ChatEnd::Failed(error.clone()),
@@ -887,7 +889,7 @@ mod tests {
 
     const HEL: &str = r#"{"message":{"role":"assistant","content":"Hel"},"done":false}"#;
     const LO: &str = r#"{"message":{"role":"assistant","content":"lo"},"done":false}"#;
-    const DONE: &str = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":5000000,"prompt_eval_count":3,"eval_count":2}"#;
+    const DONE: &str = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":5000000,"prompt_eval_count":3,"eval_count":2,"eval_duration":2000000000}"#;
 
     #[tokio::test]
     async fn streams_tokens_then_done() {
@@ -909,6 +911,7 @@ mod tests {
                     duration_ms: Some(5),
                     done_reason: Some("stop".into()),
                     thinking_ms: None,
+                    eval_ms: Some(2000),
                 },
             ]
         );
@@ -1510,6 +1513,7 @@ mod tests {
                 completion_tokens: Some(2),
                 duration_ms: Some(5),
                 thinking_ms: None,
+                eval_ms: Some(2000),
             }]
         ));
 

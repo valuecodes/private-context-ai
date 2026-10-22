@@ -37,4 +37,38 @@ const copyText = async (text: string): Promise<boolean> => {
   }
 };
 
-export { copyText };
+/**
+ * Writes text that is still on its way. Must be called before any `await`:
+ * a `ClipboardItem` holding a promise keeps the click's user activation
+ * while the text arrives (Chromium, WebKit).
+ */
+const writeLater = async (text: Promise<string>): Promise<void> => {
+  if (typeof ClipboardItem === "undefined") {
+    throw new Error("no ClipboardItem");
+  }
+  const blob = text.then((value) => new Blob([value], { type: "text/plain" }));
+  await globalThis.navigator.clipboard.write([
+    new ClipboardItem({ "text/plain": blob }),
+  ]);
+};
+
+/**
+ * Like `copyText`, for text an IPC call is still fetching; call it straight
+ * from the click handler. Resolves `false` instead of throwing, also when
+ * `text` rejects.
+ */
+const copyLater = async (text: Promise<string>): Promise<boolean> => {
+  const written = writeLater(text).then(
+    () => true,
+    () => false
+  );
+  let value: string;
+  try {
+    value = await text;
+  } catch {
+    return false;
+  }
+  return (await written) || copyText(value);
+};
+
+export { copyLater, copyText };

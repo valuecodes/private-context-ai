@@ -1,10 +1,12 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { conversationMarkdown } from "~/lib/ipc";
 import type { Conversation } from "~/lib/types";
 
 import type { ConversationsState } from "./use-conversations";
 import {
   conversationsReducer,
+  copyConversationMarkdown,
   initialConversations,
 } from "./use-conversations";
 
@@ -116,5 +118,33 @@ describe("conversationsReducer", () => {
     expect(ids(state)).toEqual(["a"]);
     state = conversationsReducer(state, { type: "selected", id: "a" });
     expect(state.error).toBeNull();
+  });
+});
+
+describe("copyConversationMarkdown", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("copies the Markdown Rust builds", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    vi.mocked(conversationMarkdown).mockResolvedValueOnce("# Trip");
+    await expect(copyConversationMarkdown("a")).resolves.toBeNull();
+    expect(conversationMarkdown).toHaveBeenCalledWith("a");
+    expect(writeText).toHaveBeenCalledWith("# Trip");
+  });
+
+  it("reports why nothing was copied", async () => {
+    vi.stubGlobal("navigator", {});
+    vi.mocked(conversationMarkdown).mockResolvedValueOnce("# Trip");
+    await expect(copyConversationMarkdown("a")).resolves.toEqual({
+      kind: "internal",
+      message: "Could not copy to the clipboard",
+    });
+
+    const missing = { kind: "notFound", message: "no such conversation" };
+    vi.mocked(conversationMarkdown).mockRejectedValueOnce(missing);
+    await expect(copyConversationMarkdown("b")).resolves.toEqual(missing);
   });
 });

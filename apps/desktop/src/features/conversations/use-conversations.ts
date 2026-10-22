@@ -1,12 +1,19 @@
 import { useEffect, useReducer } from "react";
 
 import { toAppError } from "~/lib/app-error";
+import { copyLater } from "~/lib/clipboard";
 import {
   conversationDelete,
   conversationList,
+  conversationMarkdown,
   conversationRename,
 } from "~/lib/ipc";
 import type { AppError, Conversation } from "~/lib/types";
+
+const COPY_FAILED: AppError = {
+  kind: "internal",
+  message: "Could not copy to the clipboard",
+};
 
 type ConversationsState = {
   phase: "loading" | "ready";
@@ -106,6 +113,22 @@ const conversationsReducer = (
   return { ...state, phase: "ready", error: action.error };
 };
 
+/**
+ * Copies a conversation as Markdown; resolves `null` once copied, else why
+ * not. Call it straight from the click: the clipboard write starts before
+ * Rust answers.
+ */
+const copyConversationMarkdown = (id: string): Promise<AppError | null> => {
+  let fetchError: AppError | null = null;
+  const markdown = conversationMarkdown(id).catch((error: unknown) => {
+    fetchError = toAppError(error);
+    throw error;
+  });
+  return copyLater(markdown).then((copied) =>
+    copied ? null : (fetchError ?? COPY_FAILED)
+  );
+};
+
 /** The saved conversations and which one is open. */
 const useConversations = () => {
   const [state, dispatch] = useReducer(
@@ -170,8 +193,22 @@ const useConversations = () => {
       }
     );
 
-  return { state, select, created, touched, rename, remove };
+  /** Resolves `false` when nothing was copied; the error says why. */
+  const copyMarkdown = (id: string): Promise<boolean> =>
+    copyConversationMarkdown(id).then((error) => {
+      if (error !== null) {
+        dispatch({ type: "failed", error });
+      }
+      return error === null;
+    });
+
+  return { state, select, created, touched, rename, remove, copyMarkdown };
 };
 
 export type { ConversationsState };
-export { conversationsReducer, initialConversations, useConversations };
+export {
+  conversationsReducer,
+  copyConversationMarkdown,
+  initialConversations,
+  useConversations,
+};

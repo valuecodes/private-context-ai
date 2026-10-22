@@ -124,6 +124,8 @@ type StoredMessage = {
   /** The model's reasoning; never sent back to it. */
   thinking: string | null;
   thinkingMs: number | null;
+  /** Generating the completion tokens only; null for older replies. */
+  evalMs: number | null;
 };
 
 /** What the `conversation_get` command returns. */
@@ -144,6 +146,8 @@ type ChatEvent =
       doneReason: string | null;
       /** From the first thinking chunk to the first answer chunk. */
       thinkingMs: number | null;
+      /** Generating the completion tokens only, for tokens/s. */
+      evalMs: number | null;
     }
   | { type: "error"; error: AppError };
 

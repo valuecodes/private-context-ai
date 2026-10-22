@@ -142,6 +142,8 @@ pub fn run() {
             commands::conversations::conversation_update_settings,
             commands::conversations::conversation_list,
             commands::conversations::conversation_get,
+            commands::conversations::conversation_search,
+            commands::conversations::conversation_markdown,
             commands::conversations::conversation_rename,
             commands::conversations::conversation_delete,
             commands::activity::activity_list,

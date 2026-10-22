@@ -38,6 +38,7 @@ const renderSidebar = (
       onSelect={noop}
       onRename={() => Promise.resolve(true)}
       onDelete={noop}
+      onCopy={() => Promise.resolve(true)}
     />
   );
 
@@ -53,6 +54,7 @@ const renderItem = (mode: "view" | "rename" | "confirm", disabled = false) =>
         onMode={noop}
         onRename={noop}
         onDelete={noop}
+        onCopy={() => Promise.resolve(true)}
       />
     </ul>
   );
@@ -83,6 +85,15 @@ describe("Sidebar", () => {
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>First</);
     expect(html).toMatch(/disabled=""[^>]*aria-label="Rename First"/);
     expect(html).toMatch(/disabled=""[^>]*aria-label="Delete First"/);
+    // Copying only reads, so it stays available.
+    expect(html).not.toMatch(/disabled=""[^>]*aria-label="Copy First/);
+  });
+
+  it("has a search box", () => {
+    const html = renderSidebar({ conversations: [conversation("a", "First")] });
+    expect(html).toMatch(/<input[^>]*type="search"/);
+    expect(html).toContain('aria-label="Search conversations"');
+    expect(html).toContain('maxLength="200"');
   });
 
   it("shows an error", () => {
@@ -94,9 +105,10 @@ describe("Sidebar", () => {
 });
 
 describe("SidebarItem", () => {
-  it("offers rename and delete in view mode", () => {
+  it("offers rename, copy and delete in view mode", () => {
     const html = renderItem("view");
     expect(html).toContain('aria-label="Rename Trip plan"');
+    expect(html).toContain('aria-label="Copy Trip plan as Markdown"');
     expect(html).toContain('aria-label="Delete Trip plan"');
   });
 

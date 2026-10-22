@@ -59,6 +59,9 @@ pub struct StoredMessage {
     /// The model's reasoning; shown collapsed, never part of the history.
     pub thinking: Option<Redacted>,
     pub thinking_ms: Option<u64>,
+    /// Generating the completion tokens only; `None` for replies saved
+    /// before it was recorded.
+    pub eval_ms: Option<u64>,
 }
 
 pub(super) fn bad_text(index: usize, what: &str) -> rusqlite::Error {
@@ -96,6 +99,7 @@ fn message_row(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
             .filter(|text| !text.is_empty())
             .map(Redacted::new),
         thinking_ms: count_column(row, 9)?,
+        eval_ms: count_column(row, 10)?,
     })
 }
 
@@ -115,7 +119,7 @@ pub(super) fn load_messages(
 ) -> Result<Vec<StoredMessage>, AppError> {
     let mut statement = conn.prepare(&format!(
         "SELECT id, role, content, status, created_at, prompt_tokens, completion_tokens,
-                duration_ms, thinking, thinking_ms
+                duration_ms, thinking, thinking_ms, eval_ms
          FROM messages WHERE {LIVE} ORDER BY created_at, rowid"
     ))?;
     let messages = statement
@@ -403,7 +407,7 @@ impl Storage {
         let changed = tx.execute(
             "UPDATE messages
              SET content = ?2, status = ?3, prompt_tokens = ?4, completion_tokens = ?5,
-                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8
+                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8, eval_ms = ?9
              WHERE id = ?1 AND status = 'pending'",
             params![
                 id,
@@ -413,7 +417,8 @@ impl Storage {
                 to_sql_count(end.completion_tokens),
                 to_sql_count(end.duration_ms),
                 thinking_column(thinking),
-                to_sql_count(end.thinking_ms)
+                to_sql_count(end.thinking_ms),
+                to_sql_count(end.eval_ms)
             ],
         )?;
         if changed == 1 {
@@ -453,6 +458,7 @@ struct FinalState {
     completion_tokens: Option<u64>,
     duration_ms: Option<u64>,
     thinking_ms: Option<u64>,
+    eval_ms: Option<u64>,
 }
 
 impl FinalState {
@@ -463,6 +469,7 @@ impl FinalState {
             completion_tokens: None,
             duration_ms: None,
             thinking_ms: None,
+            eval_ms: None,
         }
     }
 }
@@ -474,6 +481,7 @@ pub struct ReplyStats {
     pub completion_tokens: Option<u64>,
     pub duration_ms: Option<u64>,
     pub thinking_ms: Option<u64>,
+    pub eval_ms: Option<u64>,
 }
 
 /// Saves one streamed reply into its `pending` row, so a hard kill keeps what
@@ -554,6 +562,7 @@ impl TurnRecorder {
             completion_tokens: stats.completion_tokens,
             duration_ms: stats.duration_ms,
             thinking_ms: stats.thinking_ms,
+            eval_ms: stats.eval_ms,
         })
     }
 
@@ -1145,6 +1154,7 @@ mod tests {
                 completion_tokens: Some(2),
                 duration_ms: Some(120),
                 thinking_ms: None,
+                eval_ms: Some(80),
             })
             .unwrap();
 
@@ -1154,6 +1164,7 @@ mod tests {
         assert_eq!(saved.prompt_tokens, Some(3));
         assert_eq!(saved.completion_tokens, Some(2));
         assert_eq!(saved.duration_ms, Some(120));
+        assert_eq!(saved.eval_ms, Some(80));
         assert_eq!(saved.thinking, None);
         assert_eq!(saved.thinking_ms, None);
     }
