@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatEvent, StoredMessage } from "~/lib/types";
 
 import type { ChatState } from "./chat-reducer";
-import { chatReducer, createChatState, fromStored } from "./chat-reducer";
+import { chatReducer, createChatState } from "./chat-reducer";
+import { fromStored } from "./stored-messages";
 
 vi.mock("~/lib/ipc");
 
@@ -27,6 +28,7 @@ const done = (thinkingMs: number | null): ChatEvent => ({
   durationMs: 3,
   doneReason: "stop",
   thinkingMs,
+  evalMs: null,
 });
 
 const stored = (
@@ -45,7 +47,10 @@ const stored = (
   durationMs: null,
   thinking,
   thinkingMs,
+  evalMs: null,
 });
+
+const noStats = { completionTokens: null, durationMs: null, evalMs: null };
 
 describe("thinking in the chat reducer", () => {
   it("collects thinking and times it to the first answer token", () => {
@@ -74,7 +79,7 @@ describe("thinking in the chat reducer", () => {
     });
   });
 
-  it("leaves replies without thinking alone", () => {
+  it("leaves replies without thinking alone, keeping their stats", () => {
     let state = event(sent(), { type: "token", content: "Hi" }, 3000);
     state = event(state, done(null));
     expect(state.messages.at(-1)).toEqual({
@@ -83,6 +88,7 @@ describe("thinking in the chat reducer", () => {
       content: "Hi",
       status: "complete",
       live: true,
+      stats: { completionTokens: 2, durationMs: 3, evalMs: null },
     });
   });
 
@@ -101,9 +107,43 @@ describe("thinking in the chat reducer", () => {
         status: "complete",
         thinking: "Reasoning",
         thinkingMs: 2500,
+        stats: noStats,
       },
-      { id: "b", role: "assistant", content: "b", status: "cancelled" },
-      { id: "c", role: "assistant", content: "c", status: "complete" },
+      {
+        id: "b",
+        role: "assistant",
+        content: "b",
+        status: "cancelled",
+        stats: noStats,
+      },
+      {
+        id: "c",
+        role: "assistant",
+        content: "c",
+        status: "complete",
+        stats: noStats,
+      },
     ]);
+  });
+
+  it("restores saved stats on replies only", () => {
+    const user: StoredMessage = {
+      ...stored("u", "complete", null),
+      role: "user",
+      completionTokens: 9,
+    };
+    const reply: StoredMessage = {
+      ...stored("r", "complete", null),
+      completionTokens: 100,
+      durationMs: 2500,
+      evalMs: 2000,
+    };
+    const [prompt, answer] = fromStored([user, reply]);
+    expect(prompt?.stats).toBeUndefined();
+    expect(answer?.stats).toEqual({
+      completionTokens: 100,
+      durationMs: 2500,
+      evalMs: 2000,
+    });
   });
 });

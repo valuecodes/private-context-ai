@@ -81,6 +81,7 @@ pub enum ChatEnd {
         completion_tokens: Option<u64>,
         duration_ms: Option<u64>,
         thinking_ms: Option<u64>,
+        eval_ms: Option<u64>,
     },
     Cancelled,
     Failed(AppError),
@@ -268,6 +269,7 @@ async fn stream_reply(
             }
             if line.done {
                 let duration_ms = line.total_duration.map(|nanos| nanos / 1_000_000);
+                let eval_ms = line.eval_duration.map(|nanos| nanos / 1_000_000);
                 thinking.answered();
                 let thinking_ms = thinking.ms();
                 let done = ChatEvent::Done {
@@ -276,6 +278,7 @@ async fn stream_reply(
                     duration_ms,
                     done_reason: line.done_reason,
                     thinking_ms,
+                    eval_ms,
                 };
                 // The reply is complete either way; a closed receiver only
                 // means nobody sees the summary.
@@ -285,6 +288,7 @@ async fn stream_reply(
                     completion_tokens: line.eval_count,
                     duration_ms,
                     thinking_ms,
+                    eval_ms,
                 });
             }
         }
@@ -322,7 +326,7 @@ mod tests {
         let mut decoder = NdjsonDecoder::new(1024);
         let lines = decoder
             .push(
-                br#"{"model":"m","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","total_duration":2500000000,"prompt_eval_count":12,"eval_count":34}
+                br#"{"model":"m","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","total_duration":2500000000,"prompt_eval_count":12,"eval_count":34,"eval_duration":2000000000}
 "#,
             )
             .unwrap();
@@ -334,6 +338,7 @@ mod tests {
         assert_eq!(line.prompt_eval_count, Some(12));
         assert_eq!(line.eval_count, Some(34));
         assert_eq!(line.total_duration, Some(2_500_000_000));
+        assert_eq!(line.eval_duration, Some(2_000_000_000));
     }
 
     #[test]

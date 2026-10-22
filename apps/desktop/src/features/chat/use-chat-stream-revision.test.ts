@@ -3,8 +3,9 @@ import { describe, expect, it, vi } from "vitest";
 import type { ChatEvent, StoredMessage } from "~/lib/types";
 
 import type { ChatState } from "./chat-reducer";
-import { chatReducer, createChatState, fromStored } from "./chat-reducer";
+import { chatReducer, createChatState } from "./chat-reducer";
 import { DEFAULT_SETTINGS } from "./default-settings";
+import { fromStored } from "./stored-messages";
 
 vi.mock("~/lib/ipc");
 
@@ -23,6 +24,7 @@ const stored = (
   durationMs: null,
   thinking: null,
   thinkingMs: null,
+  evalMs: null,
 });
 
 const event = (state: ChatState, chatEvent: ChatEvent): ChatState =>
@@ -40,6 +42,7 @@ const done: ChatEvent = {
   durationMs: 3,
   doneReason: "stop",
   thinkingMs: null,
+  evalMs: null,
 };
 
 /** Rust admitted stream `s1` as request `r1` with rows `n1` and `n2`. */

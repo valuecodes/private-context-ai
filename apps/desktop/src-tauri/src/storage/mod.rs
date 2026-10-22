@@ -4,6 +4,7 @@
 pub mod audit;
 pub mod conversations;
 pub mod db;
+pub mod export;
 pub mod key;
 pub mod lock;
 pub mod messages;

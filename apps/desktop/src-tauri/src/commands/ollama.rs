@@ -320,12 +320,14 @@ where
                 completion_tokens,
                 duration_ms,
                 thinking_ms,
+                eval_ms,
                 ..
             } => lock(&recorder).complete(ReplyStats {
                 prompt_tokens: *prompt_tokens,
                 completion_tokens: *completion_tokens,
                 duration_ms: *duration_ms,
                 thinking_ms: *thinking_ms,
+                eval_ms: *eval_ms,
             }),
             // `on_end` then finds the reply finished. A save failure the
             // ticker already hit matters more than why Ollama stopped.
@@ -352,11 +354,13 @@ pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd)
             completion_tokens,
             duration_ms,
             thinking_ms,
+            eval_ms,
         } => recorder.complete(ReplyStats {
             prompt_tokens: *prompt_tokens,
             completion_tokens: *completion_tokens,
             duration_ms: *duration_ms,
             thinking_ms: *thinking_ms,
+            eval_ms: *eval_ms,
         }),
         ChatEnd::Cancelled => recorder.finish(MessageStatus::Cancelled),
         ChatEnd::Failed(_) => recorder.finish(MessageStatus::Error),
@@ -456,6 +460,7 @@ mod tests {
             duration_ms: Some(3),
             done_reason: Some("stop".into()),
             thinking_ms: Some(4),
+            eval_ms: Some(5),
         }
     }
 
@@ -495,6 +500,7 @@ mod tests {
         assert_eq!(saved.content.expose(), "Hello");
         assert_eq!(saved.status, MessageStatus::Complete);
         assert_eq!(saved.duration_ms, Some(3));
+        assert_eq!(saved.eval_ms, Some(5));
     }
 
     #[test]

@@ -58,6 +58,24 @@ pub async fn conversation_get(
     storage.get()?.get_conversation(id)
 }
 
+/// The ids of conversations whose messages contain `query`, newest first.
+#[tauri::command]
+pub async fn conversation_search(
+    storage: State<'_, StorageState>,
+    query: Redacted,
+) -> Result<Vec<Uuid>, AppError> {
+    storage.get()?.search_conversations(query.expose())
+}
+
+/// The conversation as Markdown, for the clipboard; no file is written.
+#[tauri::command]
+pub async fn conversation_markdown(
+    storage: State<'_, StorageState>,
+    id: Uuid,
+) -> Result<Redacted, AppError> {
+    storage.get()?.conversation_markdown(id)
+}
+
 #[tauri::command]
 pub async fn conversation_rename(
     storage: State<'_, StorageState>,

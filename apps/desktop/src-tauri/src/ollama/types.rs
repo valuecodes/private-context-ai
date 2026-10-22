@@ -159,6 +159,8 @@ pub struct ChatLine {
     pub eval_count: Option<u64>,
     /// Nanoseconds.
     pub total_duration: Option<u64>,
+    /// Nanoseconds spent generating `eval_count` tokens.
+    pub eval_duration: Option<u64>,
     pub error: Option<String>,
 }
 
@@ -191,6 +193,8 @@ pub enum ChatEvent {
         done_reason: Option<String>,
         /// From the first thinking chunk to the first answer chunk.
         thinking_ms: Option<u64>,
+        /// Generating the completion tokens only, for tokens/s.
+        eval_ms: Option<u64>,
     },
     Error {
         error: AppError,
@@ -871,6 +875,7 @@ mod tests {
             duration_ms: Some(120),
             done_reason: Some("stop".into()),
             thinking_ms: Some(40),
+            eval_ms: Some(100),
         };
         assert_eq!(
             serde_json::to_value(&done).unwrap(),
@@ -880,7 +885,8 @@ mod tests {
                 "completionTokens": 5,
                 "durationMs": 120,
                 "doneReason": "stop",
-                "thinkingMs": 40
+                "thinkingMs": 40,
+                "evalMs": 100
             })
         );
 

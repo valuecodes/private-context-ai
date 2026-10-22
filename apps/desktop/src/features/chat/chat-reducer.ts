@@ -1,11 +1,11 @@
 import { DEFAULT_SETTINGS } from "~/features/chat/default-settings";
+import type { ReplyStats } from "~/features/chat/message-stats";
 import type {
   AppError,
   ChatEvent,
   ConversationSettings,
   RequestId,
   SendStarted,
-  StoredMessage,
 } from "~/lib/types";
 
 type MessageStatus = "complete" | "streaming" | "cancelled" | "error";
@@ -25,6 +25,8 @@ type UiMessage = {
   thinkingMs?: number | null;
   /** When the first thinking chunk arrived, while it streams. */
   thinkingStartedAt?: number;
+  /** A reply's counts, once it has finished. */
+  stats?: ReplyStats;
 };
 
 /** `busy`: a send while a reply streams. `length`: the reply was cut off. */
@@ -145,29 +147,6 @@ const updateMessage = (
 ): UiMessage[] =>
   messages.map((message) => (message.id === id ? update(message) : message));
 
-/** Saved messages as bubbles. A `pending` row shows as still streaming. */
-const fromStored = (messages: StoredMessage[]): UiMessage[] =>
-  messages.flatMap((message): UiMessage[] => {
-    if (message.role === "system") {
-      return [];
-    }
-    const bubble: UiMessage = {
-      id: message.id,
-      role: message.role,
-      content: message.content,
-      status: message.status === "pending" ? "streaming" : message.status,
-    };
-    return message.thinking === null || message.thinking === ""
-      ? [bubble]
-      : [
-          {
-            ...bubble,
-            thinking: message.thinking,
-            thinkingMs: message.thinkingMs,
-          },
-        ];
-  });
-
 /**
  * Ends the current stream, setting the assistant bubble's final status. A
  * regenerate or edit that did not complete shows what it replaced again,
@@ -240,10 +219,12 @@ const applyEvent = (
     }));
   }
   if (event.type === "done") {
-    const finished =
-      event.thinkingMs === null
-        ? state
-        : update((message) => ({ ...message, thinkingMs: event.thinkingMs }));
+    const { completionTokens, durationMs, evalMs, thinkingMs } = event;
+    const finished = update((message) => ({
+      ...message,
+      stats: { completionTokens, durationMs, evalMs },
+      ...(thinkingMs === null ? {} : { thinkingMs }),
+    }));
     return finishStream(finished, "complete", {
       notice: event.doneReason === "length" ? "length" : null,
     });
@@ -476,4 +457,4 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
 };
 
 export type { ChatState, TurnAction, UiMessage };
-export { chatReducer, createChatState, fromStored, replyAnnouncement };
+export { chatReducer, createChatState, replyAnnouncement };

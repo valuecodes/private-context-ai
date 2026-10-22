@@ -1,4 +1,4 @@
-import { Check, Copy, Pencil, RefreshCw } from "lucide-react";
+import { Check, Copy, Info, Pencil, RefreshCw } from "lucide-react";
 import type { KeyboardEvent, SubmitEvent } from "react";
 import {
   memo,
@@ -13,6 +13,7 @@ import {
 import { sendsMessage } from "~/features/chat/chat-keys";
 import type { UiMessage } from "~/features/chat/chat-reducer";
 import { Markdown } from "~/features/chat/markdown";
+import { formatStats } from "~/features/chat/message-stats";
 import { ThinkingBlock } from "~/features/chat/thinking-block";
 import { TypingIndicator } from "~/features/chat/typing-indicator";
 import { copyText } from "~/lib/clipboard";
@@ -219,6 +220,10 @@ const MessageItem = memo(
     // new one is editable once its saved id has arrived.
     const editable =
       user && message.status !== "error" && message.local !== true;
+    const stats =
+      message.status === "complete" && message.stats !== undefined
+        ? formatStats(message.stats)
+        : null;
     if (editing) {
       return (
         <li className="flex flex-col items-end">
@@ -280,6 +285,16 @@ const MessageItem = memo(
               >
                 <RefreshCw aria-hidden="true" className="size-4" />
               </button>
+            )}
+            {stats !== null && (
+              <span
+                role="img"
+                aria-label={stats}
+                title={stats}
+                className="p-1 text-zinc-500 dark:text-zinc-400"
+              >
+                <Info aria-hidden="true" className="size-4" />
+              </span>
             )}
           </div>
         )}

@@ -70,6 +70,21 @@ describe("MessageList", () => {
     expect(html).toContain("<code>code</code>");
   });
 
+  it("shows the stats of a finished reply on hover", () => {
+    const stats = { completionTokens: 100, durationMs: 2500, evalMs: 2000 };
+    const html = render([{ ...message("assistant", "Done"), stats }]);
+    expect(html).toContain('title="100 tokens · 50 tok/s · 2.5s"');
+    expect(html).toContain('aria-label="100 tokens · 50 tok/s · 2.5s"');
+
+    for (const status of ["streaming", "cancelled"] as const) {
+      const unfinished = render([
+        { ...message("assistant", "Part", status), stats },
+      ]);
+      expect(unfinished).not.toContain("tok/s");
+    }
+    expect(render([message("assistant", "Old")])).not.toContain("tok/s");
+  });
+
   it("keeps the Stopped and Failed notes", () => {
     const html = render([
       message("assistant", "partial", "cancelled"),

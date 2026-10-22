@@ -108,6 +108,7 @@ const Workspace = () => {
         onSelect={open}
         onRename={conversations.rename}
         onDelete={remove}
+        onCopy={conversations.copyMarkdown}
       />
       <div className="flex min-w-0 flex-1 flex-col">
         <nav

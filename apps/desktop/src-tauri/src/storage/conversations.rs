@@ -15,6 +15,10 @@ pub const MAX_TITLE_CHARS: usize = 200;
 pub const DEFAULT_TITLE: &str = "New chat";
 /// Longest system prompt accepted, in bytes.
 pub const MAX_SYSTEM_PROMPT_BYTES: usize = 32 * 1024;
+/// Longest search query accepted, in characters.
+pub const MAX_SEARCH_CHARS: usize = 200;
+/// Most conversations one search returns.
+const SEARCH_LIMIT: usize = 100;
 
 /// How a conversation is sent, applied from its next send. Saved chats keep
 /// it in their row, temporary ones in memory.
@@ -164,6 +168,20 @@ pub(super) fn not_found() -> AppError {
     AppError::NotFound("no such conversation".into())
 }
 
+/// A `LIKE … ESCAPE '\'` pattern that matches `query` literally anywhere.
+fn like_pattern(query: &str) -> String {
+    let mut pattern = String::with_capacity(query.len() + 2);
+    pattern.push('%');
+    for c in query.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(c);
+    }
+    pattern.push('%');
+    pattern
+}
+
 impl Storage {
     /// `model` may be empty when no model is installed yet; the first send
     /// sets it.
@@ -250,6 +268,32 @@ impl Storage {
             .query_map([], conversation_row)?
             .collect::<Result<_, _>>()?;
         Ok(conversations)
+    }
+
+    /// The conversations whose shown messages contain `query`, most recently
+    /// used first, each once. Titles are matched by the sidebar, and
+    /// thinking is never searched. Only ids come back, never message text.
+    pub fn search_conversations(&self, query: &str) -> Result<Vec<Uuid>, AppError> {
+        let query = query.trim();
+        if query.chars().count() > MAX_SEARCH_CHARS {
+            return Err(AppError::InvalidInput(format!(
+                "a search is at most {MAX_SEARCH_CHARS} characters"
+            )));
+        }
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn();
+        let mut statement = conn.prepare(&format!(
+            "SELECT c.id FROM conversations c
+             WHERE c.id IN (SELECT conversation_id FROM messages
+                            WHERE content LIKE ?1 ESCAPE '\\' AND superseded_by IS NULL)
+             ORDER BY c.updated_at DESC, c.rowid DESC LIMIT {SEARCH_LIMIT}"
+        ))?;
+        let ids = statement
+            .query_map([like_pattern(query)], |row| uuid_column(row, 0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
     }
 
     pub fn get_conversation(&self, id: Uuid) -> Result<ConversationWithMessages, AppError> {
@@ -511,6 +555,128 @@ mod tests {
             resolve_think(&qwen3, saved.think.requested()),
             Ok(Some(Think::Enabled(false)))
         );
+    }
+
+    /// A message row with `content`; `extra` sets other columns.
+    fn insert_message(storage: &Storage, conversation: Uuid, content: &str, extra: &str) {
+        storage
+            .conn()
+            .execute(
+                "INSERT INTO messages (id, conversation_id, role, content, created_at, status)
+                 VALUES (?1, ?2, 'user', ?3, 'x', 'complete')",
+                params![
+                    Uuid::new_v4().to_string(),
+                    conversation.to_string(),
+                    content
+                ],
+            )
+            .unwrap();
+        if !extra.is_empty() {
+            storage
+                .conn()
+                .execute(
+                    &format!("UPDATE messages SET {extra} WHERE rowid = last_insert_rowid()"),
+                    [],
+                )
+                .unwrap();
+        }
+    }
+
+    fn chat_with(storage: &Storage, title: &str, contents: &[&str]) -> Uuid {
+        let id = storage.create_conversation(Some(title), "m").unwrap().id;
+        for content in contents {
+            insert_message(storage, id, content, "");
+        }
+        id
+    }
+
+    #[test]
+    fn search_escapes_like_wildcards() {
+        let (storage, _dir) = temp_storage();
+        let percent = chat_with(&storage, "a", &["a 50% discount"]);
+        let plain = chat_with(&storage, "b", &["a 500 discount"]);
+        let underscore = chat_with(&storage, "c", &["snake_case"]);
+        let backslash = chat_with(&storage, "d", &[r"C:\temp"]);
+        chat_with(&storage, "e", &["snakeXcase", "C:temp"]);
+
+        assert_eq!(storage.search_conversations("50%").unwrap(), [percent]);
+        assert_eq!(storage.search_conversations("e_c").unwrap(), [underscore]);
+        assert_eq!(storage.search_conversations(r":\t").unwrap(), [backslash]);
+        assert_eq!(
+            storage.search_conversations("  DISCOUNT ").unwrap(),
+            [plain, percent],
+            "trimmed, ASCII case-insensitive"
+        );
+    }
+
+    #[test]
+    fn search_matches_content_once() {
+        let (storage, _dir) = temp_storage();
+        let many = chat_with(&storage, "x", &["kiwi"; 5]);
+        assert_eq!(storage.search_conversations("kiwi").unwrap(), [many]);
+    }
+
+    #[test]
+    fn search_matches_content_not_title() {
+        let (storage, _dir) = temp_storage();
+        chat_with(&storage, "Banana bread", &["flour"]);
+        assert!(storage.search_conversations("banana").unwrap().is_empty());
+    }
+
+    #[test]
+    fn search_orders_newest_first_and_limits() {
+        let (storage, _dir) = temp_storage();
+        let ids: Vec<Uuid> = (0..=SEARCH_LIMIT)
+            .map(|_| chat_with(&storage, "t", &["needle"]))
+            .collect();
+        let oldest = ids[0];
+        storage
+            .conn()
+            .execute(
+                "UPDATE conversations SET updated_at = '9999' WHERE id = ?1",
+                [oldest.to_string()],
+            )
+            .unwrap();
+
+        let found = storage.search_conversations("needle").unwrap();
+        assert_eq!(found.len(), SEARCH_LIMIT);
+        assert_eq!(found[0], oldest);
+        // Same `updated_at` otherwise: newest insert first, the next-oldest cut.
+        assert_eq!(found[1], ids[SEARCH_LIMIT]);
+        assert!(!found.contains(&ids[1]));
+    }
+
+    #[test]
+    fn search_skips_superseded_and_thinking() {
+        let (storage, _dir) = temp_storage();
+        let id = chat_with(&storage, "t", &[]);
+        insert_message(&storage, id, "replaced text", "superseded_by = 'other'");
+        insert_message(&storage, id, "shown", "thinking = 'secret reasoning'");
+
+        assert!(storage.search_conversations("replaced").unwrap().is_empty());
+        assert!(
+            storage
+                .search_conversations("reasoning")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(storage.search_conversations("shown").unwrap(), [id]);
+    }
+
+    #[test]
+    fn search_empty_and_long_queries() {
+        let (storage, _dir) = temp_storage();
+        chat_with(&storage, "t", &["anything"]);
+        assert!(storage.search_conversations("  ").unwrap().is_empty());
+        assert!(
+            storage
+                .search_conversations(&"a".repeat(MAX_SEARCH_CHARS))
+                .is_ok()
+        );
+        assert!(matches!(
+            storage.search_conversations(&"a".repeat(MAX_SEARCH_CHARS + 1)),
+            Err(AppError::InvalidInput(_))
+        ));
     }
 
     #[test]

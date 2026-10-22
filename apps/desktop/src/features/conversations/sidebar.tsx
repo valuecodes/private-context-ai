@@ -1,9 +1,15 @@
-import { Pencil, SquarePen, Trash } from "lucide-react";
+import { Check, Copy, Pencil, Search, SquarePen, Trash } from "lucide-react";
 import type { KeyboardEvent, SubmitEvent } from "react";
 import { useState } from "react";
 
+import {
+  filterConversations,
+  useConversationSearch,
+} from "~/features/conversations/use-conversation-search";
 import type { ConversationsState } from "~/features/conversations/use-conversations";
 import type { Conversation } from "~/lib/types";
+
+const COPIED_MS = 1500;
 
 type ItemMode = "view" | "rename" | "confirm";
 
@@ -17,6 +23,8 @@ type SidebarItemProps = {
   onMode: (mode: ItemMode) => void;
   onRename: (title: string) => void;
   onDelete: () => void;
+  /** Resolves `false` when nothing was copied. */
+  onCopy: () => Promise<boolean>;
 };
 
 const smallButton =
@@ -34,7 +42,9 @@ const SidebarItem = ({
   onMode,
   onRename,
   onDelete,
+  onCopy,
 }: SidebarItemProps) => {
+  const [copied, setCopied] = useState(false);
   if (mode === "rename") {
     const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
       event.preventDefault();
@@ -135,6 +145,31 @@ const SidebarItem = ({
       >
         <Pencil aria-hidden="true" className="size-3.5" />
       </button>
+      {/* Read-only, so it works while a reply streams. */}
+      <button
+        type="button"
+        onClick={() => {
+          void onCopy().then((ok) => {
+            if (ok) {
+              setCopied(true);
+              setTimeout(() => {
+                setCopied(false);
+              }, COPIED_MS);
+            }
+          });
+        }}
+        aria-label={
+          copied ? "Copied" : `Copy ${conversation.title} as Markdown`
+        }
+        title="Copy as Markdown"
+        className={iconButton}
+      >
+        {copied ? (
+          <Check aria-hidden="true" className="size-3.5" />
+        ) : (
+          <Copy aria-hidden="true" className="size-3.5" />
+        )}
+      </button>
       <button
         type="button"
         onClick={() => {
@@ -160,6 +195,8 @@ type SidebarProps = {
   /** Resolves `false` when the title was refused, keeping the editor open. */
   onRename: (id: string, title: string) => Promise<boolean>;
   onDelete: (id: string) => void;
+  /** Copies the conversation as Markdown; resolves `false` on failure. */
+  onCopy: (id: string) => Promise<boolean>;
 };
 
 const Sidebar = ({
@@ -170,12 +207,16 @@ const Sidebar = ({
   onSelect,
   onRename,
   onDelete,
+  onCopy,
 }: SidebarProps) => {
   // At most one conversation is being renamed or confirmed at a time.
   const [editing, setEditing] = useState<{
     id: string;
     mode: ItemMode;
   } | null>(null);
+  const [query, setQuery] = useState("");
+  const matches = useConversationSearch(query);
+  const shown = filterConversations(state.conversations, query, matches);
 
   const modeOf = (id: string): ItemMode =>
     editing?.id === id ? editing.mode : "view";
@@ -189,10 +230,16 @@ const Sidebar = ({
     list = (
       <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>
     );
-  } else if (state.conversations.length > 0) {
+  } else if (state.conversations.length > 0 && shown.length === 0) {
+    list = (
+      <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
+        No matching conversations
+      </p>
+    );
+  } else if (shown.length > 0) {
     list = (
       <ul aria-label="Conversations" className="mt-2 flex flex-col gap-0.5">
-        {state.conversations.map((conversation) => (
+        {shown.map((conversation) => (
           <SidebarItem
             key={conversation.id}
             conversation={conversation}
@@ -218,6 +265,7 @@ const Sidebar = ({
               setEditing(null);
               onDelete(conversation.id);
             }}
+            onCopy={() => onCopy(conversation.id)}
           />
         ))}
       </ul>
@@ -238,6 +286,23 @@ const Sidebar = ({
         >
           <SquarePen aria-hidden="true" className="size-4" />
         </button>
+      </div>
+      <div className="relative mt-2">
+        <Search
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-zinc-400"
+        />
+        <input
+          type="search"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+          }}
+          maxLength={200}
+          aria-label="Search conversations"
+          placeholder="Search"
+          className="w-full rounded border border-zinc-300 bg-white py-1 pr-2 pl-7 text-sm dark:border-zinc-700 dark:bg-zinc-900"
+        />
       </div>
       {state.error !== null && (
         <p role="alert" className="mt-2 text-xs text-red-600 dark:text-red-400">

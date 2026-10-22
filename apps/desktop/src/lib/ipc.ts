@@ -48,6 +48,14 @@ const conversationList = (): Promise<Conversation[]> =>
 const conversationGet = (id: string): Promise<ConversationWithMessages> =>
   invoke<ConversationWithMessages>("conversation_get", { id });
 
+/** Ids of conversations whose messages contain `query`, newest first. */
+const conversationSearch = (query: string): Promise<string[]> =>
+  invoke<string[]>("conversation_search", { query });
+
+/** The conversation as a Markdown document; nothing is written to disk. */
+const conversationMarkdown = (id: string): Promise<string> =>
+  invoke<string>("conversation_markdown", { id });
+
 const conversationRename = (id: string, title: string): Promise<Conversation> =>
   invoke<Conversation>("conversation_rename", { id, title });
 
@@ -214,7 +222,9 @@ export {
   conversationDelete,
   conversationGet,
   conversationList,
+  conversationMarkdown,
   conversationRename,
+  conversationSearch,
   conversationUpdateSettings,
   ollamaListModels,
   ollamaModelCapabilities,
