@@ -1,7 +1,7 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useRef } from "react";
 
 import { toAppError } from "~/lib/app-error";
-import { copyLater } from "~/lib/clipboard";
+import { copyLater, copyText } from "~/lib/clipboard";
 import {
   conversationDelete,
   conversationList,
@@ -115,10 +115,18 @@ const conversationsReducer = (
 
 /**
  * Copies a conversation as Markdown; resolves `null` once copied, else why
- * not. Call it straight from the click: the clipboard write starts before
- * Rust answers.
+ * not. Call it straight from the click. With `prepared` (fetched on hover)
+ * the copy is synchronous, which the textarea fallback needs: WebKitGTK has
+ * no `ClipboardItem`, and a copy after an IPC `await` has lost the click.
+ * Without it, the clipboard write starts before Rust answers.
  */
-const copyConversationMarkdown = (id: string): Promise<AppError | null> => {
+const copyConversationMarkdown = (
+  id: string,
+  prepared?: string
+): Promise<AppError | null> => {
+  if (prepared !== undefined) {
+    return copyText(prepared).then((copied) => (copied ? null : COPY_FAILED));
+  }
   let fetchError: AppError | null = null;
   const markdown = conversationMarkdown(id).catch((error: unknown) => {
     fetchError = toAppError(error);
@@ -135,6 +143,8 @@ const useConversations = () => {
     conversationsReducer,
     initialConversations
   );
+  /** Markdown fetched on hover, by conversation id. */
+  const prepared = useRef(new Map<string, string>());
 
   useEffect(() => {
     let cancelled = false;
@@ -193,16 +203,45 @@ const useConversations = () => {
       }
     );
 
+  /**
+   * Fetches a conversation's Markdown ahead of a click on its copy button,
+   * so the copy can run inside the click. A failed fetch is left to the
+   * click, which fetches again and reports it.
+   */
+  const prepareMarkdown = (id: string) => {
+    void conversationMarkdown(id).then(
+      (markdown) => {
+        prepared.current.set(id, markdown);
+      },
+      () => {
+        prepared.current.delete(id);
+      }
+    );
+  };
+
   /** Resolves `false` when nothing was copied; the error says why. */
-  const copyMarkdown = (id: string): Promise<boolean> =>
-    copyConversationMarkdown(id).then((error) => {
+  const copyMarkdown = (id: string): Promise<boolean> => {
+    // Used once, so the next hover fetches the conversation as it is then.
+    const markdown = prepared.current.get(id);
+    prepared.current.delete(id);
+    return copyConversationMarkdown(id, markdown).then((error) => {
       if (error !== null) {
         dispatch({ type: "failed", error });
       }
       return error === null;
     });
+  };
 
-  return { state, select, created, touched, rename, remove, copyMarkdown };
+  return {
+    state,
+    select,
+    created,
+    touched,
+    rename,
+    remove,
+    prepareMarkdown,
+    copyMarkdown,
+  };
 };
 
 export type { ConversationsState };

@@ -38,6 +38,7 @@ const renderSidebar = (
       onSelect={noop}
       onRename={() => Promise.resolve(true)}
       onDelete={noop}
+      onPrepareCopy={noop}
       onCopy={() => Promise.resolve(true)}
     />
   );
@@ -54,6 +55,7 @@ const renderItem = (mode: "view" | "rename" | "confirm", disabled = false) =>
         onMode={noop}
         onRename={noop}
         onDelete={noop}
+        onPrepareCopy={noop}
         onCopy={() => Promise.resolve(true)}
       />
     </ul>
