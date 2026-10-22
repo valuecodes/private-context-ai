@@ -10,13 +10,44 @@ use crate::commands::ollama::ReplyRecorder;
 use crate::error::AppError;
 use crate::ollama::types::{ChatMessage, ChatRole};
 use crate::redacted::Redacted;
-use crate::storage::messages::{MessageStatus, ReplyStats};
+use crate::storage::messages::{MessageStatus, ReplyStats, TurnInput};
 
 /// How many temporary chats may exist at once. The UI keeps one; the rest
 /// bound what a reloaded webview can leave behind.
 const MAX_SESSIONS: usize = 8;
 
-type Sessions = HashMap<Uuid, Vec<ChatMessage>>;
+/// One message, with the id the UI knows it by.
+struct TempMessage {
+    id: Uuid,
+    message: ChatMessage,
+}
+
+/// What a running regenerate or edit replaced: the messages from `base` on,
+/// put back if its reply fails or is stopped.
+struct Revision {
+    base: usize,
+    tail: Vec<TempMessage>,
+}
+
+#[derive(Default)]
+struct Session {
+    messages: Vec<TempMessage>,
+    revision: Option<Revision>,
+}
+
+impl Session {
+    /// Undoes a running regenerate or edit. `false` when none runs.
+    fn restore(&mut self) -> bool {
+        let Some(revision) = self.revision.take() else {
+            return false;
+        };
+        self.messages.truncate(revision.base);
+        self.messages.extend(revision.tail);
+        true
+    }
+}
+
+type Sessions = HashMap<Uuid, Session>;
 
 fn not_found() -> AppError {
     AppError::NotFound("no such temporary chat".into())
@@ -58,7 +89,7 @@ impl TempChats {
             )));
         }
         let id = Uuid::new_v4();
-        sessions.insert(id, Vec::new());
+        sessions.insert(id, Session::default());
         Ok(id)
     }
 
@@ -67,71 +98,135 @@ impl TempChats {
         self.sessions().remove(&id).is_some()
     }
 
-    /// Under one lock, so a discard cannot land halfway: the chat's history
-    /// plus `prompt`, which `check` may refuse (size limits) before anything
-    /// changes. On success the prompt is kept and the history returned.
+    /// Under one lock, so a discard cannot land halfway: the history `input`
+    /// sends, which `check` may refuse (size limits) before anything
+    /// changes. Then the prompt is kept, and a regenerate or edit sets aside
+    /// the messages it replaces until its reply ends ([`MemoryRecorder`]).
+    /// Returns the prompt's id (the existing one when regenerating) and the
+    /// history.
     pub fn begin(
         &self,
         id: Uuid,
-        prompt: &Redacted,
+        input: &TurnInput,
         check: impl FnOnce(&[ChatMessage]) -> Result<(), AppError>,
-    ) -> Result<Vec<ChatMessage>, AppError> {
+    ) -> Result<(Uuid, Vec<ChatMessage>), AppError> {
         let mut sessions = self.sessions();
         let session = sessions.get_mut(&id).ok_or_else(not_found)?;
-        let prompt = ChatMessage {
-            role: ChatRole::User,
-            content: prompt.clone(),
+        let is_user = |message: &TempMessage| message.message.role == ChatRole::User;
+        // `cut`: where the replaced messages start.
+        let (cut, user_id) = match input {
+            TurnInput::New(_) => (None, Uuid::new_v4()),
+            TurnInput::Regenerate => {
+                let last = session.messages.iter().rposition(is_user).ok_or_else(|| {
+                    AppError::InvalidInput("there is no message to regenerate".into())
+                })?;
+                (Some(last + 1), session.messages[last].id)
+            }
+            TurnInput::Edit { message_id, .. } => {
+                let edited = session
+                    .messages
+                    .iter()
+                    .position(|message| message.id == *message_id && is_user(message))
+                    .ok_or_else(|| AppError::NotFound("no such message".into()))?;
+                (Some(edited), Uuid::new_v4())
+            }
         };
-        let mut history = session.clone();
-        history.push(prompt.clone());
+        let prompt = input.prompt().map(|prompt| TempMessage {
+            id: user_id,
+            message: ChatMessage {
+                role: ChatRole::User,
+                content: prompt.clone(),
+            },
+        });
+        let history: Vec<ChatMessage> = session.messages[..cut.unwrap_or(session.messages.len())]
+            .iter()
+            .chain(&prompt)
+            .map(|message| message.message.clone())
+            .collect();
         check(&history)?;
-        session.push(prompt);
-        Ok(history)
+        if let Some(base) = cut {
+            let tail = session.messages.split_off(base);
+            session.revision = Some(Revision { base, tail });
+        }
+        session.messages.extend(prompt);
+        Ok((user_id, history))
     }
 
-    /// Takes back the prompt [`Self::begin`] kept when the request then did
-    /// not start. Only one request runs per chat, so it is still the last
-    /// message.
+    /// Takes back the prompt [`Self::begin`] kept for a new message when the
+    /// request then did not start. Only one request runs per chat, so it is
+    /// still the last message. (A regenerate or edit that did not start is
+    /// undone by its recorder.)
     pub fn rollback(&self, id: Uuid) {
         if let Some(session) = self.sessions().get_mut(&id)
             && session
+                .messages
                 .last()
-                .is_some_and(|message| message.role == ChatRole::User)
+                .is_some_and(|message| message.message.role == ChatRole::User)
         {
-            session.pop();
+            session.messages.pop();
         }
     }
 
-    /// A discarded chat silently drops the message.
-    fn append(&self, id: Uuid, message: ChatMessage) {
+    /// Ends the running reply: `Some` adds it and drops what a regenerate or
+    /// edit replaced; `None` puts that back. A discarded chat is a no-op.
+    fn end_reply(&self, id: Uuid, reply: Option<TempMessage>) {
         if let Some(session) = self.sessions().get_mut(&id) {
-            session.push(message);
+            match reply {
+                Some(reply) => {
+                    session.revision = None;
+                    session.messages.push(reply);
+                }
+                None => {
+                    session.restore();
+                }
+            }
         }
     }
 
     #[cfg(test)]
     pub(crate) fn history(&self, id: Uuid) -> Option<Vec<ChatMessage>> {
-        self.sessions().get(&id).cloned()
+        self.sessions().get(&id).map(|session| {
+            session
+                .messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect()
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ids(&self, id: Uuid) -> Vec<Uuid> {
+        self.sessions()
+            .get(&id)
+            .map(|session| session.messages.iter().map(|message| message.id).collect())
+            .unwrap_or_default()
     }
 }
 
 /// Collects one streamed reply and adds it to its chat when it ends, the way
-/// `begin_turn` would include it in the history: a complete reply always, a
-/// cancelled one only with visible content, a failed one never. Thinking is
-/// dropped, since it is never sent back. Nothing here can fail. No `Debug`:
-/// it holds the reply text.
+/// a saved chat keeps it: a complete reply always, a cancelled one only with
+/// visible content and only for a new message, a failed one never. A reply
+/// that is not kept undoes its regenerate or edit. Thinking is dropped,
+/// since it is never sent back. Nothing here can fail. No `Debug`: it holds
+/// the reply text.
 pub struct MemoryRecorder {
     chats: Weak<TempChats>,
     session_id: Uuid,
+    message_id: Uuid,
+    /// A regenerate or edit: only a complete reply replaces what it
+    /// replaced.
+    revision: bool,
     content: String,
     finished: bool,
 }
 
 impl MemoryRecorder {
-    pub fn new(chats: &Arc<TempChats>, session_id: Uuid) -> Self {
+    pub fn new(chats: &Arc<TempChats>, session_id: Uuid, message_id: Uuid, revision: bool) -> Self {
         Self {
             chats: Arc::downgrade(chats),
             session_id,
+            message_id,
+            revision,
             content: String::new(),
             finished: false,
         }
@@ -142,14 +237,15 @@ impl MemoryRecorder {
             return;
         }
         self.finished = true;
-        if keep && let Some(chats) = self.chats.upgrade() {
-            chats.append(
-                self.session_id,
-                ChatMessage {
+        if let Some(chats) = self.chats.upgrade() {
+            let reply = keep.then(|| TempMessage {
+                id: self.message_id,
+                message: ChatMessage {
                     role: ChatRole::Assistant,
                     content: Redacted::new(std::mem::take(&mut self.content)),
                 },
-            );
+            });
+            chats.end_reply(self.session_id, reply);
         }
     }
 }
@@ -172,11 +268,7 @@ impl ReplyRecorder for MemoryRecorder {
     }
 
     fn finish(&mut self, status: MessageStatus) -> Result<(), AppError> {
-        self.end(status == MessageStatus::Cancelled && !self.content.is_empty());
-        Ok(())
-    }
-
-    fn ensure_saved(&self) -> Result<(), AppError> {
+        self.end(status == MessageStatus::Cancelled && !self.revision && !self.content.is_empty());
         Ok(())
     }
 }
@@ -190,6 +282,117 @@ mod tests {
             .iter()
             .map(|message| (message.role, message.content.expose()))
             .collect()
+    }
+
+    fn new(prompt: &str) -> TurnInput {
+        TurnInput::New(Redacted::new(prompt))
+    }
+
+    /// Runs one turn of `input` that ends with `reply`, or fails when `None`.
+    fn run(chats: &Arc<TempChats>, id: Uuid, input: &TurnInput, reply: Option<&str>) {
+        chats.begin(id, input, |_| Ok(())).unwrap();
+        let revision = !matches!(input, TurnInput::New(_));
+        let mut recorder = MemoryRecorder::new(chats, id, Uuid::new_v4(), revision);
+        match reply {
+            Some(text) => {
+                recorder.push(&Redacted::new(text)).unwrap();
+                recorder.complete(ReplyStats::default()).unwrap();
+            }
+            None => recorder.finish(MessageStatus::Error).unwrap(),
+        }
+    }
+
+    /// A chat of `prompts`, each answered `A<prompt>`.
+    fn answered(prompts: &[&str]) -> (Arc<TempChats>, Uuid) {
+        let chats = Arc::new(TempChats::default());
+        let id = chats.start().unwrap();
+        for prompt in prompts {
+            run(&chats, id, &new(prompt), Some(&format!("A{prompt}")));
+        }
+        (chats, id)
+    }
+
+    #[test]
+    fn temp_regenerate_replaces_last_reply() {
+        let (chats, id) = answered(&["One", "Two"]);
+        let ids = chats.ids(id);
+
+        let (user_id, history) = chats.begin(id, &TurnInput::Regenerate, |_| Ok(())).unwrap();
+        assert_eq!(user_id, ids[2]);
+        assert_eq!(
+            texts(&history),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Two"),
+            ]
+        );
+        let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), true);
+        recorder.push(&Redacted::new("Again")).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
+
+        assert_eq!(
+            texts(&chats.history(id).unwrap()),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Two"),
+                (ChatRole::Assistant, "Again"),
+            ]
+        );
+    }
+
+    #[test]
+    fn temp_edit_truncates_and_restores_on_error() {
+        let (chats, id) = answered(&["One", "Two", "Three"]);
+        let before = chats.history(id).unwrap();
+        let ids = chats.ids(id);
+        let edit = TurnInput::Edit {
+            message_id: ids[2],
+            prompt: Redacted::new("Changed"),
+        };
+
+        // Failed, then stopped with some content: both put everything back.
+        run(&chats, id, &edit, None);
+        assert_eq!(chats.history(id).unwrap(), before);
+        assert_eq!(chats.ids(id), ids);
+        chats.begin(id, &edit, |_| Ok(())).unwrap();
+        let mut stopped = MemoryRecorder::new(&chats, id, Uuid::new_v4(), true);
+        stopped.push(&Redacted::new("Half")).unwrap();
+        stopped.finish(MessageStatus::Cancelled).unwrap();
+        assert_eq!(chats.history(id).unwrap(), before);
+
+        run(&chats, id, &edit, Some("New"));
+        assert_eq!(
+            texts(&chats.history(id).unwrap()),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Changed"),
+                (ChatRole::Assistant, "New"),
+            ]
+        );
+    }
+
+    #[test]
+    fn temp_edit_unknown_or_assistant_message_not_found() {
+        let (chats, id) = answered(&["One"]);
+        let assistant = chats.ids(id)[1];
+        for message_id in [assistant, Uuid::new_v4()] {
+            let edit = TurnInput::Edit {
+                message_id,
+                prompt: Redacted::new("x"),
+            };
+            assert!(matches!(
+                chats.begin(id, &edit, |_| Ok(())),
+                Err(AppError::NotFound(_))
+            ));
+        }
+        let empty = chats.start().unwrap();
+        assert!(matches!(
+            chats.begin(empty, &TurnInput::Regenerate, |_| Ok(())),
+            Err(AppError::InvalidInput(_))
+        ));
     }
 
     #[test]
@@ -209,20 +412,32 @@ mod tests {
         let id = chats.start().unwrap();
 
         let err = chats
-            .begin(id, &Redacted::new("Hi"), |_| {
-                Err(AppError::TooLarge("big".into()))
-            })
+            .begin(id, &new("Hi"), |_| Err(AppError::TooLarge("big".into())))
             .unwrap_err();
 
         assert!(matches!(err, AppError::TooLarge(_)));
         assert_eq!(chats.history(id).unwrap(), []);
+
+        // A refused edit sets nothing aside either.
+        let (chats, id) = answered(&["One"]);
+        let before = chats.history(id).unwrap();
+        let edit = TurnInput::Edit {
+            message_id: chats.ids(id)[0],
+            prompt: Redacted::new("x"),
+        };
+        assert!(
+            chats
+                .begin(id, &edit, |_| Err(AppError::TooLarge("big".into())))
+                .is_err()
+        );
+        assert_eq!(chats.history(id).unwrap(), before);
     }
 
     #[test]
     fn begin_unknown_chat_is_not_found() {
         let chats = TempChats::default();
         assert!(matches!(
-            chats.begin(Uuid::new_v4(), &Redacted::new("Hi"), |_| Ok(())),
+            chats.begin(Uuid::new_v4(), &new("Hi"), |_| Ok(())),
             Err(AppError::NotFound(_))
         ));
     }
@@ -231,7 +446,7 @@ mod tests {
     fn rollback_takes_back_the_prompt() {
         let chats = TempChats::default();
         let id = chats.start().unwrap();
-        chats.begin(id, &Redacted::new("Hi"), |_| Ok(())).unwrap();
+        chats.begin(id, &new("Hi"), |_| Ok(())).unwrap();
 
         chats.rollback(id);
 
@@ -243,8 +458,8 @@ mod tests {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
         let turn = |prompt: &str, reply: &str, status: Option<MessageStatus>| {
-            chats.begin(id, &Redacted::new(prompt), |_| Ok(())).unwrap();
-            let mut recorder = MemoryRecorder::new(&chats, id);
+            chats.begin(id, &new(prompt), |_| Ok(())).unwrap();
+            let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
             recorder.push_thinking(&Redacted::new("hmm")).unwrap();
             recorder.push(&Redacted::new(reply)).unwrap();
             match status {
@@ -277,8 +492,8 @@ mod tests {
     fn discard_then_late_finish_is_noop() {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
-        chats.begin(id, &Redacted::new("Hi"), |_| Ok(())).unwrap();
-        let mut recorder = MemoryRecorder::new(&chats, id);
+        chats.begin(id, &new("Hi"), |_| Ok(())).unwrap();
+        let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
         recorder.push(&Redacted::new("Late")).unwrap();
 
         chats.remove(id);

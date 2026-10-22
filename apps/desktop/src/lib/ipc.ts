@@ -12,6 +12,7 @@ import type {
   ModelInfo,
   OllamaStatus,
   RequestId,
+  SendStarted,
   Settings,
   SettingsPatch,
   StorageStatus,
@@ -51,32 +52,67 @@ const conversationRename = (id: string, title: string): Promise<Conversation> =>
 const conversationDelete = (id: string): Promise<void> =>
   invoke<undefined>("conversation_delete", { id });
 
-type ChatSendArgs = {
-  conversationId: string;
+type ChatTurnArgs = {
   model: string;
-  prompt: string;
   /** What the user picked; Rust decides what the model is actually sent. */
   think: Think | null;
 };
 
+type ChatSendArgs = ChatTurnArgs & { conversationId: string; prompt: string };
+
 /**
- * Saves the prompt and starts a streamed reply. Resolves with the request id
- * as soon as Rust has admitted the request; events may arrive before it
- * resolves. Rust builds the history from the saved conversation.
+ * Saves the prompt and starts a streamed reply. Resolves with the request
+ * and message ids as soon as Rust has admitted the request; events may
+ * arrive before it resolves. Rust builds the history from the saved
+ * conversation.
  */
 const chatSend = (
   { conversationId, model, prompt, think }: ChatSendArgs,
   onEvent: (event: ChatEvent) => void
-): Promise<RequestId> => {
-  const channel = new Channel<ChatEvent>(onEvent);
-  return invoke<RequestId>("chat_send", {
+): Promise<SendStarted> =>
+  invoke<SendStarted>("chat_send", {
     conversationId,
     model,
     prompt,
     think,
-    onEvent: channel,
+    onEvent: new Channel<ChatEvent>(onEvent),
   });
-};
+
+type ChatRegenerateArgs = ChatTurnArgs & { conversationId: string };
+
+/**
+ * Like `chatSend`, but streams a new reply to the last prompt. The old reply
+ * is deleted only once the new one completes.
+ */
+const chatRegenerate = (
+  { conversationId, model, think }: ChatRegenerateArgs,
+  onEvent: (event: ChatEvent) => void
+): Promise<SendStarted> =>
+  invoke<SendStarted>("chat_regenerate", {
+    conversationId,
+    model,
+    think,
+    onEvent: new Channel<ChatEvent>(onEvent),
+  });
+
+type ChatEditArgs = ChatSendArgs & { messageId: string };
+
+/**
+ * Like `chatSend`, but replaces the user message `messageId` and everything
+ * after it. Nothing is deleted until the new reply completes.
+ */
+const chatEdit = (
+  { conversationId, messageId, model, prompt, think }: ChatEditArgs,
+  onEvent: (event: ChatEvent) => void
+): Promise<SendStarted> =>
+  invoke<SendStarted>("chat_edit", {
+    conversationId,
+    messageId,
+    model,
+    prompt,
+    think,
+    onEvent: new Channel<ChatEvent>(onEvent),
+  });
 
 const chatCancel = (requestId: RequestId): Promise<void> =>
   invoke<undefined>("chat_cancel", { requestId });
@@ -84,12 +120,7 @@ const chatCancel = (requestId: RequestId): Promise<void> =>
 /** A temporary chat kept only in Rust's memory; resolves with its id. */
 const tempChatStart = (): Promise<string> => invoke<string>("temp_chat_start");
 
-type TempChatSendArgs = {
-  sessionId: string;
-  model: string;
-  prompt: string;
-  think: Think | null;
-};
+type TempChatSendArgs = ChatTurnArgs & { sessionId: string; prompt: string };
 
 /**
  * Like `chatSend`, but nothing is saved: Rust builds the history from the
@@ -98,16 +129,46 @@ type TempChatSendArgs = {
 const tempChatSend = (
   { sessionId, model, prompt, think }: TempChatSendArgs,
   onEvent: (event: ChatEvent) => void
-): Promise<RequestId> => {
-  const channel = new Channel<ChatEvent>(onEvent);
-  return invoke<RequestId>("temp_chat_send", {
+): Promise<SendStarted> =>
+  invoke<SendStarted>("temp_chat_send", {
     sessionId,
     model,
     prompt,
     think,
-    onEvent: channel,
+    onEvent: new Channel<ChatEvent>(onEvent),
   });
-};
+
+/** Like `chatRegenerate`, for a temporary chat. */
+const tempChatRegenerate = (
+  { sessionId, model, think }: ChatTurnArgs & { sessionId: string },
+  onEvent: (event: ChatEvent) => void
+): Promise<SendStarted> =>
+  invoke<SendStarted>("temp_chat_regenerate", {
+    sessionId,
+    model,
+    think,
+    onEvent: new Channel<ChatEvent>(onEvent),
+  });
+
+/** Like `chatEdit`, for a temporary chat. */
+const tempChatEdit = (
+  {
+    sessionId,
+    messageId,
+    model,
+    prompt,
+    think,
+  }: TempChatSendArgs & { messageId: string },
+  onEvent: (event: ChatEvent) => void
+): Promise<SendStarted> =>
+  invoke<SendStarted>("temp_chat_edit", {
+    sessionId,
+    messageId,
+    model,
+    prompt,
+    think,
+    onEvent: new Channel<ChatEvent>(onEvent),
+  });
 
 /** Forgets the temporary chat and cancels its reply, if one streams. */
 const tempChatDiscard = (sessionId: string): Promise<void> =>
@@ -134,6 +195,8 @@ export {
   activityList,
   appInfo,
   chatCancel,
+  chatEdit,
+  chatRegenerate,
   chatSend,
   conversationCreate,
   conversationDelete,
@@ -147,6 +210,8 @@ export {
   settingsSet,
   storageStatus,
   tempChatDiscard,
+  tempChatEdit,
+  tempChatRegenerate,
   tempChatSend,
   tempChatStart,
 };

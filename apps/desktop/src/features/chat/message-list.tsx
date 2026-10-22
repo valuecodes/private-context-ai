@@ -1,10 +1,20 @@
-import { Check, Copy } from "lucide-react";
-import { memo, useDeferredValue, useState } from "react";
+import { Check, Copy, Pencil, RefreshCw } from "lucide-react";
+import type { KeyboardEvent, SubmitEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useDeferredValue,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
+import { sendsMessage } from "~/features/chat/chat-keys";
+import type { UiMessage } from "~/features/chat/chat-reducer";
 import { Markdown } from "~/features/chat/markdown";
 import { ThinkingBlock } from "~/features/chat/thinking-block";
 import { TypingIndicator } from "~/features/chat/typing-indicator";
-import type { UiMessage } from "~/features/chat/use-chat-stream";
 import { copyText } from "~/lib/clipboard";
 
 const STATUS_NOTE: Record<UiMessage["status"], string> = {
@@ -15,6 +25,9 @@ const STATUS_NOTE: Record<UiMessage["status"], string> = {
 };
 
 const COPIED_MS = 1500;
+
+const actionButton =
+  "rounded p-1 text-zinc-500 hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800";
 
 const CopyMessage = ({ text }: { text: string }) => {
   const [copied, setCopied] = useState(false);
@@ -33,7 +46,7 @@ const CopyMessage = ({ text }: { text: string }) => {
       }}
       aria-label={copied ? "Copied" : "Copy message"}
       title="Copy message"
-      className="rounded p-1 text-zinc-500 hover:bg-zinc-200 dark:text-zinc-400 dark:hover:bg-zinc-800"
+      className={actionButton}
     >
       {copied ? (
         <Check aria-hidden="true" className="size-4" />
@@ -82,52 +95,240 @@ const AssistantReply = ({ message }: { message: UiMessage }) => {
   );
 };
 
+type MessageEditorProps = {
+  text: string;
+  busy: boolean;
+  /** Returns `false` when the resend was refused, keeping the editor open. */
+  onSave: (text: string) => boolean;
+  onCancel: () => void;
+};
+
+/** Edits a sent message in place; saving resends it. */
+const MessageEditor = ({
+  text,
+  busy,
+  onSave,
+  onCancel,
+}: MessageEditorProps) => {
+  const [draft, setDraft] = useState(text);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const id = useId();
+  const changed = draft.trim();
+  const savable = changed !== "" && !busy;
+
+  useLayoutEffect(() => {
+    textarea.current?.focus();
+  }, []);
+
+  const save = () => {
+    if (savable && onSave(changed)) {
+      onCancel();
+    }
+  };
+
+  const onSubmit = (event: SubmitEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    save();
+  };
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    const isComposing = event.nativeEvent.isComposing;
+    if (event.key === "Escape" && !isComposing) {
+      // The chat view's Esc would also stop a streaming reply.
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+    } else if (
+      sendsMessage({ key: event.key, shiftKey: event.shiftKey, isComposing })
+    ) {
+      event.preventDefault();
+      save();
+    }
+  };
+
+  return (
+    <form
+      onSubmit={onSubmit}
+      className="flex w-full max-w-[80%] flex-col gap-2"
+    >
+      <label htmlFor={`${id}-text`} className="sr-only">
+        Edit message
+      </label>
+      <textarea
+        id={`${id}-text`}
+        ref={textarea}
+        value={draft}
+        onChange={(event) => {
+          setDraft(event.target.value);
+        }}
+        onKeyDown={onKeyDown}
+        rows={3}
+        aria-describedby={`${id}-note`}
+        className="w-full resize-y rounded-2xl border border-zinc-300 bg-white px-4 py-2 text-sm outline-none focus:ring-2 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+      />
+      <div className="flex items-center justify-end gap-2">
+        <span
+          id={`${id}-note`}
+          className="mr-auto text-xs text-zinc-500 dark:text-zinc-400"
+        >
+          Later messages are removed
+        </span>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-full border border-zinc-300 px-3 py-1 text-sm hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+        >
+          Cancel
+        </button>
+        <button
+          type="submit"
+          disabled={!savable}
+          className="rounded-full bg-zinc-900 px-3 py-1 text-sm text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"
+        >
+          Save & resend
+        </button>
+      </div>
+    </form>
+  );
+};
+
+type MessageItemProps = {
+  message: UiMessage;
+  /** A reply streams or no model is picked: nothing can be resent. */
+  busy: boolean;
+  /** The last message, so its reply can be regenerated. */
+  last: boolean;
+  onRegenerate: () => void;
+  onEdit: (messageId: string, text: string) => boolean;
+};
+
 /**
  * One message. Memoized: the reducer keeps unchanged messages as the same
- * objects, so only the streaming one re-renders per token.
+ * objects and the callbacks are stable, so only the streaming one
+ * re-renders per token.
  */
-const MessageItem = memo(({ message }: { message: UiMessage }) => {
-  const note = STATUS_NOTE[message.status];
-  const user = message.role === "user";
-  // No copy button until there is an answer to copy; thinking is not copied.
-  const waiting = message.status === "streaming" && message.content === "";
-  return (
-    <li
-      className={`group flex flex-col ${user ? "items-end" : "items-stretch"}`}
-    >
-      <div
-        className={
-          user
-            ? "max-w-[80%] rounded-2xl bg-zinc-200 px-4 py-2 text-sm whitespace-pre-wrap dark:bg-zinc-800"
-            : "text-sm"
-        }
+const MessageItem = memo(
+  ({ message, busy, last, onRegenerate, onEdit }: MessageItemProps) => {
+    const [editing, setEditing] = useState(false);
+    const note = STATUS_NOTE[message.status];
+    const user = message.role === "user";
+    // No copy button until there is an answer to copy; thinking is not
+    // copied.
+    const waiting = message.status === "streaming" && message.content === "";
+    // A failed prompt was never saved, so there is nothing to replace.
+    const editable = user && message.status !== "error";
+    if (editing) {
+      return (
+        <li className="flex flex-col items-end">
+          <MessageEditor
+            text={message.content}
+            busy={busy}
+            onSave={(text) => onEdit(message.id, text)}
+            onCancel={() => {
+              setEditing(false);
+            }}
+          />
+        </li>
+      );
+    }
+    return (
+      <li
+        className={`group flex flex-col ${user ? "items-end" : "items-stretch"}`}
       >
-        <span className="sr-only">{user ? "You: " : "Assistant: "}</span>
-        {user ? message.content : <AssistantReply message={message} />}
-      </div>
-      {note !== "" && (
-        <span className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
-          {note}
-        </span>
-      )}
-      {!waiting && (
-        <div className="mt-1 flex opacity-0 group-hover:opacity-100 focus-within:opacity-100">
-          <CopyMessage text={message.content} />
+        <div
+          className={
+            user
+              ? "max-w-[80%] rounded-2xl bg-zinc-200 px-4 py-2 text-sm whitespace-pre-wrap dark:bg-zinc-800"
+              : "text-sm"
+          }
+        >
+          <span className="sr-only">{user ? "You: " : "Assistant: "}</span>
+          {user ? message.content : <AssistantReply message={message} />}
         </div>
-      )}
-    </li>
-  );
-});
+        {note !== "" && (
+          <span className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+            {note}
+          </span>
+        )}
+        {!waiting && (
+          <div className="mt-1 flex opacity-0 group-hover:opacity-100 focus-within:opacity-100">
+            <CopyMessage text={message.content} />
+            {editable && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setEditing(true);
+                }}
+                aria-label="Edit message"
+                title="Edit message"
+                className={actionButton}
+              >
+                <Pencil aria-hidden="true" className="size-4" />
+              </button>
+            )}
+            {last && !user && (
+              <button
+                type="button"
+                disabled={busy}
+                onClick={onRegenerate}
+                aria-label="Regenerate reply"
+                title="Regenerate reply"
+                className={actionButton}
+              >
+                <RefreshCw aria-hidden="true" className="size-4" />
+              </button>
+            )}
+          </div>
+        )}
+      </li>
+    );
+  }
+);
 MessageItem.displayName = "MessageItem";
 
-const MessageList = ({ messages }: { messages: UiMessage[] }) => {
+type MessageListProps = {
+  messages: UiMessage[];
+  busy: boolean;
+  onRegenerate: () => void;
+  /** Returns `false` when the resend was refused. */
+  onEdit: (messageId: string, text: string) => boolean;
+};
+
+const MessageList = ({
+  messages,
+  busy,
+  onRegenerate,
+  onEdit,
+}: MessageListProps) => {
+  // The handlers change every render; the items get stable wrappers that
+  // call the latest ones, so a token does not re-render every message.
+  const handlers = useRef({ onRegenerate, onEdit });
+  useLayoutEffect(() => {
+    handlers.current = { onRegenerate, onEdit };
+  });
+  const regenerate = useCallback(() => {
+    handlers.current.onRegenerate();
+  }, []);
+  const edit = useCallback(
+    (messageId: string, text: string) =>
+      handlers.current.onEdit(messageId, text),
+    []
+  );
   if (messages.length === 0) {
     return null;
   }
   return (
     <ol aria-label="Messages" className="flex flex-col gap-4">
-      {messages.map((message) => (
-        <MessageItem key={message.id} message={message} />
+      {messages.map((message, index) => (
+        <MessageItem
+          key={message.id}
+          message={message}
+          busy={busy}
+          last={index === messages.length - 1}
+          onRegenerate={regenerate}
+          onEdit={edit}
+        />
       ))}
     </ol>
   );

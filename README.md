@@ -147,8 +147,9 @@ change the port or pick another loopback address.
 | Shift+Enter | New line                       |
 | Esc         | Stop the reply being generated |
 
-Esc works wherever focus is in the chat, except in the sidebar's rename field, where it
-cancels the rename.
+Esc works wherever focus is in the chat, except in the sidebar's rename field and in a
+message being edited, where it cancels the rename or the edit. In the message editor,
+Enter saves and resends.
 
 ### Building an installer
 

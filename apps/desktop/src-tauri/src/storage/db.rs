@@ -5,7 +5,7 @@ use std::path::Path;
 use rusqlite::{Connection, ErrorCode};
 use zeroize::Zeroizing;
 
-use super::migrations;
+use super::{messages, migrations};
 use crate::error::AppError;
 
 /// Opens (or creates) the database with a raw 256-bit key, migrates it, and
@@ -32,11 +32,28 @@ pub fn open(path: &Path, hex_key: &str) -> Result<Connection, AppError> {
     conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get::<_, String>(0))?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
     migrations::apply(&mut conn)?;
-    conn.execute(
+    recover_pending(&mut conn)?;
+    Ok(conn)
+}
+
+/// A reply the last run left `pending` failed: a regenerate or edit is
+/// undone, as if it had failed while running, and any other reply becomes
+/// `error`.
+fn recover_pending(conn: &mut Connection) -> Result<(), AppError> {
+    let tx = conn.transaction()?;
+    let pending: Vec<String> = tx
+        .prepare("SELECT id FROM messages WHERE status = 'pending'")?
+        .query_map([], |row| row.get(0))?
+        .collect::<Result<_, _>>()?;
+    for id in &pending {
+        messages::restore_superseded(&tx, id)?;
+    }
+    tx.execute(
         "UPDATE messages SET status = 'error' WHERE status = 'pending'",
         [],
     )?;
-    Ok(conn)
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -52,7 +69,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -157,7 +174,8 @@ mod tests {
         let conn = open(&path, &key).unwrap();
         // Back to what the first release wrote.
         conn.execute_batch(
-            "ALTER TABLE messages DROP COLUMN thinking;
+            "ALTER TABLE messages DROP COLUMN superseded_by;
+             ALTER TABLE messages DROP COLUMN thinking;
              ALTER TABLE messages DROP COLUMN thinking_ms;
              PRAGMA user_version = 1;
              INSERT INTO conversations VALUES ('c', 't', 'm', 'x', 'x');

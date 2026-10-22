@@ -1,8 +1,8 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
+import type { UiMessage } from "./chat-reducer";
 import { MessageList, STREAM_MARKDOWN_MAX_CHARS } from "./message-list";
-import type { UiMessage } from "./use-chat-stream";
 
 const message = (
   role: UiMessage["role"],
@@ -10,8 +10,18 @@ const message = (
   status: UiMessage["status"] = "complete"
 ): UiMessage => ({ id: `${role}-${content}`, role, content, status });
 
-const render = (messages: UiMessage[]): string =>
-  renderToString(<MessageList messages={messages} />);
+const render = (messages: UiMessage[], busy = false): string =>
+  renderToString(
+    <MessageList
+      messages={messages}
+      busy={busy}
+      onRegenerate={() => undefined}
+      onEdit={() => true}
+    />
+  );
+
+const count = (html: string, text: string): number =>
+  html.split(text).length - 1;
 
 describe("MessageList", () => {
   it("renders nothing without messages", () => {
@@ -77,6 +87,43 @@ describe("MessageList", () => {
     expect(render([message("assistant", long)])).toContain(
       "<strong>bold</strong>"
     );
+  });
+
+  it("offers Regenerate on the last reply only", () => {
+    const html = render([
+      message("user", "One"),
+      message("assistant", "First"),
+      message("user", "Two"),
+      message("assistant", "Second"),
+    ]);
+    expect(count(html, 'aria-label="Regenerate reply"')).toBe(1);
+    expect(html.indexOf("Regenerate reply")).toBeGreaterThan(
+      html.indexOf("Second")
+    );
+    expect(
+      render([message("assistant", "Hi"), message("user", "Q", "error")])
+    ).not.toContain("Regenerate reply");
+  });
+
+  it("offers Edit on saved prompts, not on failed ones", () => {
+    const html = render([
+      message("user", "Saved"),
+      message("assistant", "Reply"),
+      message("user", "Unsaved", "error"),
+    ]);
+    expect(count(html, 'aria-label="Edit message"')).toBe(1);
+  });
+
+  it("disables Regenerate and Edit while busy", () => {
+    const html = render(
+      [message("user", "One"), message("assistant", "Reply")],
+      true
+    );
+    expect(html).toMatch(/disabled=""[^>]*aria-label="Edit message"/);
+    expect(html).toMatch(/disabled=""[^>]*aria-label="Regenerate reply"/);
+    expect(
+      render([message("user", "One"), message("assistant", "Reply")])
+    ).not.toContain('disabled=""');
   });
 
   it("does not highlight code in a streaming reply", () => {

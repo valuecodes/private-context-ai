@@ -8,11 +8,14 @@ use tauri::State;
 use tauri::ipc::Channel;
 use uuid::Uuid;
 
-use crate::commands::ollama::{Shared, finish_turn, recording_sink};
+use crate::commands::ollama::{
+    SendRequest, SendStarted, Shared, channel_sink, check_prompt, finish_turn, recording_sink,
+};
 use crate::error::AppError;
+use crate::ollama::Ollama;
 use crate::ollama::types::{ChatEvent, Think, validate_model};
-use crate::ollama::{ChatThink, Ollama};
 use crate::redacted::Redacted;
+use crate::storage::messages::TurnInput;
 use crate::temporary::{MemoryRecorder, TempChats};
 
 /// Starts an empty temporary chat and returns its session id.
@@ -31,16 +34,72 @@ pub async fn temp_chat_send(
     prompt: Redacted,
     think: Option<Think>,
     on_event: Channel<ChatEvent>,
-) -> Result<Uuid, AppError> {
+) -> Result<SendStarted, AppError> {
     let think = ollama.chat_think(&model, think).await?;
     send_temp_turn(
         &ollama,
         &chats,
-        session_id,
-        &model,
-        &prompt,
-        think,
-        move |event| on_event.send(event).is_ok(),
+        SendRequest {
+            conversation_id: session_id,
+            model,
+            input: TurnInput::New(prompt),
+            options: None,
+            think,
+        },
+        channel_sink(on_event),
+    )
+}
+
+/// Like `chat_regenerate`, for a temporary chat.
+#[tauri::command]
+pub async fn temp_chat_regenerate(
+    ollama: State<'_, Arc<Ollama>>,
+    chats: State<'_, Arc<TempChats>>,
+    session_id: Uuid,
+    model: String,
+    think: Option<Think>,
+    on_event: Channel<ChatEvent>,
+) -> Result<SendStarted, AppError> {
+    let think = ollama.chat_think(&model, think).await?;
+    send_temp_turn(
+        &ollama,
+        &chats,
+        SendRequest {
+            conversation_id: session_id,
+            model,
+            input: TurnInput::Regenerate,
+            options: None,
+            think,
+        },
+        channel_sink(on_event),
+    )
+}
+
+/// Like `chat_edit`, for a temporary chat.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn temp_chat_edit(
+    ollama: State<'_, Arc<Ollama>>,
+    chats: State<'_, Arc<TempChats>>,
+    session_id: Uuid,
+    message_id: Uuid,
+    model: String,
+    prompt: Redacted,
+    think: Option<Think>,
+    on_event: Channel<ChatEvent>,
+) -> Result<SendStarted, AppError> {
+    let think = ollama.chat_think(&model, think).await?;
+    send_temp_turn(
+        &ollama,
+        &chats,
+        SendRequest {
+            conversation_id: session_id,
+            model,
+            input: TurnInput::Edit { message_id, prompt },
+            options: None,
+            think,
+        },
+        channel_sink(on_event),
     )
 }
 
@@ -63,40 +122,69 @@ pub async fn discard(ollama: &Ollama, chats: &TempChats, session_id: Uuid) {
     }
 }
 
-/// The body of `temp_chat_send`, without Tauri. The slot is taken before the
-/// session is read, so a discard either lands first (`NotFound`) or finds the
-/// slot and cancels it. Nothing changes when the history is refused, and the
-/// prompt is taken back when the request does not start.
+/// The body of the temporary send commands, without Tauri; `conversation_id`
+/// is the session id. The slot is taken before the session is read, so a
+/// discard either lands first (`NotFound`) or finds the slot and cancels it.
+/// Nothing changes when the history is refused, and a request that does not
+/// start is taken back.
 pub fn send_temp_turn<S>(
     ollama: &Arc<Ollama>,
     chats: &Arc<TempChats>,
-    session_id: Uuid,
-    model: &str,
-    prompt: &Redacted,
-    think: ChatThink,
+    request: SendRequest,
     send: S,
-) -> Result<Uuid, AppError>
+) -> Result<SendStarted, AppError>
 where
     S: Fn(ChatEvent) -> bool + Send + Sync + 'static,
 {
-    if prompt.expose().trim().is_empty() {
-        return Err(AppError::InvalidInput("the message is empty".into()));
+    let SendRequest {
+        conversation_id: session_id,
+        model,
+        input,
+        options,
+        think,
+    } = request;
+    check_prompt(&input)?;
+    validate_model(&model)?;
+    if let Some(options) = &options {
+        options.validate()?;
     }
-    validate_model(model)?;
     let admission = ollama.admit(session_id)?;
     ollama.check_connection(think.connection)?;
-    let history = chats.begin(session_id, prompt, |history| {
-        ollama.validate(model, history, None)
+    let (user_id, history) = chats.begin(session_id, &input, |history| {
+        ollama.validate(&model, history, options.as_ref())
     })?;
 
-    let recorder: Shared<MemoryRecorder> =
-        Arc::new(Mutex::new(MemoryRecorder::new(chats, session_id)));
+    let assistant_id = Uuid::new_v4();
+    let revision = !matches!(input, TurnInput::New(_));
+    let recorder: Shared<MemoryRecorder> = Arc::new(Mutex::new(MemoryRecorder::new(
+        chats,
+        session_id,
+        assistant_id,
+        revision,
+    )));
     let sink = recording_sink(Arc::clone(&recorder), send);
-    ollama
-        .start(admission, model, &history, None, think, sink, move |end| {
-            finish_turn(&recorder, end);
-        })
-        .inspect_err(|_| chats.rollback(session_id))
+    let request_id = ollama
+        .start(
+            admission,
+            &model,
+            &history,
+            options.as_ref(),
+            think,
+            sink,
+            move |end| finish_turn(&recorder, end),
+        )
+        .inspect_err(|_| {
+            // A regenerate or edit was already undone by its recorder,
+            // which `start` ends on every path.
+            if !revision {
+                chats.rollback(session_id);
+            }
+        })?;
+    Ok(SendStarted {
+        request_id,
+        user_message_id: user_id,
+        assistant_message_id: assistant_id,
+    })
 }
 
 #[cfg(test)]
@@ -106,20 +194,37 @@ mod tests {
     use crate::commands::testing::{no_think, silent_ollama, silent_ollama_with};
     use crate::storage::testing::{count_rows, temp_storage};
 
+    fn send_input(
+        ollama: &Arc<Ollama>,
+        chats: &Arc<TempChats>,
+        session: Uuid,
+        input: TurnInput,
+    ) -> Result<SendStarted, AppError> {
+        send_temp_turn(
+            ollama,
+            chats,
+            SendRequest {
+                conversation_id: session,
+                model: "llama3.2".into(),
+                input,
+                options: None,
+                think: no_think(ollama),
+            },
+            |_| true,
+        )
+    }
+
     fn send(
         ollama: &Arc<Ollama>,
         chats: &Arc<TempChats>,
         session: Uuid,
         prompt: &str,
-    ) -> Result<Uuid, AppError> {
-        send_temp_turn(
+    ) -> Result<SendStarted, AppError> {
+        send_input(
             ollama,
             chats,
             session,
-            "llama3.2",
-            &Redacted::new(prompt),
-            no_think(ollama),
-            |_| true,
+            TurnInput::New(Redacted::new(prompt)),
         )
     }
 
@@ -183,6 +288,31 @@ mod tests {
         assert!(matches!(err, AppError::StorageUnavailable(_)));
         assert!(prompts(&chats, session).is_empty());
         assert_eq!(ollama.inflight_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_start_restores_revision() {
+        let (ollama, _listener) = silent_ollama().await;
+        let chats = Arc::new(TempChats::default());
+        let session = chats.start().unwrap();
+        // Two prompts whose replies failed: the session holds only the
+        // prompts.
+        let first = send(&ollama, &chats, session, "One").unwrap();
+        ollama.cancel_conversation(session).await;
+        send(&ollama, &chats, session, "Two").unwrap();
+        ollama.cancel_conversation(session).await;
+        let audit = Arc::new(Audit::new());
+        audit.close();
+        let (closed, _listener) = silent_ollama_with(audit).await;
+
+        let edit = TurnInput::Edit {
+            message_id: first.user_message_id,
+            prompt: Redacted::new("Changed"),
+        };
+        for input in [TurnInput::Regenerate, edit] {
+            assert!(send_input(&closed, &chats, session, input).is_err());
+            assert_eq!(prompts(&chats, session), ["One", "Two"]);
+        }
     }
 
     #[tokio::test]

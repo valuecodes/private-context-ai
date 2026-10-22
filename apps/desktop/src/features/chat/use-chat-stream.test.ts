@@ -2,14 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatEvent, StoredMessage } from "~/lib/types";
 
-import { titleFromPrompt } from "./send-request";
-import type { ChatState } from "./use-chat-stream";
+import type { ChatState } from "./chat-reducer";
 import {
   chatReducer,
   createChatState,
   fromStored,
   replyAnnouncement,
-} from "./use-chat-stream";
+} from "./chat-reducer";
+import { titleFromPrompt } from "./send-request";
 
 vi.mock("~/lib/ipc");
 
@@ -41,6 +41,14 @@ const event = (
 ): ChatState =>
   chatReducer(state, { type: "event", streamId, event: chatEvent, at: 0 });
 
+/** Rust admitted stream `s1` as request `r1` with rows `u1` and `a1`. */
+const started = (state: ChatState): ChatState =>
+  chatReducer(state, {
+    type: "started",
+    streamId: "s1",
+    started: { requestId: "r1", userMessageId: "u1", assistantMessageId: "a1" },
+  });
+
 const done = (doneReason: string | null = "stop"): ChatEvent => ({
   type: "done",
   promptTokens: 1,
@@ -62,6 +70,7 @@ describe("chatReducer", () => {
         role: "assistant",
         content: "",
         status: "streaming",
+        live: true,
       },
     ]);
   });
@@ -161,11 +170,6 @@ describe("chatReducer", () => {
     state = event(state, { type: "token", content: "late" }, "s1");
     state = event(state, done(), "s1");
     state = chatReducer(state, {
-      type: "started",
-      streamId: "s1",
-      requestId: "r1",
-    });
-    state = chatReducer(state, {
       type: "failed",
       streamId: "s1",
       error: { kind: "busy", message: "x" },
@@ -175,11 +179,7 @@ describe("chatReducer", () => {
   });
 
   it("records the request id of the current stream", () => {
-    const state = chatReducer(sent(), {
-      type: "started",
-      streamId: "s1",
-      requestId: "r1",
-    });
+    const state = started(sent());
     expect(state.requestId).toBe("r1");
   });
 });

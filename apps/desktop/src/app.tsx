@@ -4,13 +4,11 @@ import { useEffect, useState } from "react";
 
 import { loadVersion } from "~/app-version";
 import { ActivityPanel } from "~/features/activity/activity-panel";
+import { replyAnnouncement } from "~/features/chat/chat-reducer";
 import { ChatView } from "~/features/chat/chat-view";
 import { THINK_OFF } from "~/features/chat/think-choice";
 import type { ThinkChoice } from "~/features/chat/think-choice";
-import {
-  replyAnnouncement,
-  useChatStream,
-} from "~/features/chat/use-chat-stream";
+import { useChatStream } from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
 import { SettingsView } from "~/features/settings/settings-view";
@@ -147,6 +145,8 @@ const Workspace = () => {
               reachable={isReachable(status)}
               state={chat.state}
               send={chat.send}
+              regenerate={chat.regenerate}
+              edit={chat.edit}
               stop={chat.stop}
               onTemporary={temporary}
               model={model}

@@ -1,9 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  chatEdit,
+  chatRegenerate,
   chatSend,
   conversationCreate,
   tempChatDiscard,
+  tempChatEdit,
+  tempChatRegenerate,
   tempChatSend,
   tempChatStart,
 } from "~/lib/ipc";
@@ -12,7 +16,19 @@ import { startRequest, tempSession } from "./send-request";
 
 vi.mock("~/lib/ipc");
 
-const request = { model: "m", prompt: "Hi", think: null };
+const request = {
+  model: "m",
+  think: null,
+  input: { kind: "send", prompt: "Hi" },
+} as const;
+
+const started = {
+  requestId: "r1",
+  userMessageId: "u1",
+  assistantMessageId: "a1",
+};
+
+const handlers = () => ({ onCreated: vi.fn(), onStarted: vi.fn() });
 
 const ignore = (): void => undefined;
 
@@ -21,33 +37,131 @@ const flush = () =>
     setTimeout(resolve, 0);
   });
 
+describe("regenerate and edit requests", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    for (const send of [
+      chatRegenerate,
+      chatEdit,
+      tempChatRegenerate,
+      tempChatEdit,
+    ]) {
+      vi.mocked(send).mockResolvedValue(started);
+    }
+  });
+
+  it("routes a saved chat's regenerate and edit", async () => {
+    const onEvent = vi.fn();
+    const saved = { kind: "saved", conversationId: "c1" } as const;
+    const callbacks = handlers();
+
+    expect(
+      await startRequest(
+        saved,
+        { model: "m", think: true, input: { kind: "regenerate" } },
+        onEvent,
+        callbacks
+      )
+    ).toEqual(started);
+    await startRequest(
+      saved,
+      {
+        model: "m",
+        think: null,
+        input: { kind: "edit", messageId: "u0", prompt: "Changed" },
+      },
+      onEvent,
+      callbacks
+    );
+
+    expect(chatRegenerate).toHaveBeenCalledWith(
+      { conversationId: "c1", model: "m", think: true },
+      onEvent
+    );
+    expect(chatEdit).toHaveBeenCalledWith(
+      {
+        conversationId: "c1",
+        messageId: "u0",
+        model: "m",
+        prompt: "Changed",
+        think: null,
+      },
+      onEvent
+    );
+    expect(chatSend).not.toHaveBeenCalled();
+    expect(callbacks.onStarted).toHaveBeenCalledWith("c1", "m");
+  });
+
+  it("routes a temporary chat's regenerate and edit", async () => {
+    const onEvent = vi.fn();
+    const temporary = {
+      kind: "temporary",
+      sessionId: Promise.resolve("t1"),
+    } as const;
+
+    await startRequest(
+      temporary,
+      { model: "m", think: null, input: { kind: "regenerate" } },
+      onEvent,
+      handlers()
+    );
+    await startRequest(
+      temporary,
+      {
+        model: "m",
+        think: null,
+        input: { kind: "edit", messageId: "u0", prompt: "Changed" },
+      },
+      onEvent,
+      handlers()
+    );
+
+    expect(tempChatRegenerate).toHaveBeenCalledWith(
+      { sessionId: "t1", model: "m", think: null },
+      onEvent
+    );
+    expect(tempChatEdit).toHaveBeenCalledWith(
+      {
+        sessionId: "t1",
+        messageId: "u0",
+        model: "m",
+        prompt: "Changed",
+        think: null,
+      },
+      onEvent
+    );
+    expect(chatRegenerate).not.toHaveBeenCalled();
+    expect(chatEdit).not.toHaveBeenCalled();
+  });
+});
+
 describe("temporary chat requests", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    vi.mocked(tempChatSend).mockResolvedValue("r1");
+    vi.mocked(tempChatSend).mockResolvedValue(started);
     vi.mocked(tempChatDiscard).mockResolvedValue();
   });
 
   it("sends through the session and never saves", async () => {
     const onEvent = vi.fn();
-    const handlers = { onCreated: vi.fn(), onStarted: vi.fn() };
+    const callbacks = handlers();
 
-    const requestId = await startRequest(
+    const result = await startRequest(
       { kind: "temporary", sessionId: Promise.resolve("t1") },
       request,
       onEvent,
-      handlers
+      callbacks
     );
 
-    expect(requestId).toBe("r1");
+    expect(result).toEqual(started);
     expect(tempChatSend).toHaveBeenCalledWith(
-      { sessionId: "t1", ...request },
+      { sessionId: "t1", model: "m", prompt: "Hi", think: null },
       onEvent
     );
     expect(conversationCreate).not.toHaveBeenCalled();
     expect(chatSend).not.toHaveBeenCalled();
-    expect(handlers.onCreated).not.toHaveBeenCalled();
-    expect(handlers.onStarted).not.toHaveBeenCalled();
+    expect(callbacks.onCreated).not.toHaveBeenCalled();
+    expect(callbacks.onStarted).not.toHaveBeenCalled();
   });
 
   it("starts one session and reuses it", async () => {
