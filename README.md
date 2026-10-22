@@ -57,7 +57,8 @@ What the app guarantees, and what enforces it:
   fetched), code highlighting is local JS, and nothing in a reply is executed.
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random
   32-byte key lives in the OS keychain and never reaches the webview. Without a working
-  keychain the app stores nothing.
+  keychain the app stores nothing. Temporary chats are kept only in process memory,
+  never written to disk; audit metadata is still recorded.
 - **Every request is recorded.** Each outbound request writes an `attempt` row to the
   encrypted audit log before its socket opens, then its outcome. If the log cannot be
   written, the request is refused. The Activity view shows these rows.
@@ -167,6 +168,10 @@ To check for CSP violations, build a debug bundle with
 it, and open its devtools console (right-click → Inspect).
 
 ## Where is my data
+
+A temporary chat (the Temporary button on an empty new chat) is never written here: it
+lives only in the app's memory and is gone once you leave it or quit. Its requests
+still show in Activity.
 
 Conversations live in one encrypted SQLite database (SQLCipher), `private-context.db`,
 in the app data folder. While the app runs, `private-context.db-wal` and

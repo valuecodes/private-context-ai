@@ -1,16 +1,16 @@
 import { useReducer, useRef } from "react";
 
+import { startRequest, tempSession } from "~/features/chat/send-request";
+import type {
+  ChatCallbacks,
+  SendTarget,
+  TempSession,
+} from "~/features/chat/send-request";
 import { toAppError } from "~/lib/app-error";
-import {
-  chatCancel,
-  chatSend,
-  conversationCreate,
-  conversationGet,
-} from "~/lib/ipc";
+import { chatCancel, conversationGet } from "~/lib/ipc";
 import type {
   AppError,
   ChatEvent,
-  Conversation,
   RequestId,
   StoredMessage,
   Think,
@@ -37,6 +37,8 @@ type ChatNotice = "busy" | "length";
 type ChatState = {
   /** The open conversation; `null` for a new chat the first send saves. */
   conversationId: string | null;
+  /** A temporary chat: kept in Rust's memory only, never saved. */
+  temporary: boolean;
   /** The saved messages are still loading; sending waits for them. */
   loading: boolean;
   messages: UiMessage[];
@@ -50,6 +52,7 @@ type ChatState = {
 
 type ChatAction =
   | { type: "open"; conversationId: string | null }
+  | { type: "openTemporary" }
   | { type: "loaded"; conversationId: string; messages: UiMessage[] }
   | { type: "loadFailed"; conversationId: string; error: AppError }
   | { type: "send"; streamId: string; text: string }
@@ -61,8 +64,12 @@ type ChatAction =
   | { type: "failed"; streamId: string; error: AppError }
   | { type: "deleted"; conversationId: string };
 
-const createChatState = (conversationId: string | null = null): ChatState => ({
+const createChatState = (
+  conversationId: string | null = null,
+  temporary = false
+): ChatState => ({
   conversationId,
+  temporary,
   loading: false,
   messages: [],
   phase: "idle",
@@ -129,24 +136,6 @@ const fromStored = (messages: StoredMessage[]): UiMessage[] =>
           },
         ];
   });
-
-const TITLE_CHARS = 60;
-
-/**
- * A title for a new conversation: the prompt's first non-empty line, cut to
- * 60 characters. `null` lets Rust use its default.
- */
-const titleFromPrompt = (prompt: string): string | null => {
-  const line = prompt
-    .split("\n")
-    .map((part) => part.replaceAll(/\p{Cc}/gu, " ").trim())
-    .find((part) => part !== "");
-  if (line === undefined) {
-    return null;
-  }
-  // Spread splits by code point, so a cut never halves an emoji.
-  return [...line].slice(0, TITLE_CHARS).join("").trim();
-};
 
 /** Ends the current stream, setting the assistant bubble's final status. */
 const finishStream = (
@@ -281,14 +270,18 @@ const failSend = (
 
 const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   if (action.type === "open") {
-    // Switching away would orphan the live reply's bubbles.
-    if (state.phase === "streaming") {
+    // Switching away would orphan the live reply's bubbles. A temporary chat
+    // is discarded instead, and Rust cancels its reply.
+    if (state.phase === "streaming" && !state.temporary) {
       return state;
     }
     return {
       ...createChatState(action.conversationId),
       loading: action.conversationId !== null,
     };
+  }
+  if (action.type === "openTemporary") {
+    return state.phase === "streaming" ? state : createChatState(null, true);
   }
   if (action.type === "loaded" || action.type === "loadFailed") {
     // A slower load for a conversation that is no longer open is stale.
@@ -334,15 +327,10 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
 
 const newStreamId = (): string => crypto.randomUUID();
 
-type ChatCallbacks = {
-  /** The first send of a new chat saved it as this conversation. */
-  onCreated: (conversation: Conversation) => void;
-  /** Rust admitted a send, so the conversation was just used with `model`. */
-  onStarted: (conversationId: string, model: string) => void;
-};
-
 const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const [state, dispatch] = useReducer(chatReducer, null, createChatState);
+  // One per chat view; `tempSession` itself starts nothing until a send.
+  const session = useRef<TempSession>(tempSession()).current;
   // The latest send: its request id once Rust admits it, `null` if refused.
   // Stop can then cancel even before `chatSend` has resolved.
   const pending = useRef<{
@@ -353,11 +341,15 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   // only once Rust has freed the slot, so the resend is not refused as busy.
   const cancelling = useRef<Promise<void>>(Promise.resolve());
 
-  /** Shows a saved conversation, or a new chat for `null`. */
+  /**
+   * Shows a saved conversation, or a new chat for `null`. Leaving a
+   * temporary chat discards it, even while it answers.
+   */
   const open = (conversationId: string | null) => {
-    if (state.phase === "streaming") {
+    if (state.phase === "streaming" && !state.temporary) {
       return;
     }
+    session.discard();
     dispatch({ type: "open", conversationId });
     if (conversationId === null) {
       return;
@@ -380,6 +372,15 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     );
   };
 
+  /** Starts an empty temporary chat; its session starts with the first send. */
+  const openTemporary = () => {
+    if (state.phase === "streaming") {
+      return;
+    }
+    session.discard();
+    dispatch({ type: "openTemporary" });
+  };
+
   /** Clears the view if the deleted conversation is still the open one. */
   const forget = (conversationId: string) => {
     dispatch({ type: "deleted", conversationId });
@@ -399,35 +400,34 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
       dispatch({ type: "event", streamId, event, at: Date.now() });
     };
     const saved = state.conversationId;
-    const conversationId: Promise<string> =
-      saved === null
-        ? conversationCreate(titleFromPrompt(text), model).then((created) => {
-            dispatch({ type: "created", streamId, conversationId: created.id });
-            onCreated(created);
-            return created.id;
-          })
-        : Promise.resolve(saved);
-    const requestId = cancelling.current
-      .then(() => conversationId)
-      .then((id) =>
-        chatSend(
-          { conversationId: id, model, prompt: text, think },
-          onEvent
-        ).then((request) => {
-          onStarted(id, model);
-          return request;
-        })
-      )
-      .then(
-        (id) => {
-          dispatch({ type: "started", streamId, requestId: id });
-          return id;
+    let target: SendTarget = { kind: "new" };
+    if (state.temporary) {
+      target = { kind: "temporary", sessionId: session.id() };
+    } else if (saved !== null) {
+      target = { kind: "saved", conversationId: saved };
+    }
+    const requestId = startRequest(
+      target,
+      { model, prompt: text, think },
+      onEvent,
+      {
+        onCreated: (created) => {
+          dispatch({ type: "created", streamId, conversationId: created.id });
+          onCreated(created);
         },
-        (error: unknown) => {
-          dispatch({ type: "failed", streamId, error: toAppError(error) });
-          return null;
-        }
-      );
+        onStarted,
+      },
+      cancelling.current
+    ).then(
+      (id) => {
+        dispatch({ type: "started", streamId, requestId: id });
+        return id;
+      },
+      (error: unknown) => {
+        dispatch({ type: "failed", streamId, error: toAppError(error) });
+        return null;
+      }
+    );
     pending.current = { streamId, requestId };
     return true;
   };
@@ -447,7 +447,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     dispatch({ type: "cancel" });
   };
 
-  return { state, open, forget, send, stop };
+  return { state, open, openTemporary, forget, send, stop };
 };
 
 export type { ChatState, UiMessage };
@@ -456,6 +456,5 @@ export {
   createChatState,
   fromStored,
   replyAnnouncement,
-  titleFromPrompt,
   useChatStream,
 };

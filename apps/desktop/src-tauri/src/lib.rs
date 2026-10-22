@@ -10,6 +10,7 @@ pub mod ollama;
 pub mod redacted;
 pub mod settings;
 pub mod storage;
+pub mod temporary;
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -25,6 +26,7 @@ use crate::ollama::client::resolve_base_url;
 use crate::settings::Settings;
 use crate::storage::StorageState;
 use crate::storage::key::KeychainKeySource;
+use crate::temporary::TempChats;
 
 /// What the `app_info` command returns; mirrored by `AppInfo` in
 /// `src/lib/types.ts`.
@@ -115,6 +117,7 @@ pub fn run() {
                 tracing::warn!(error = %err, "Ollama base URL rejected");
             }
             app.manage(Arc::new(Ollama::new(base_url, audit)));
+            app.manage(Arc::new(TempChats::default()));
 
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "app started");
             Ok(())
@@ -126,6 +129,9 @@ pub fn run() {
             commands::ollama::ollama_model_capabilities,
             commands::ollama::chat_send,
             commands::ollama::chat_cancel,
+            commands::temporary::temp_chat_start,
+            commands::temporary::temp_chat_send,
+            commands::temporary::temp_chat_discard,
             commands::conversations::storage_status,
             commands::conversations::conversation_create,
             commands::conversations::conversation_list,

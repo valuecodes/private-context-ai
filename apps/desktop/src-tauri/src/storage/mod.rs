@@ -183,6 +183,16 @@ pub mod testing {
             .pragma_update(None, "query_only", "ON")
             .unwrap();
     }
+
+    /// How many rows `table` holds.
+    pub fn count_rows(storage: &Storage, table: &str) -> i64 {
+        storage
+            .conn()
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
 }
 
 #[cfg(test)]

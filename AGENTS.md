@@ -120,8 +120,9 @@ discussion first.
   Replies are rendered as Markdown into React elements with raw HTML disabled
   (`skipHtml`, no `rehype-raw`, no `dangerouslySetInnerHTML`); links and images are
   inert (no `href`, nothing fetched) and code highlighting is local JS.
-- **Encrypted at rest.** All chat data lives in the SQLCipher database, only Rust opens
-  it, and its key never reaches the webview.
+- **Encrypted at rest.** All saved chat data lives in the SQLCipher database, only Rust
+  opens it, and its key never reaches the webview. Temporary chats live only in Rust
+  process memory (`temporary.rs`) and are never written to disk; their audit rows are.
 - **Observable.** Every outbound request writes an audit row before its socket opens.
   Logs hold metadata only; prompt and reply text stay in `Redacted`.
 - **One IPC seam.** Only `apps/desktop/src/lib/ipc.ts` imports `@tauri-apps/api`.

@@ -81,6 +81,38 @@ const chatSend = (
 const chatCancel = (requestId: RequestId): Promise<void> =>
   invoke<undefined>("chat_cancel", { requestId });
 
+/** A temporary chat kept only in Rust's memory; resolves with its id. */
+const tempChatStart = (): Promise<string> => invoke<string>("temp_chat_start");
+
+type TempChatSendArgs = {
+  sessionId: string;
+  model: string;
+  prompt: string;
+  think: Think | null;
+};
+
+/**
+ * Like `chatSend`, but nothing is saved: Rust builds the history from the
+ * temporary chat in memory.
+ */
+const tempChatSend = (
+  { sessionId, model, prompt, think }: TempChatSendArgs,
+  onEvent: (event: ChatEvent) => void
+): Promise<RequestId> => {
+  const channel = new Channel<ChatEvent>(onEvent);
+  return invoke<RequestId>("temp_chat_send", {
+    sessionId,
+    model,
+    prompt,
+    think,
+    onEvent: channel,
+  });
+};
+
+/** Forgets the temporary chat and cancels its reply, if one streams. */
+const tempChatDiscard = (sessionId: string): Promise<void> =>
+  invoke<undefined>("temp_chat_discard", { sessionId });
+
 /** Newest first; `before` is the id of the last row already shown. */
 const activityList = (
   limit: number,
@@ -114,4 +146,7 @@ export {
   settingsGet,
   settingsSet,
   storageStatus,
+  tempChatDiscard,
+  tempChatSend,
+  tempChatStart,
 };

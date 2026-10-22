@@ -76,9 +76,42 @@ pub async fn chat_cancel(ollama: State<'_, Arc<Ollama>>, request_id: Uuid) -> Re
     ollama.chat_cancel(request_id).await
 }
 
-type SharedRecorder = Arc<Mutex<TurnRecorder>>;
+/// Where a streamed reply is kept: the database for a saved chat
+/// ([`TurnRecorder`]), process memory for a temporary one.
+pub trait ReplyRecorder: Send + 'static {
+    fn push(&mut self, token: &Redacted) -> Result<(), AppError>;
+    fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError>;
+    fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError>;
+    fn finish(&mut self, status: MessageStatus) -> Result<(), AppError>;
+    fn ensure_saved(&self) -> Result<(), AppError>;
+}
 
-fn lock(recorder: &SharedRecorder) -> MutexGuard<'_, TurnRecorder> {
+impl ReplyRecorder for TurnRecorder {
+    fn push(&mut self, token: &Redacted) -> Result<(), AppError> {
+        Self::push(self, token)
+    }
+
+    fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError> {
+        Self::push_thinking(self, chunk)
+    }
+
+    fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError> {
+        Self::complete(self, stats)
+    }
+
+    fn finish(&mut self, status: MessageStatus) -> Result<(), AppError> {
+        Self::finish(self, status)
+    }
+
+    fn ensure_saved(&self) -> Result<(), AppError> {
+        Self::ensure_saved(self)
+    }
+}
+
+pub(crate) type Shared<R> = Arc<Mutex<R>>;
+type SharedRecorder = Shared<TurnRecorder>;
+
+fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
     recorder.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -141,11 +174,12 @@ where
 /// `database` error for the frontend and stops the stream; on `Done` that
 /// error replaces the `Done`, so the UI never shows an unsaved reply as
 /// complete.
-fn recording_sink<S>(
-    recorder: SharedRecorder,
+pub(crate) fn recording_sink<R, S>(
+    recorder: Shared<R>,
     send: S,
 ) -> impl Fn(ChatEvent) -> bool + Send + Sync + 'static
 where
+    R: ReplyRecorder,
     S: Fn(ChatEvent) -> bool + Send + Sync + 'static,
 {
     move |event| {
@@ -181,7 +215,7 @@ where
 
 /// Writes the final status. The sink has already saved a delivered `Done`,
 /// so this matters for cancel, failure, and a `Done` nobody received.
-fn finish_turn(recorder: &SharedRecorder, end: &ChatEnd) {
+pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd) {
     let mut recorder = lock(recorder);
     let result = match end {
         ChatEnd::Done {
@@ -229,10 +263,8 @@ fn spawn_ticker(recorder: SharedRecorder, every: Duration, stop: CancellationTok
 
 #[cfg(test)]
 mod tests {
-    use tokio::net::TcpListener;
-
     use super::*;
-    use crate::audit::Audit;
+    use crate::commands::testing::{no_think, silent_ollama};
     use crate::ollama::client::OllamaBaseUrl;
     use crate::storage::messages::StoredMessage;
     use crate::storage::testing::{break_writes, temp_storage};
@@ -443,22 +475,6 @@ mod tests {
         }
         stop.cancel();
         assert_eq!(saved, "Hi");
-    }
-
-    /// Accepts connections but never answers, so a request stays in flight.
-    async fn silent_ollama() -> (Arc<Ollama>, TcpListener) {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = OllamaBaseUrl::parse(&format!("http://{}", listener.local_addr().unwrap()));
-        let ollama = Arc::new(Ollama::new(base, Arc::new(Audit::new())));
-        (ollama, listener)
-    }
-
-    /// What `chat_think` gives a model that cannot think.
-    fn no_think(ollama: &Ollama) -> ChatThink {
-        ChatThink {
-            think: None,
-            connection: ollama.connection_id(),
-        }
     }
 
     fn send(
