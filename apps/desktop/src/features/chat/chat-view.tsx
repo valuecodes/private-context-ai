@@ -1,3 +1,4 @@
+import { Ghost } from "lucide-react";
 import type { Dispatch, SetStateAction, UIEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
@@ -49,6 +50,8 @@ type ChatViewProps = {
   state: ChatState;
   send: (model: string, text: string, think: Think | null) => boolean;
   stop: () => void;
+  /** Turns an empty new chat into a temporary one, or back. */
+  onTemporary: (on: boolean) => void;
   /** Owned by the parent, so opening a conversation can pick its model. */
   model: string;
   setModel: Dispatch<SetStateAction<string>>;
@@ -64,6 +67,7 @@ const ChatView = ({
   state,
   send,
   stop,
+  onTemporary,
   model,
   setModel,
   defaultModel,
@@ -138,6 +142,12 @@ const ChatView = ({
   // An opened conversation may name a model that is no longer installed.
   const selected = pickModel(modelList, model, defaultModel);
   const streaming = state.phase === "streaming";
+  // Only an empty new chat can switch: a started chat is saved or not.
+  const canToggleTemporary =
+    state.conversationId === null &&
+    state.messages.length === 0 &&
+    !streaming &&
+    !state.loading;
   const selectedCaps: ModelCapabilities | undefined = capabilities[selected];
   const known = selectedCaps !== undefined;
 
@@ -224,7 +234,26 @@ const ChatView = ({
             </button>
           </>
         )}
+        <button
+          type="button"
+          aria-pressed={state.temporary}
+          disabled={!canToggleTemporary}
+          title="A temporary chat is never saved and is cleared when you leave"
+          onClick={() => {
+            onTemporary(!state.temporary);
+          }}
+          className={`ml-auto flex items-center gap-1 rounded border px-2 py-0.5 text-sm disabled:cursor-not-allowed disabled:opacity-40 ${state.temporary ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900" : "border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"}`}
+        >
+          <Ghost aria-hidden="true" className="size-4" />
+          Temporary
+        </button>
       </div>
+      {state.temporary && (
+        <p className="flex items-center justify-center gap-2 rounded border border-dashed border-zinc-300 px-3 py-1.5 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-300">
+          <Ghost aria-hidden="true" className="size-4" />
+          Temporary chat — not saved, cleared when you leave
+        </p>
+      )}
       {/* Only this slot switches between the empty state and the messages,
           so the composer below stays mounted and keeps its focus on the
           first send. WebView2 makes an overflowing scroller
@@ -270,6 +299,7 @@ const ChatView = ({
             send(selected, text, thinkToSend(selectedCaps, think))
           }
           onStop={stop}
+          temporary={state.temporary}
         />
       </div>
     </div>

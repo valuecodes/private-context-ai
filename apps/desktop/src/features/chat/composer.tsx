@@ -11,12 +11,20 @@ type ComposerProps = {
   /** Returns `false` when the send was refused, keeping the draft. */
   onSend: (text: string) => boolean;
   onStop: () => void;
+  /** A temporary chat: drawn with a dashed border. */
+  temporary?: boolean;
 };
 
 const button =
   "flex size-9 shrink-0 items-center justify-center rounded-full text-white";
 
-const Composer = ({ streaming, canSend, onSend, onStop }: ComposerProps) => {
+const Composer = ({
+  streaming,
+  canSend,
+  onSend,
+  onStop,
+  temporary = false,
+}: ComposerProps) => {
   const [draft, setDraft] = useState("");
   const textarea = useRef<HTMLTextAreaElement>(null);
   const text = draft.trim();
@@ -62,7 +70,7 @@ const Composer = ({ streaming, canSend, onSend, onStop }: ComposerProps) => {
   return (
     <form
       onSubmit={onSubmit}
-      className="flex items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-2 pl-4 has-[textarea:focus]:ring-2 has-[textarea:focus]:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900"
+      className={`flex items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-2 pl-4 has-[textarea:focus]:ring-2 has-[textarea:focus]:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 ${temporary ? "border-dashed" : ""}`}
     >
       <label htmlFor="composer" className="sr-only">
         Message

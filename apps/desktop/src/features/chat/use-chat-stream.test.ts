@@ -2,13 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatEvent, StoredMessage } from "~/lib/types";
 
+import { titleFromPrompt } from "./send-request";
 import type { ChatState } from "./use-chat-stream";
 import {
   chatReducer,
   createChatState,
   fromStored,
   replyAnnouncement,
-  titleFromPrompt,
 } from "./use-chat-stream";
 
 vi.mock("~/lib/ipc");

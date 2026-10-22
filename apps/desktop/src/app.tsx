@@ -45,7 +45,8 @@ const Workspace = () => {
     onCreated: conversations.created,
     onStarted: conversations.touched,
   });
-  const streaming = chat.state.phase === "streaming";
+  // A temporary chat can be left while it answers; leaving discards it.
+  const locked = chat.state.phase === "streaming" && !chat.state.temporary;
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +70,7 @@ const Workspace = () => {
   }, []);
 
   const open = (id: string | null) => {
-    if (streaming) {
+    if (locked) {
       return;
     }
     setView("chat");
@@ -80,6 +81,16 @@ const Workspace = () => {
     );
     if (saved !== undefined && saved.model !== "") {
       setModel(saved.model);
+    }
+  };
+
+  const temporary = (on: boolean) => {
+    // Never selected in the sidebar: a temporary chat is not listed there.
+    conversations.select(null);
+    if (on) {
+      chat.openTemporary();
+    } else {
+      chat.open(null);
     }
   };
 
@@ -95,7 +106,7 @@ const Workspace = () => {
     <div className="flex h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <Sidebar
         state={conversations.state}
-        disabled={streaming}
+        disabled={locked}
         version={version}
         onNew={() => {
           open(null);
@@ -137,6 +148,7 @@ const Workspace = () => {
               state={chat.state}
               send={chat.send}
               stop={chat.stop}
+              onTemporary={temporary}
               model={model}
               setModel={setModel}
               defaultModel={defaultModel}
