@@ -143,8 +143,11 @@ const useConversations = () => {
     conversationsReducer,
     initialConversations
   );
-  /** Markdown fetched on hover, by conversation id. */
-  const prepared = useRef(new Map<string, string>());
+  /**
+   * Markdown fetched on hover, by conversation id. Each fetch fills its own
+   * entry, so one that lands after a copy took the entry fills nothing.
+   */
+  const prepared = useRef(new Map<string, { markdown?: string }>());
 
   useEffect(() => {
     let cancelled = false;
@@ -209,20 +212,20 @@ const useConversations = () => {
    * click, which fetches again and reports it.
    */
   const prepareMarkdown = (id: string) => {
+    const entry: { markdown?: string } = {};
+    prepared.current.set(id, entry);
     void conversationMarkdown(id).then(
       (markdown) => {
-        prepared.current.set(id, markdown);
+        entry.markdown = markdown;
       },
-      () => {
-        prepared.current.delete(id);
-      }
+      () => undefined
     );
   };
 
   /** Resolves `false` when nothing was copied; the error says why. */
   const copyMarkdown = (id: string): Promise<boolean> => {
     // Used once, so the next hover fetches the conversation as it is then.
-    const markdown = prepared.current.get(id);
+    const markdown = prepared.current.get(id)?.markdown;
     prepared.current.delete(id);
     return copyConversationMarkdown(id, markdown).then((error) => {
       if (error !== null) {

@@ -223,7 +223,8 @@ const Sidebar = ({
     mode: ItemMode;
   } | null>(null);
   const [query, setQuery] = useState("");
-  const matches = useConversationSearch(query, state.conversations);
+  // `disabled` is true exactly while a saved chat's reply streams.
+  const matches = useConversationSearch(query, state.conversations, disabled);
   const shown = filterConversations(state.conversations, query, matches);
 
   const modeOf = (id: string): ItemMode =>
