@@ -112,6 +112,9 @@ describe("MessageList", () => {
       message("user", "Unsaved", "error"),
     ]);
     expect(count(html, 'aria-label="Edit message"')).toBe(1);
+    // Sent here, but Rust's id has not arrived yet.
+    const local: UiMessage = { ...message("user", "New"), local: true };
+    expect(render([local])).not.toContain("Edit message");
   });
 
   it("disables Regenerate and Edit while busy", () => {

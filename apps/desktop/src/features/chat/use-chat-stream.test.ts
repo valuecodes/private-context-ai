@@ -64,7 +64,13 @@ describe("chatReducer", () => {
     expect(state.phase).toBe("streaming");
     expect(state.streamId).toBe("s1");
     expect(state.messages).toEqual([
-      { id: "s1:user", role: "user", content: "Hi", status: "complete" },
+      {
+        id: "s1:user",
+        role: "user",
+        content: "Hi",
+        status: "complete",
+        local: true,
+      },
       {
         id: "s1:assistant",
         role: "assistant",
@@ -142,7 +148,13 @@ describe("chatReducer", () => {
     expect(state.notice).toBe("busy");
     expect(state.error).toBeNull();
     expect(state.messages).toEqual([
-      { id: "s1:user", role: "user", content: "Hi", status: "error" },
+      {
+        id: "s1:user",
+        role: "user",
+        content: "Hi",
+        status: "error",
+        local: true,
+      },
     ]);
   });
 

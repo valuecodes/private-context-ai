@@ -91,8 +91,10 @@ const contents = (state: ChatState): string[] =>
 describe("Rust's message ids", () => {
   it("replace the local ids, and the reply keeps streaming", () => {
     let state = event(sent(), { type: "token", content: "Hel" });
+    expect(state.messages[0]?.local).toBe(true);
     state = started(state);
     expect(ids(state)).toEqual(["n1", "n2"]);
+    expect(state.messages[0]?.local).toBeUndefined();
     expect(state.requestId).toBe("r1");
     state = event(state, { type: "token", content: "lo" });
     state = event(state, done);
