@@ -3,13 +3,13 @@ import type { Dispatch, SetStateAction, UIEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
 import { stopsReply } from "~/features/chat/chat-keys";
+import type { ChatState } from "~/features/chat/chat-reducer";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
 import { thinkToSend } from "~/features/chat/think-choice";
 import type { ThinkChoice } from "~/features/chat/think-choice";
 import { ThinkControl } from "~/features/chat/think-control";
-import type { ChatState } from "~/features/chat/use-chat-stream";
 import { toAppError } from "~/lib/app-error";
 import { ollamaListModels, ollamaModelCapabilities } from "~/lib/ipc";
 import type {
@@ -49,6 +49,13 @@ type ChatViewProps = {
   reachable: boolean;
   state: ChatState;
   send: (model: string, text: string, think: Think | null) => boolean;
+  regenerate: (model: string, think: Think | null) => boolean;
+  edit: (
+    model: string,
+    messageId: string,
+    text: string,
+    think: Think | null
+  ) => boolean;
   stop: () => void;
   /** Turns an empty new chat into a temporary one, or back. */
   onTemporary: (on: boolean) => void;
@@ -66,6 +73,8 @@ const ChatView = ({
   reachable,
   state,
   send,
+  regenerate,
+  edit,
   stop,
   onTemporary,
   model,
@@ -277,7 +286,21 @@ const ChatView = ({
           className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
         >
           <div ref={content} className="mx-auto w-full max-w-3xl">
-            <MessageList messages={state.messages} />
+            <MessageList
+              messages={state.messages}
+              busy={streaming || state.loading || selected === ""}
+              onRegenerate={() => {
+                regenerate(selected, thinkToSend(selectedCaps, think));
+              }}
+              onEdit={(messageId, text) =>
+                edit(
+                  selected,
+                  messageId,
+                  text,
+                  thinkToSend(selectedCaps, think)
+                )
+              }
+            />
           </div>
         </div>
       )}

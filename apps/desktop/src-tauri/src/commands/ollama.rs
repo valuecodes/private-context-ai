@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
+use serde::Serialize;
 use tauri::State;
 use tauri::ipc::Channel;
 use tokio_util::sync::CancellationToken;
@@ -15,7 +16,7 @@ use crate::ollama::types::{
 };
 use crate::ollama::{ChatThink, Ollama};
 use crate::redacted::Redacted;
-use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnRecorder};
+use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnInput, TurnRecorder};
 use crate::storage::{Storage, StorageState};
 
 #[tauri::command]
@@ -38,9 +39,50 @@ pub async fn ollama_model_capabilities(
     ollama.model_capabilities(&model).await
 }
 
+/// What a send command returns once Rust admitted it; mirrored by
+/// `SendStarted` in `src/lib/types.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendStarted {
+    pub request_id: Uuid,
+    /// The prompt being answered: new, or the existing one when
+    /// regenerating.
+    pub user_message_id: Uuid,
+    pub assistant_message_id: Uuid,
+}
+
+/// One send, saved or temporary. For a temporary chat `conversation_id` is
+/// its session id.
+pub struct SendRequest {
+    pub conversation_id: Uuid,
+    pub model: String,
+    pub input: TurnInput,
+    pub options: Option<ChatOptions>,
+    /// From [`Ollama::chat_think`].
+    pub think: ChatThink,
+}
+
+/// A failed send means the webview is gone; the worker then cancels.
+pub(crate) fn channel_sink(
+    on_event: Channel<ChatEvent>,
+) -> impl Fn(ChatEvent) -> bool + Send + Sync + 'static {
+    move |event| on_event.send(event).is_ok()
+}
+
+/// An empty new prompt is refused before anything else.
+pub(crate) fn check_prompt(input: &TurnInput) -> Result<(), AppError> {
+    if input
+        .prompt()
+        .is_some_and(|prompt| prompt.expose().trim().is_empty())
+    {
+        return Err(AppError::InvalidInput("the message is empty".into()));
+    }
+    Ok(())
+}
+
 /// Saves `prompt` to the conversation, starts streaming the reply into
-/// `on_event` and returns the request id at once. Rust builds the history
-/// from the database.
+/// `on_event` and returns the new rows' ids at once. Rust builds the
+/// history from the database.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn chat_send(
@@ -52,22 +94,83 @@ pub async fn chat_send(
     options: Option<ChatOptions>,
     think: Option<Think>,
     on_event: Channel<ChatEvent>,
-) -> Result<Uuid, AppError> {
+) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
     // A failed lookup fails the send: without it a thinking model would get
     // Ollama's default instead of an explicit `false`.
     let think = ollama.chat_think(&model, think).await?;
-    // A failed send means the webview is gone; the worker then cancels.
     send_turn(
         &ollama,
         storage,
-        conversation_id,
-        &model,
-        &prompt,
-        options,
-        think,
+        SendRequest {
+            conversation_id,
+            model,
+            input: TurnInput::New(prompt),
+            options,
+            think,
+        },
         FlushPolicy::default(),
-        move |event| on_event.send(event).is_ok(),
+        channel_sink(on_event),
+    )
+}
+
+/// Like `chat_send`, but streams a new reply to the last prompt. The old
+/// reply is deleted only once the new one completes.
+#[tauri::command]
+pub async fn chat_regenerate(
+    ollama: State<'_, Arc<Ollama>>,
+    storage: State<'_, StorageState>,
+    conversation_id: Uuid,
+    model: String,
+    think: Option<Think>,
+    on_event: Channel<ChatEvent>,
+) -> Result<SendStarted, AppError> {
+    let storage = Arc::clone(storage.get()?);
+    let think = ollama.chat_think(&model, think).await?;
+    send_turn(
+        &ollama,
+        storage,
+        SendRequest {
+            conversation_id,
+            model,
+            input: TurnInput::Regenerate,
+            options: None,
+            think,
+        },
+        FlushPolicy::default(),
+        channel_sink(on_event),
+    )
+}
+
+/// Like `chat_send`, but replaces the user message `message_id` and
+/// everything after it with `prompt` and its reply. Nothing is deleted
+/// until that reply completes.
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn chat_edit(
+    ollama: State<'_, Arc<Ollama>>,
+    storage: State<'_, StorageState>,
+    conversation_id: Uuid,
+    message_id: Uuid,
+    model: String,
+    prompt: Redacted,
+    think: Option<Think>,
+    on_event: Channel<ChatEvent>,
+) -> Result<SendStarted, AppError> {
+    let storage = Arc::clone(storage.get()?);
+    let think = ollama.chat_think(&model, think).await?;
+    send_turn(
+        &ollama,
+        storage,
+        SendRequest {
+            conversation_id,
+            model,
+            input: TurnInput::Edit { message_id, prompt },
+            options: None,
+            think,
+        },
+        FlushPolicy::default(),
+        channel_sink(on_event),
     )
 }
 
@@ -83,7 +186,6 @@ pub trait ReplyRecorder: Send + 'static {
     fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError>;
     fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError>;
     fn finish(&mut self, status: MessageStatus) -> Result<(), AppError>;
-    fn ensure_saved(&self) -> Result<(), AppError>;
 }
 
 impl ReplyRecorder for TurnRecorder {
@@ -102,10 +204,6 @@ impl ReplyRecorder for TurnRecorder {
     fn finish(&mut self, status: MessageStatus) -> Result<(), AppError> {
         Self::finish(self, status)
     }
-
-    fn ensure_saved(&self) -> Result<(), AppError> {
-        Self::ensure_saved(self)
-    }
 }
 
 pub(crate) type Shared<R> = Arc<Mutex<R>>;
@@ -115,37 +213,37 @@ fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
     recorder.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The body of `chat_send`, without Tauri. Order matters: the slot is taken
-/// before anything is written, and nothing is written when the history is
-/// refused, so a refused send leaves no rows behind. `think` comes from
-/// [`Ollama::chat_think`]; a base URL switched since then is refused before
-/// anything is written.
-#[allow(clippy::too_many_arguments)]
+/// The body of the send commands, without Tauri. Order matters: the slot is
+/// taken before anything is written, and nothing is written when the
+/// history is refused, so a refused send leaves no rows behind and a
+/// refused regenerate or edit replaces nothing. A base URL switched since
+/// `think` was resolved is refused before anything is written.
 pub fn send_turn<S>(
     ollama: &Arc<Ollama>,
     storage: Arc<Storage>,
-    conversation_id: Uuid,
-    model: &str,
-    prompt: &Redacted,
-    options: Option<ChatOptions>,
-    think: ChatThink,
+    request: SendRequest,
     policy: FlushPolicy,
     send: S,
-) -> Result<Uuid, AppError>
+) -> Result<SendStarted, AppError>
 where
     S: Fn(ChatEvent) -> bool + Send + Sync + 'static,
 {
-    if prompt.expose().trim().is_empty() {
-        return Err(AppError::InvalidInput("the message is empty".into()));
-    }
-    validate_model(model)?;
+    let SendRequest {
+        conversation_id,
+        model,
+        input,
+        options,
+        think,
+    } = request;
+    check_prompt(&input)?;
+    validate_model(&model)?;
     if let Some(options) = &options {
         options.validate()?;
     }
     let admission = ollama.admit(conversation_id)?;
     ollama.check_connection(think.connection)?;
-    let turn = storage.begin_turn(conversation_id, model, prompt, |history| {
-        ollama.validate(model, history, options.as_ref())
+    let turn = storage.begin_turn(conversation_id, &model, &input, |history| {
+        ollama.validate(&model, history, options.as_ref())
     })?;
 
     let recorder: SharedRecorder = Arc::new(Mutex::new(TurnRecorder::new(
@@ -156,9 +254,9 @@ where
     let stop_ticker = CancellationToken::new();
     spawn_ticker(Arc::clone(&recorder), policy.every, stop_ticker.clone());
     let sink = recording_sink(Arc::clone(&recorder), send);
-    ollama.start(
+    let request_id = ollama.start(
         admission,
-        model,
+        &model,
         &turn.history,
         options.as_ref(),
         think,
@@ -167,13 +265,19 @@ where
             stop_ticker.cancel();
             finish_turn(&recorder, end);
         },
-    )
+    )?;
+    Ok(SendStarted {
+        request_id,
+        user_message_id: turn.user_id,
+        assistant_message_id: turn.assistant_id,
+    })
 }
 
 /// Saves each event before the frontend sees it. A failed save becomes a
 /// `database` error for the frontend and stops the stream; on `Done` that
 /// error replaces the `Done`, so the UI never shows an unsaved reply as
-/// complete.
+/// complete. An `Error` ends the reply first, so a regenerate or edit is
+/// already undone when the frontend reloads on it.
 pub(crate) fn recording_sink<R, S>(
     recorder: Shared<R>,
     send: S,
@@ -198,9 +302,9 @@ where
                 duration_ms: *duration_ms,
                 thinking_ms: *thinking_ms,
             }),
-            // `on_end` saves the error status, but a save failure the ticker
-            // already hit matters more than why Ollama stopped.
-            ChatEvent::Error { .. } => lock(&recorder).ensure_saved(),
+            // `on_end` then finds the reply finished. A save failure the
+            // ticker already hit matters more than why Ollama stopped.
+            ChatEvent::Error { .. } => lock(&recorder).finish(MessageStatus::Error),
         };
         match saved {
             Ok(()) => send(event),
@@ -287,7 +391,12 @@ mod tests {
     fn started_turn_with(storage: &Arc<Storage>, policy: FlushPolicy) -> (Uuid, SharedRecorder) {
         let conversation = storage.create_conversation(None, "m").unwrap().id;
         let turn = storage
-            .begin_turn(conversation, "m", &Redacted::new("Hi"), |_| Ok(()))
+            .begin_turn(
+                conversation,
+                "m",
+                &TurnInput::New(Redacted::new("Hi")),
+                |_| Ok(()),
+            )
             .unwrap();
         let recorder = Arc::new(Mutex::new(TurnRecorder::new(
             Arc::clone(storage),
@@ -477,22 +586,149 @@ mod tests {
         assert_eq!(saved, "Hi");
     }
 
+    fn request(ollama: &Ollama, conversation: Uuid, input: TurnInput) -> SendRequest {
+        SendRequest {
+            conversation_id: conversation,
+            model: "llama3.2".into(),
+            input,
+            options: None,
+            think: no_think(ollama),
+        }
+    }
+
+    fn send_input(
+        ollama: &Arc<Ollama>,
+        storage: &Arc<Storage>,
+        conversation: Uuid,
+        input: TurnInput,
+    ) -> Result<SendStarted, AppError> {
+        send_turn(
+            ollama,
+            Arc::clone(storage),
+            request(ollama, conversation, input),
+            FlushPolicy::default(),
+            |_| true,
+        )
+    }
+
     fn send(
         ollama: &Arc<Ollama>,
         storage: &Arc<Storage>,
         conversation: Uuid,
-    ) -> Result<Uuid, AppError> {
-        send_turn(
+    ) -> Result<SendStarted, AppError> {
+        send_input(
             ollama,
-            Arc::clone(storage),
+            storage,
             conversation,
-            "llama3.2",
-            &Redacted::new("Hi"),
-            None,
-            no_think(ollama),
-            FlushPolicy::default(),
-            |_| true,
+            TurnInput::New(Redacted::new("Hi")),
         )
+    }
+
+    /// A conversation with one answered turn.
+    fn answered(storage: &Arc<Storage>) -> (Uuid, Vec<StoredMessage>) {
+        let (conversation, recorder) = started_turn(storage);
+        lock(&recorder).push(&Redacted::new("Hello")).unwrap();
+        lock(&recorder).complete(ReplyStats::default()).unwrap();
+        let messages = storage.get_conversation(conversation).unwrap().messages;
+        (conversation, messages)
+    }
+
+    fn messages(storage: &Storage, conversation: Uuid) -> Vec<StoredMessage> {
+        storage.get_conversation(conversation).unwrap().messages
+    }
+
+    #[test]
+    fn sink_error_restores_before_forwarding() {
+        let (storage, _dir) = temp_storage();
+        let (conversation, before) = answered(&storage);
+        let turn = storage
+            .begin_turn(conversation, "m", &TurnInput::Regenerate, |_| Ok(()))
+            .unwrap();
+        let recorder = Arc::new(Mutex::new(TurnRecorder::new(
+            Arc::clone(&storage),
+            turn.assistant_id,
+            FlushPolicy::default(),
+        )));
+        let seen: Arc<Mutex<Option<Vec<StoredMessage>>>> = Arc::default();
+        let (reader, store) = (Arc::clone(&storage), Arc::clone(&seen));
+        let sink = recording_sink(recorder, move |event| {
+            if matches!(event, ChatEvent::Error { .. }) {
+                *store.lock().unwrap() = Some(messages(&reader, conversation));
+            }
+            true
+        });
+
+        assert!(sink(token("Par")));
+        assert!(sink(ChatEvent::Error {
+            error: AppError::Timeout("slow".into())
+        }));
+
+        // What a reload on the `error` event would see.
+        assert_eq!(seen.lock().unwrap().as_ref(), Some(&before));
+    }
+
+    #[tokio::test]
+    async fn send_started_ids_match_rows() {
+        let (ollama, _listener) = silent_ollama().await;
+        let (storage, _dir) = temp_storage();
+        let conversation = storage.create_conversation(None, "m").unwrap().id;
+
+        let started = send(&ollama, &storage, conversation).unwrap();
+
+        let rows = messages(&storage, conversation);
+        assert_eq!(rows[0].id, started.user_message_id);
+        assert_eq!(rows[1].id, started.assistant_message_id);
+        ollama.cancel_conversation(conversation).await;
+    }
+
+    #[tokio::test]
+    async fn regenerate_busy_while_streaming() {
+        let (ollama, _listener) = silent_ollama().await;
+        let (storage, _dir) = temp_storage();
+        let (conversation, _) = answered(&storage);
+        send(&ollama, &storage, conversation).unwrap();
+        let before = messages(&storage, conversation);
+
+        assert!(matches!(
+            send_input(&ollama, &storage, conversation, TurnInput::Regenerate),
+            Err(AppError::Busy(_))
+        ));
+        assert_eq!(messages(&storage, conversation), before);
+        ollama.cancel_conversation(conversation).await;
+    }
+
+    #[tokio::test]
+    async fn regenerate_connection_refused_leaves_conversation_unchanged() {
+        let (ollama, listener) = silent_ollama().await;
+        // Nothing listens any more, so the connect is refused.
+        drop(listener);
+        let (storage, _dir) = temp_storage();
+        let (conversation, before) = answered(&storage);
+        let (events, sink) = collector(true);
+
+        let started = send_turn(
+            &ollama,
+            Arc::clone(&storage),
+            request(&ollama, conversation, TurnInput::Regenerate),
+            FlushPolicy::default(),
+            sink,
+        )
+        .unwrap();
+        assert_eq!(started.user_message_id, before[0].id);
+        // Windows takes about 2 s to refuse a loopback connect.
+        for _ in 0..1000 {
+            if ollama.inflight_len() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(ollama.inflight_len(), 0);
+        assert!(matches!(
+            events.lock().unwrap().last(),
+            Some(ChatEvent::Error { .. })
+        ));
+        assert_eq!(messages(&storage, conversation), before);
     }
 
     #[tokio::test]
@@ -501,16 +737,11 @@ mod tests {
         let (storage, _dir) = temp_storage();
         let conversation = storage.create_conversation(None, "m").unwrap().id;
 
-        let err = send_turn(
+        let err = send_input(
             &ollama,
-            Arc::clone(&storage),
+            &storage,
             conversation,
-            "llama3.2",
-            &Redacted::new("x".repeat(2 * 1024 * 1024)),
-            None,
-            no_think(&ollama),
-            FlushPolicy::default(),
-            |_| true,
+            TurnInput::New(Redacted::new("x".repeat(2 * 1024 * 1024))),
         )
         .unwrap_err();
 
@@ -572,11 +803,10 @@ mod tests {
         let err = send_turn(
             &ollama,
             Arc::clone(&storage),
-            conversation,
-            "llama3.2",
-            &Redacted::new("Hi"),
-            None,
-            think,
+            SendRequest {
+                think,
+                ..request(&ollama, conversation, TurnInput::New(Redacted::new("Hi")))
+            },
             FlushPolicy::default(),
             |_| true,
         )
@@ -599,19 +829,16 @@ mod tests {
         let (storage, _dir) = temp_storage();
         let conversation = storage.create_conversation(None, "m").unwrap().id;
 
-        let err = send_turn(
-            &ollama,
-            Arc::clone(&storage),
-            conversation,
-            "llama3.2",
-            &Redacted::new("  \n"),
-            None,
-            no_think(&ollama),
-            FlushPolicy::default(),
-            |_| true,
-        )
-        .unwrap_err();
-        assert!(matches!(err, AppError::InvalidInput(_)));
+        for prompt in [
+            TurnInput::New(Redacted::new("  \n")),
+            TurnInput::Edit {
+                message_id: Uuid::new_v4(),
+                prompt: Redacted::new(""),
+            },
+        ] {
+            let err = send_input(&ollama, &storage, conversation, prompt).unwrap_err();
+            assert!(matches!(err, AppError::InvalidInput(_)));
+        }
         assert_eq!(ollama.inflight_len(), 0);
     }
 }

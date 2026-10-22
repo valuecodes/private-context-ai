@@ -3,7 +3,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::types::Value;
+use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -103,20 +104,114 @@ fn thinking_column(thinking: &str) -> Option<&str> {
     (!thinking.is_empty()).then_some(thinking)
 }
 
+/// The rows a conversation shows: not replaced by a running turn.
+const LIVE: &str = "conversation_id = ?1 AND superseded_by IS NULL";
+
 /// Oldest first. Rows inserted in the same millisecond keep insert order.
+/// Rows a running turn replaces are left out.
 pub(super) fn load_messages(
     conn: &Connection,
     conversation_id: Uuid,
 ) -> Result<Vec<StoredMessage>, AppError> {
-    let mut statement = conn.prepare(
+    let mut statement = conn.prepare(&format!(
         "SELECT id, role, content, status, created_at, prompt_tokens, completion_tokens,
                 duration_ms, thinking, thinking_ms
-         FROM messages WHERE conversation_id = ?1 ORDER BY created_at, rowid",
-    )?;
+         FROM messages WHERE {LIVE} ORDER BY created_at, rowid"
+    ))?;
     let messages = statement
         .query_map([conversation_id.to_string()], message_row)?
         .collect::<Result<_, _>>()?;
     Ok(messages)
+}
+
+/// Undoes a turn that replaced rows: deletes what it added (every live row
+/// after the first one it replaced) and shows the replaced rows again. A
+/// turn that replaced nothing is left as it is.
+pub(super) fn restore_superseded(conn: &Connection, assistant_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM messages
+         WHERE superseded_by IS NULL
+           AND conversation_id =
+               (SELECT conversation_id FROM messages WHERE superseded_by = ?1 LIMIT 1)
+           AND (created_at, rowid) >
+               (SELECT created_at, rowid FROM messages WHERE superseded_by = ?1
+                ORDER BY created_at, rowid LIMIT 1)",
+        [assistant_id],
+    )?;
+    conn.execute(
+        "UPDATE messages SET superseded_by = NULL WHERE superseded_by = ?1",
+        [assistant_id],
+    )?;
+    Ok(())
+}
+
+/// What a turn sends.
+#[derive(Debug, Clone)]
+pub enum TurnInput {
+    /// A new prompt after the last message.
+    New(Redacted),
+    /// A new reply to the last prompt, replacing everything after it.
+    Regenerate,
+    /// The user message `message_id` and everything after it, replaced by
+    /// `prompt`.
+    Edit { message_id: Uuid, prompt: Redacted },
+}
+
+impl TurnInput {
+    /// The new prompt, for the inputs that have one.
+    pub fn prompt(&self) -> Option<&Redacted> {
+        match self {
+            Self::New(prompt) | Self::Edit { prompt, .. } => Some(prompt),
+            Self::Regenerate => None,
+        }
+    }
+}
+
+/// A row's place in its conversation, in `(created_at, rowid)` order.
+struct Position {
+    id: Uuid,
+    created_at: String,
+    rowid: i64,
+}
+
+fn position_row(row: &Row<'_>) -> rusqlite::Result<Position> {
+    Ok(Position {
+        id: uuid_column(row, 0)?,
+        created_at: row.get(1)?,
+        rowid: row.get(2)?,
+    })
+}
+
+/// Every `complete` message plus the visible part of a `cancelled` reply;
+/// failed and unfinished replies are left out. Role and content only:
+/// thinking is never sent back to the model. With `until`, only the rows
+/// before that position (`<`) or up to it (`<=`).
+fn load_history(
+    conn: &Connection,
+    conversation_id: &str,
+    until: Option<(&Position, &str)>,
+) -> rusqlite::Result<Vec<ChatMessage>> {
+    let mut sql = format!(
+        "SELECT role, content FROM messages
+         WHERE {LIVE} AND (status = 'complete' OR (status = 'cancelled' AND content <> ''))"
+    );
+    let mut args: Vec<Value> = vec![conversation_id.to_owned().into()];
+    if let Some((position, op)) = until {
+        sql.push_str(&format!(" AND (created_at, rowid) {op} (?2, ?3)"));
+        args.push(position.created_at.clone().into());
+        args.push(position.rowid.into());
+    }
+    sql.push_str(" ORDER BY created_at, rowid");
+    let mut statement = conn.prepare(&sql)?;
+    statement
+        .query_map(params_from_iter(args), |row| {
+            let role: String = row.get(0)?;
+            Ok(ChatMessage {
+                role: ChatRole::parse(&role).ok_or_else(|| bad_text(0, "role"))?,
+                content: Redacted::new(row.get::<_, String>(1)?),
+            })
+        })?
+        .collect()
 }
 
 /// A turn that was saved and is ready to stream.
@@ -124,23 +219,25 @@ pub(super) fn load_messages(
 pub struct Turn {
     /// The `pending` assistant row the reply goes into.
     pub assistant_id: Uuid,
-    /// Everything Ollama gets: earlier turns plus the new prompt.
+    /// The prompt the reply answers: new, or the existing one when
+    /// regenerating.
+    pub user_id: Uuid,
+    /// Everything Ollama gets: earlier turns plus the prompt.
     pub history: Vec<ChatMessage>,
 }
 
 impl Storage {
     /// In one transaction: reads the history, lets `check` refuse it (size
-    /// limits) before anything is written, then inserts the user message and
-    /// an empty `pending` assistant row, and marks the conversation used.
-    ///
-    /// History is every `complete` message plus the visible part of a
-    /// `cancelled` reply; failed and unfinished replies are left out. It is
-    /// role and content only: thinking is never sent back to the model.
+    /// limits) before anything is written, then saves the turn and marks the
+    /// conversation used. A new prompt is added after the last message.
+    /// Regenerate and Edit mark the rows they replace `superseded_by` the new
+    /// reply: they disappear from the conversation now and are deleted only
+    /// once that reply completes (see [`TurnRecorder`]).
     pub fn begin_turn(
         &self,
         conversation_id: Uuid,
         model: &str,
-        prompt: &Redacted,
+        input: &TurnInput,
         check: impl FnOnce(&[ChatMessage]) -> Result<(), AppError>,
     ) -> Result<Turn, AppError> {
         let mut conn = self.conn();
@@ -152,51 +249,101 @@ impl Storage {
         .optional()?
         .ok_or_else(not_found)?;
 
-        let mut history: Vec<ChatMessage> = {
-            let mut statement = tx.prepare(
-                "SELECT role, content FROM messages
-                 WHERE conversation_id = ?1
-                   AND (status = 'complete' OR (status = 'cancelled' AND content <> ''))
-                 ORDER BY created_at, rowid",
-            )?;
-            statement
-                .query_map([&id], |row| {
-                    let role: String = row.get(0)?;
-                    Ok(ChatMessage {
-                        role: ChatRole::parse(&role).ok_or_else(|| bad_text(0, "role"))?,
-                        content: Redacted::new(row.get::<_, String>(1)?),
-                    })
-                })?
-                .collect::<Result<_, _>>()?
+        // `replaced`: the first row this turn replaces is after (`>`) or at
+        // (`>=`) this position.
+        let (mut history, replaced, user_id) = match input {
+            TurnInput::New(_) => (load_history(&tx, &id, None)?, None, Uuid::new_v4()),
+            TurnInput::Regenerate => {
+                let last = tx
+                    .query_row(
+                        &format!(
+                            "SELECT id, created_at, rowid FROM messages
+                             WHERE {LIVE} AND role = 'user'
+                             ORDER BY created_at DESC, rowid DESC LIMIT 1"
+                        ),
+                        [&id],
+                        position_row,
+                    )
+                    .optional()?
+                    .ok_or_else(|| {
+                        AppError::InvalidInput("there is no message to regenerate".into())
+                    })?;
+                let history = load_history(&tx, &id, Some((&last, "<=")))?;
+                let user_id = last.id;
+                (history, Some((last, ">")), user_id)
+            }
+            TurnInput::Edit { message_id, .. } => {
+                let edited = tx
+                    .query_row(
+                        &format!(
+                            "SELECT id, created_at, rowid FROM messages
+                             WHERE {LIVE} AND role = 'user' AND id = ?2"
+                        ),
+                        params![id, message_id.to_string()],
+                        position_row,
+                    )
+                    .optional()?
+                    .ok_or_else(|| AppError::NotFound("no such message".into()))?;
+                let history = load_history(&tx, &id, Some((&edited, "<")))?;
+                (history, Some((edited, ">=")), Uuid::new_v4())
+            }
         };
-        history.push(ChatMessage {
-            role: ChatRole::User,
-            content: prompt.clone(),
-        });
+        if let Some(prompt) = input.prompt() {
+            history.push(ChatMessage {
+                role: ChatRole::User,
+                content: prompt.clone(),
+            });
+        }
         check(&history)?;
 
         let assistant_id = Uuid::new_v4();
-        let insert = format!(
-            "INSERT INTO messages (id, conversation_id, role, content, created_at, status)
-             VALUES (?1, ?2, ?3, ?4, {NOW}, ?5)"
-        );
-        tx.execute(
-            &insert,
-            params![
-                Uuid::new_v4().to_string(),
-                id,
-                ChatRole::User.as_str(),
-                prompt.expose(),
-                MessageStatus::Complete.as_str()
-            ],
+        if let Some((position, op)) = &replaced {
+            tx.execute(
+                &format!(
+                    "UPDATE messages SET superseded_by = ?4
+                     WHERE {LIVE} AND (created_at, rowid) {op} (?2, ?3)"
+                ),
+                params![
+                    id,
+                    position.created_at,
+                    position.rowid,
+                    assistant_id.to_string()
+                ],
+            )?;
+        }
+        // Never before an existing row, even if the clock went back: the
+        // order is what a revision's undo relies on.
+        let created_at: String = tx.query_row(
+            &format!(
+                "SELECT max({NOW}, coalesce(
+                     (SELECT max(created_at) FROM messages WHERE conversation_id = ?1), ''))"
+            ),
+            [&id],
+            |row| row.get(0),
         )?;
+        let insert = "INSERT INTO messages (id, conversation_id, role, content, created_at, status)
+                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        if let Some(prompt) = input.prompt() {
+            tx.execute(
+                insert,
+                params![
+                    user_id.to_string(),
+                    id,
+                    ChatRole::User.as_str(),
+                    prompt.expose(),
+                    created_at,
+                    MessageStatus::Complete.as_str()
+                ],
+            )?;
+        }
         tx.execute(
-            &insert,
+            insert,
             params![
                 assistant_id.to_string(),
                 id,
                 ChatRole::Assistant.as_str(),
                 "",
+                created_at,
                 MessageStatus::Pending.as_str()
             ],
         )?;
@@ -207,6 +354,7 @@ impl Storage {
         tx.commit()?;
         Ok(Turn {
             assistant_id,
+            user_id,
             history,
         })
     }
@@ -221,6 +369,8 @@ impl Storage {
         Ok(())
     }
 
+    /// In one transaction with the final status: a complete reply deletes
+    /// the rows its turn replaced; a failed or stopped one restores them.
     fn save_final(
         &self,
         id: Uuid,
@@ -228,13 +378,16 @@ impl Storage {
         thinking: &str,
         end: &FinalState,
     ) -> Result<(), AppError> {
-        self.conn().execute(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let id = id.to_string();
+        let changed = tx.execute(
             "UPDATE messages
              SET content = ?2, status = ?3, prompt_tokens = ?4, completion_tokens = ?5,
                  duration_ms = ?6, thinking = ?7, thinking_ms = ?8
              WHERE id = ?1 AND status = 'pending'",
             params![
-                id.to_string(),
+                id,
                 content,
                 end.status.as_str(),
                 to_sql_count(end.prompt_tokens),
@@ -244,6 +397,14 @@ impl Storage {
                 to_sql_count(end.thinking_ms)
             ],
         )?;
+        if changed == 1 {
+            if end.status == MessageStatus::Complete {
+                tx.execute("DELETE FROM messages WHERE superseded_by = ?1", [&id])?;
+            } else {
+                restore_superseded(&tx, &id)?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 }
@@ -420,11 +581,6 @@ impl TurnRecorder {
         }
     }
 
-    /// Fails once any write for this turn has failed.
-    pub fn ensure_saved(&self) -> Result<(), AppError> {
-        self.check_failed()
-    }
-
     fn check_failed(&self) -> Result<(), AppError> {
         if self.failed {
             Err(AppError::Database("the reply could not be saved".into()))
@@ -437,18 +593,74 @@ impl TurnRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::testing::temp_storage;
+    use crate::storage::testing::{count_rows, temp_storage};
 
     fn conversation(storage: &Storage) -> Uuid {
         storage.create_conversation(None, "m").unwrap().id
     }
 
+    fn begin(storage: &Storage, conversation_id: Uuid, input: TurnInput) -> Result<Turn, AppError> {
+        storage.begin_turn(conversation_id, "llama3.2", &input, |_| Ok(()))
+    }
+
     fn turn(storage: &Storage, conversation_id: Uuid, prompt: &str) -> Turn {
-        storage
-            .begin_turn(conversation_id, "llama3.2", &Redacted::new(prompt), |_| {
-                Ok(())
-            })
-            .unwrap()
+        begin(
+            storage,
+            conversation_id,
+            TurnInput::New(Redacted::new(prompt)),
+        )
+        .unwrap()
+    }
+
+    fn edit(message_id: Uuid, prompt: &str) -> TurnInput {
+        TurnInput::Edit {
+            message_id,
+            prompt: Redacted::new(prompt),
+        }
+    }
+
+    fn recorder(storage: &Arc<Storage>, turn: &Turn) -> TurnRecorder {
+        TurnRecorder::new(
+            Arc::clone(storage),
+            turn.assistant_id,
+            FlushPolicy::default(),
+        )
+    }
+
+    /// Streams `text` into the turn's reply and completes it.
+    fn reply(storage: &Arc<Storage>, turn: &Turn, text: &str) {
+        let mut recorder = recorder(storage, turn);
+        recorder.push(&token(text)).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
+    }
+
+    /// A conversation of `prompts`, each answered `A<prompt>`.
+    fn answered(storage: &Arc<Storage>, prompts: &[&str]) -> Uuid {
+        let id = conversation(storage);
+        for prompt in prompts {
+            let turn = turn(storage, id, prompt);
+            reply(storage, &turn, &format!("A{prompt}"));
+        }
+        id
+    }
+
+    fn messages(storage: &Storage, conversation_id: Uuid) -> Vec<StoredMessage> {
+        storage.get_conversation(conversation_id).unwrap().messages
+    }
+
+    fn shown(storage: &Storage, conversation_id: Uuid) -> Vec<(ChatRole, String)> {
+        messages(storage, conversation_id)
+            .into_iter()
+            .map(|message| (message.role, message.content.expose().to_owned()))
+            .collect()
+    }
+
+    fn user_ids(storage: &Storage, conversation_id: Uuid) -> Vec<Uuid> {
+        messages(storage, conversation_id)
+            .into_iter()
+            .filter(|message| message.role == ChatRole::User)
+            .map(|message| message.id)
+            .collect()
     }
 
     fn message(storage: &Storage, conversation_id: Uuid, id: Uuid) -> StoredMessage {
@@ -556,10 +768,15 @@ mod tests {
         let before = storage.get_conversation(id).unwrap();
 
         let err = storage
-            .begin_turn(id, "other", &Redacted::new("Hi"), |history| {
-                assert_eq!(history.len(), 1);
-                Err(AppError::TooLarge("too big".into()))
-            })
+            .begin_turn(
+                id,
+                "other",
+                &TurnInput::New(Redacted::new("Hi")),
+                |history| {
+                    assert_eq!(history.len(), 1);
+                    Err(AppError::TooLarge("too big".into()))
+                },
+            )
             .unwrap_err();
         assert!(matches!(err, AppError::TooLarge(_)));
         assert_eq!(storage.get_conversation(id).unwrap(), before);
@@ -568,10 +785,270 @@ mod tests {
     #[test]
     fn begin_turn_unknown_conversation_is_not_found() {
         let (storage, _dir) = temp_storage();
+        for input in [TurnInput::New(Redacted::new("Hi")), TurnInput::Regenerate] {
+            assert!(matches!(
+                begin(&storage, Uuid::new_v4(), input),
+                Err(AppError::NotFound(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn regenerate_replaces_last_reply() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One", "Two"]);
+        let two = user_ids(&storage, id)[1];
+
+        let turn = begin(&storage, id, TurnInput::Regenerate).unwrap();
+        assert_eq!(turn.user_id, two);
+        assert_eq!(
+            texts(&turn.history),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Two"),
+            ]
+        );
+        reply(&storage, &turn, "Again");
+
+        assert_eq!(
+            shown(&storage, id),
+            [
+                (ChatRole::User, "One".to_owned()),
+                (ChatRole::Assistant, "AOne".to_owned()),
+                (ChatRole::User, "Two".to_owned()),
+                (ChatRole::Assistant, "Again".to_owned()),
+            ]
+        );
+        assert_eq!(count_rows(&storage, "messages"), 4);
+    }
+
+    #[test]
+    fn regenerate_without_user_is_invalid() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        assert!(matches!(
+            begin(&storage, id, TurnInput::Regenerate),
+            Err(AppError::InvalidInput(_))
+        ));
+    }
+
+    #[test]
+    fn edit_truncates_following_rows() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One", "Two", "Three", "Four"]);
+        let second = user_ids(&storage, id)[1];
+
+        let turn = begin(&storage, id, edit(second, "Changed")).unwrap();
+        assert_ne!(turn.user_id, second);
+        assert_eq!(
+            texts(&turn.history),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Changed"),
+            ]
+        );
+        reply(&storage, &turn, "New");
+
+        assert_eq!(
+            shown(&storage, id),
+            [
+                (ChatRole::User, "One".to_owned()),
+                (ChatRole::Assistant, "AOne".to_owned()),
+                (ChatRole::User, "Changed".to_owned()),
+                (ChatRole::Assistant, "New".to_owned()),
+            ]
+        );
+        assert_eq!(user_ids(&storage, id)[1], turn.user_id);
+        // The replaced rows are gone from the table, not just hidden.
+        assert_eq!(count_rows(&storage, "messages"), 4);
+    }
+
+    #[test]
+    fn edit_check_failure_changes_nothing() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One", "Two"]);
+        let before = storage.get_conversation(id).unwrap();
+
         let err = storage
-            .begin_turn(Uuid::new_v4(), "m", &Redacted::new("Hi"), |_| Ok(()))
+            .begin_turn(id, "other", &edit(user_ids(&storage, id)[0], "x"), |_| {
+                Err(AppError::TooLarge("too big".into()))
+            })
             .unwrap_err();
-        assert!(matches!(err, AppError::NotFound(_)));
+
+        assert!(matches!(err, AppError::TooLarge(_)));
+        assert_eq!(storage.get_conversation(id).unwrap(), before);
+        assert_eq!(count_rows(&storage, "messages"), 4);
+    }
+
+    #[test]
+    fn edit_foreign_or_assistant_message_not_found() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One"]);
+        let other = answered(&storage, &["Elsewhere"]);
+        let assistant = messages(&storage, id)[1].id;
+
+        for message_id in [assistant, user_ids(&storage, other)[0], Uuid::new_v4()] {
+            assert!(matches!(
+                begin(&storage, id, edit(message_id, "x")),
+                Err(AppError::NotFound(_))
+            ));
+        }
+        assert_eq!(count_rows(&storage, "messages"), 4);
+    }
+
+    #[test]
+    fn superseded_rows_restored_on_error_and_cancel() {
+        // Error, a Stop before any token, and a Stop after some.
+        let ends: [(Option<&str>, MessageStatus); 3] = [
+            (None, MessageStatus::Error),
+            (None, MessageStatus::Cancelled),
+            (Some("Half"), MessageStatus::Cancelled),
+        ];
+        for (partial, status) in ends {
+            for editing in [false, true] {
+                let (storage, _dir) = temp_storage();
+                let id = answered(&storage, &["One", "Two", "Three"]);
+                let before = messages(&storage, id);
+                let input = if editing {
+                    edit(user_ids(&storage, id)[1], "Changed")
+                } else {
+                    TurnInput::Regenerate
+                };
+
+                let turn = begin(&storage, id, input).unwrap();
+                let mut recorder = recorder(&storage, &turn);
+                if let Some(text) = partial {
+                    recorder.push(&token(text)).unwrap();
+                }
+                recorder.finish(status).unwrap();
+
+                assert_eq!(messages(&storage, id), before, "{status:?} {partial:?}");
+                assert_eq!(count_rows(&storage, "messages"), 6);
+            }
+        }
+    }
+
+    #[test]
+    fn superseded_rows_excluded_from_history_and_get() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One", "Two"]);
+
+        let pending = begin(&storage, id, edit(user_ids(&storage, id)[1], "Changed")).unwrap();
+
+        assert_eq!(
+            shown(&storage, id),
+            [
+                (ChatRole::User, "One".to_owned()),
+                (ChatRole::Assistant, "AOne".to_owned()),
+                (ChatRole::User, "Changed".to_owned()),
+                (ChatRole::Assistant, String::new()),
+            ]
+        );
+        assert_eq!(messages(&storage, id)[3].id, pending.assistant_id);
+        let next = turn(&storage, id, "Next");
+        assert_eq!(
+            texts(&next.history),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::Assistant, "AOne"),
+                (ChatRole::User, "Changed"),
+                (ChatRole::User, "Next"),
+            ]
+        );
+    }
+
+    #[test]
+    fn regenerate_history_skips_failed_replies() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        let failed = turn(&storage, id, "One");
+        let mut recorder = recorder(&storage, &failed);
+        recorder.push(&token("bad")).unwrap();
+        recorder.finish(MessageStatus::Error).unwrap();
+        let stopped = turn(&storage, id, "Two");
+        self::recorder(&storage, &stopped)
+            .finish(MessageStatus::Cancelled)
+            .unwrap();
+        let last = turn(&storage, id, "Three");
+        reply(&storage, &last, "ok");
+
+        let regenerated = begin(&storage, id, TurnInput::Regenerate).unwrap();
+        assert_eq!(
+            texts(&regenerated.history),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::User, "Two"),
+                (ChatRole::User, "Three"),
+            ]
+        );
+        self::recorder(&storage, &regenerated)
+            .finish(MessageStatus::Error)
+            .unwrap();
+
+        let edited = begin(&storage, id, edit(user_ids(&storage, id)[2], "3")).unwrap();
+        assert_eq!(
+            texts(&edited.history),
+            [
+                (ChatRole::User, "One"),
+                (ChatRole::User, "Two"),
+                (ChatRole::User, "3"),
+            ]
+        );
+    }
+
+    #[test]
+    fn rows_sort_after_existing_when_clock_is_behind() {
+        let (storage, _dir) = temp_storage();
+        let id = answered(&storage, &["One", "Two"]);
+        let future = "9999-01-01T00:00:00.000Z";
+        let last = messages(&storage, id)[3].id.to_string();
+        storage
+            .conn()
+            .execute(
+                "UPDATE messages SET created_at = ?1 WHERE id = ?2",
+                params![future, last],
+            )
+            .unwrap();
+        let before = messages(&storage, id);
+
+        let turn = begin(&storage, id, edit(user_ids(&storage, id)[0], "Changed")).unwrap();
+        assert!(
+            messages(&storage, id)
+                .iter()
+                .all(|message| message.created_at == future)
+        );
+        recorder(&storage, &turn)
+            .finish(MessageStatus::Error)
+            .unwrap();
+
+        assert_eq!(messages(&storage, id), before);
+    }
+
+    #[test]
+    fn startup_recovery_restores_superseded() {
+        let dir = tempfile::tempdir().unwrap();
+        let keys = crate::storage::key::testing::MemoryKeySource::default();
+        let storage = Arc::new(super::super::open_storage(dir.path(), &keys).unwrap());
+        let edited = answered(&storage, &["One", "Two"]);
+        let before = messages(&storage, edited);
+        let plain = conversation(&storage);
+        let interrupted = turn(&storage, plain, "Hi");
+        let revision = begin(&storage, edited, edit(user_ids(&storage, edited)[1], "x")).unwrap();
+        let mut recorder = recorder(&storage, &revision);
+        recorder.push(&token("partial")).unwrap();
+        recorder.flush_if_dirty().unwrap();
+        // A hard kill while both replies stream.
+        drop(recorder);
+        drop(storage);
+
+        let storage = super::super::open_storage(dir.path(), &keys).unwrap();
+        assert_eq!(messages(&storage, edited), before);
+        let rows = messages(&storage, plain);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[1].id, interrupted.assistant_id);
+        assert_eq!(rows[1].status, MessageStatus::Error);
     }
 
     #[test]

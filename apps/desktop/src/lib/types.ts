@@ -123,8 +123,16 @@ type ChatEvent =
     }
   | { type: "error"; error: AppError };
 
-/** The id `chat_send` returns, for `chat_cancel`. */
+/** The id a send command returns, for `chat_cancel`. */
 type RequestId = string;
+
+/** What every send command returns once Rust admitted it. */
+type SendStarted = {
+  requestId: RequestId;
+  /** The prompt being answered: new, or the existing one when regenerating. */
+  userMessageId: string;
+  assistantMessageId: string;
+};
 
 /** `attempt`: started, no outcome yet (or the app stopped while it ran). */
 type AuditStatus = "attempt" | "ok" | "error" | "cancelled";
@@ -176,6 +184,7 @@ export type {
   ModelInfo,
   OllamaStatus,
   RequestId,
+  SendStarted,
   Settings,
   SettingsPatch,
   StorageStatus,

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { chatReducer, createChatState } from "./use-chat-stream";
+import { chatReducer, createChatState } from "./chat-reducer";
 
 vi.mock("~/lib/ipc");
 

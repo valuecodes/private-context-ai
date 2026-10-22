@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatEvent, StoredMessage } from "~/lib/types";
 
-import type { ChatState } from "./use-chat-stream";
-import { chatReducer, createChatState, fromStored } from "./use-chat-stream";
+import type { ChatState } from "./chat-reducer";
+import { chatReducer, createChatState, fromStored } from "./chat-reducer";
 
 vi.mock("~/lib/ipc");
 
@@ -82,6 +82,7 @@ describe("thinking in the chat reducer", () => {
       role: "assistant",
       content: "Hi",
       status: "complete",
+      live: true,
     });
   });
 
