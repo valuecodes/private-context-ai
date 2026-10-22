@@ -1,7 +1,11 @@
 import { useReducer, useRef } from "react";
 
 import { chatReducer, createChatState } from "~/features/chat/chat-reducer";
-import type { TurnAction, UiMessage } from "~/features/chat/chat-reducer";
+import type {
+  CompareState,
+  TurnAction,
+  UiMessage,
+} from "~/features/chat/chat-reducer";
 import { startRequest, tempSession } from "~/features/chat/send-request";
 import type {
   ChatCallbacks,
@@ -11,33 +15,80 @@ import type {
 } from "~/features/chat/send-request";
 import { settingsSync } from "~/features/chat/settings-sync";
 import type { SettingsSync } from "~/features/chat/settings-sync";
-import { fromStored } from "~/features/chat/stored-messages";
+import { splitStored } from "~/features/chat/stored-messages";
 import { toAppError } from "~/lib/app-error";
-import { chatCancel, conversationGet } from "~/lib/ipc";
+import {
+  chatCancel,
+  chatCompare,
+  chatCompareDiscard,
+  chatComparePick,
+  conversationGet,
+} from "~/lib/ipc";
 import type {
   AppError,
   ChatEvent,
+  CompareEvent,
   ConversationSettings,
   RequestId,
 } from "~/lib/types";
 
 const newStreamId = (): string => crypto.randomUUID();
 
-/** Loads a saved conversation's messages as bubbles, and its settings. */
+type Loaded = (
+  messages: UiMessage[],
+  compare: CompareState | null,
+  settings: ConversationSettings
+) => void;
+
+/**
+ * Loads a saved conversation's messages as bubbles, its comparison waiting
+ * for a pick, and its settings.
+ */
 const loadConversation = (
   conversationId: string,
-  loaded: (messages: UiMessage[], settings: ConversationSettings) => void,
+  loaded: Loaded,
   failed: (error: AppError) => void
 ) => {
   void conversationGet(conversationId).then(
     (saved) => {
-      loaded(fromStored(saved.messages), saved.conversation.settings);
+      const { messages, compare } = splitStored(saved.messages);
+      loaded(messages, compare, saved.conversation.settings);
     },
     (error: unknown) => {
       failed(toAppError(error));
     }
   );
 };
+
+/**
+ * Holds pushed items until `release`, then delivers them in order with the
+ * time each arrived; later items are delivered at once.
+ */
+const holdUntilReleased = <T>(deliver: (item: T, at: number) => void) => {
+  let held: { item: T; at: number }[] | null = [];
+  return {
+    push: (item: T) => {
+      if (held === null) {
+        deliver(item, Date.now());
+      } else {
+        held.push({ item, at: Date.now() });
+      }
+    },
+    release: () => {
+      const waiting = held ?? [];
+      held = null;
+      for (const { item, at } of waiting) {
+        deliver(item, at);
+      }
+    },
+  };
+};
+
+/** Nothing in the conversation or its comparison is still answering. */
+const settled = (messages: UiMessage[], compare: CompareState | null) =>
+  [...messages, ...(compare?.candidates ?? [])].every(
+    ({ status }) => status !== "streaming"
+  );
 
 const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const [state, dispatch] = useReducer(chatReducer, null, createChatState);
@@ -61,7 +112,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
    * temporary chat discards it, even while it answers.
    */
   const open = (conversationId: string | null) => {
-    if (state.phase === "streaming" && !state.temporary) {
+    if (state.phase !== "idle" && !state.temporary) {
       return;
     }
     session.discard();
@@ -75,9 +126,15 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     void sync.settled().then(() => {
       loadConversation(
         conversationId,
-        (messages, settings) => {
+        (messages, compare, settings) => {
           opened.saved = settings;
-          dispatch({ type: "loaded", conversationId, messages, settings });
+          dispatch({
+            type: "loaded",
+            conversationId,
+            messages,
+            compare,
+            settings,
+          });
         },
         (error) => {
           dispatch({ type: "loadFailed", conversationId, error });
@@ -88,7 +145,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
 
   /** Starts an empty temporary chat; its session starts with the first send. */
   const openTemporary = () => {
-    if (state.phase === "streaming") {
+    if (state.phase !== "idle") {
       return;
     }
     session.discard();
@@ -122,6 +179,25 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     });
   };
 
+  /** Shows the saved conversation once `streamId` has ended there. */
+  const reloadAfter = (conversationId: string, streamId: string) => {
+    loadConversation(
+      conversationId,
+      (messages, compare) => {
+        if (settled(messages, compare)) {
+          dispatch({
+            type: "reloaded",
+            conversationId,
+            streamId,
+            messages,
+            compare,
+          });
+        }
+      },
+      () => undefined
+    );
+  };
+
   /**
    * Starts `action` and its request. Returns `false` when it was refused
    * because a reply streams, the conversation is still loading, or there is
@@ -147,20 +223,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     // cancel stopped waiting) keeps what the view restored.
     const reload = () => {
       if (input.kind !== "send" && !state.temporary && saved !== null) {
-        loadConversation(
-          saved,
-          (messages) => {
-            if (messages.every(({ status }) => status !== "streaming")) {
-              dispatch({
-                type: "reloaded",
-                conversationId: saved,
-                streamId,
-                messages,
-              });
-            }
-          },
-          () => undefined
-        );
+        reloadAfter(saved, streamId);
       }
     };
     const onEvent = (event: ChatEvent) => {
@@ -212,29 +275,148 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   };
 
   const send = (model: string, text: string): boolean =>
-    startTurnRequest({ type: "send", streamId: newStreamId(), text }, model, {
-      kind: "send",
-      prompt: text,
-    });
+    startTurnRequest(
+      { type: "send", streamId: newStreamId(), text, model },
+      model,
+      { kind: "send", prompt: text }
+    );
 
   /** A new reply to the last prompt, replacing the last reply. */
   const regenerate = (model: string): boolean =>
-    startTurnRequest({ type: "regenerate", streamId: newStreamId() }, model, {
-      kind: "regenerate",
-    });
+    startTurnRequest(
+      { type: "regenerate", streamId: newStreamId(), model },
+      model,
+      { kind: "regenerate" }
+    );
 
   /** Replaces the user message `messageId`, and everything after it. */
   const edit = (model: string, messageId: string, text: string): boolean =>
     startTurnRequest(
-      { type: "edit", streamId: newStreamId(), messageId, text },
+      { type: "edit", streamId: newStreamId(), messageId, text, model },
       model,
       { kind: "edit", messageId, prompt: text }
     );
 
+  /**
+   * Asks `models` the prompt `text` one after another, in a saved chat.
+   * Returns `false` when it was refused.
+   */
+  const compare = (models: string[], text: string): boolean => {
+    const streamId = newStreamId();
+    const action = { type: "compare", streamId, text, models } as const;
+    const conversationId = state.conversationId;
+    const accepted = chatReducer(state, action).streamId === streamId;
+    dispatch(action);
+    if (!accepted || conversationId === null) {
+      return false;
+    }
+    const reload = () => {
+      reloadAfter(conversationId, streamId);
+    };
+    const deliver = (event: CompareEvent, at: number) => {
+      dispatch({ type: "compareEvent", streamId, event, at });
+      // Also after a Stop: the saved statuses replace the view's guess.
+      if (event.type === "finished") {
+        reload();
+      }
+    };
+    // Events can arrive before `chatCompare` resolves, while the candidates
+    // still have local ids: they wait until Rust's ids are adopted.
+    const events = holdUntilReleased(deliver);
+    const ready = Promise.all([cancelling.current, sync.settled()]);
+    const requestId = ready
+      .then(() =>
+        chatCompare({ conversationId, prompt: text, models }, events.push)
+      )
+      .then(
+        (started) => {
+          dispatch({ type: "compareStarted", streamId, started });
+          events.release();
+          return started.requestId;
+        },
+        (error: unknown) => {
+          dispatch({
+            type: "compareFailed",
+            streamId,
+            error: toAppError(error),
+          });
+          return null;
+        }
+      );
+    pending.current = { streamId, requestId, reload };
+    return true;
+  };
+
+  /** Shows the saved conversation after a pick or discard. */
+  const refresh = (conversationId: string) => {
+    loadConversation(
+      conversationId,
+      (messages, compared) => {
+        dispatch({
+          type: "refreshed",
+          conversationId,
+          messages,
+          compare: compared,
+        });
+      },
+      () => undefined
+    );
+  };
+
+  /**
+   * Keeps the candidate `messageId`; the chat continues with its model.
+   * Resolves `false` when it was refused.
+   */
+  const pick = (messageId: string): Promise<boolean> => {
+    const conversationId = state.conversationId;
+    const candidate = state.compare?.candidates.find(
+      ({ id }) => id === messageId
+    );
+    if (
+      conversationId === null ||
+      state.phase !== "idle" ||
+      candidate?.status !== "complete"
+    ) {
+      return Promise.resolve(false);
+    }
+    return chatComparePick(conversationId, messageId).then(
+      () => {
+        refresh(conversationId);
+        if (candidate.model !== undefined) {
+          onStarted(conversationId, candidate.model);
+        }
+        return true;
+      },
+      (error: unknown) => {
+        dispatch({ type: "refused", conversationId, error: toAppError(error) });
+        refresh(conversationId);
+        return false;
+      }
+    );
+  };
+
+  /** Deletes the compared prompt and every candidate. */
+  const discard = () => {
+    const conversationId = state.conversationId;
+    const group = state.compare?.group ?? null;
+    if (conversationId === null || group === null || state.phase !== "idle") {
+      return;
+    }
+    void chatCompareDiscard(conversationId, group).then(
+      () => {
+        refresh(conversationId);
+      },
+      (error: unknown) => {
+        dispatch({ type: "refused", conversationId, error: toAppError(error) });
+        refresh(conversationId);
+      }
+    );
+  };
+
   const stop = () => {
     const current = pending.current;
     if (
-      state.phase !== "streaming" ||
+      state.phase === "idle" ||
       current === null ||
       current.streamId !== state.streamId
     ) {
@@ -257,8 +439,11 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     send,
     regenerate,
     edit,
+    compare,
+    pick,
+    discard,
     stop,
   };
 };
 
-export { useChatStream };
+export { holdUntilReleased, useChatStream };

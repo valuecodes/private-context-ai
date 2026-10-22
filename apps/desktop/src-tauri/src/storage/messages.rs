@@ -62,6 +62,11 @@ pub struct StoredMessage {
     /// Generating the completion tokens only; `None` for replies saved
     /// before it was recorded.
     pub eval_ms: Option<u64>,
+    /// The model that wrote a reply; `None` for prompts and for replies
+    /// saved before it was recorded.
+    pub model: Option<String>,
+    /// A compared prompt and its candidate replies, until one is picked.
+    pub compare_group: Option<Uuid>,
 }
 
 pub(super) fn bad_text(index: usize, what: &str) -> rusqlite::Error {
@@ -100,6 +105,11 @@ fn message_row(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
             .map(Redacted::new),
         thinking_ms: count_column(row, 9)?,
         eval_ms: count_column(row, 10)?,
+        model: row.get(11)?,
+        compare_group: row
+            .get::<_, Option<String>>(12)?
+            .map(|group| Uuid::parse_str(&group).map_err(|_| bad_text(12, "compare group")))
+            .transpose()?,
     })
 }
 
@@ -111,15 +121,21 @@ fn thinking_column(thinking: &str) -> Option<&str> {
 /// The rows a conversation shows: not replaced by a running turn.
 const LIVE: &str = "conversation_id = ?1 AND superseded_by IS NULL";
 
+/// The rows the conversation's turns are made of: shown, and not part of a
+/// comparison still waiting for a pick.
+pub(super) const SETTLED: &str =
+    "conversation_id = ?1 AND superseded_by IS NULL AND compare_group IS NULL";
+
 /// Oldest first. Rows inserted in the same millisecond keep insert order.
-/// Rows a running turn replaces are left out.
+/// Rows a running turn replaces are left out; an unpicked comparison is
+/// included, marked with its group.
 pub(super) fn load_messages(
     conn: &Connection,
     conversation_id: Uuid,
 ) -> Result<Vec<StoredMessage>, AppError> {
     let mut statement = conn.prepare(&format!(
         "SELECT id, role, content, status, created_at, prompt_tokens, completion_tokens,
-                duration_ms, thinking, thinking_ms, eval_ms
+                duration_ms, thinking, thinking_ms, eval_ms, model, compare_group
          FROM messages WHERE {LIVE} ORDER BY created_at, rowid"
     ))?;
     let messages = statement
@@ -171,8 +187,28 @@ impl TurnInput {
     }
 }
 
+/// Refuses a new turn while the conversation has a comparison waiting for a
+/// pick: its next history depends on which answer is kept.
+pub(super) fn check_no_comparison(
+    conn: &Connection,
+    conversation_id: &str,
+) -> Result<(), AppError> {
+    let open: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM messages
+                        WHERE conversation_id = ?1 AND compare_group IS NOT NULL)",
+        [conversation_id],
+        |row| row.get(0),
+    )?;
+    if open {
+        return Err(AppError::InvalidInput(
+            "pick an answer or discard the comparison first".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// A row's place in its conversation, in `(created_at, rowid)` order.
-struct Position {
+pub(super) struct Position {
     id: Uuid,
     created_at: String,
     rowid: i64,
@@ -187,17 +223,18 @@ fn position_row(row: &Row<'_>) -> rusqlite::Result<Position> {
 }
 
 /// Every `complete` message plus the visible part of a `cancelled` reply;
-/// failed and unfinished replies are left out. Role and content only:
-/// thinking is never sent back to the model. With `until`, only the rows
-/// before that position (`<`) or up to it (`<=`).
-fn load_history(
+/// failed and unfinished replies are left out, and so is an unpicked
+/// comparison. Role and content only: thinking is never sent back to the
+/// model. With `until`, only the rows before that position (`<`) or up to it
+/// (`<=`).
+pub(super) fn load_history(
     conn: &Connection,
     conversation_id: &str,
     until: Option<(&Position, &str)>,
 ) -> rusqlite::Result<Vec<ChatMessage>> {
     let mut sql = format!(
         "SELECT role, content FROM messages
-         WHERE {LIVE} AND (status = 'complete' OR (status = 'cancelled' AND content <> ''))"
+         WHERE {SETTLED} AND (status = 'complete' OR (status = 'cancelled' AND content <> ''))"
     );
     let mut args: Vec<Value> = vec![conversation_id.to_owned().into()];
     if let Some((position, op)) = until {
@@ -248,6 +285,73 @@ pub(crate) fn with_system_prompt(
     std::iter::once(system).chain(history).collect()
 }
 
+/// When a turn's new rows are created: never before an existing row, even
+/// if the clock went back. The order is what a revision's undo relies on.
+pub(super) fn next_created_at(
+    conn: &Connection,
+    conversation_id: &str,
+) -> rusqlite::Result<String> {
+    conn.query_row(
+        &format!(
+            "SELECT max({NOW}, coalesce(
+                 (SELECT max(created_at) FROM messages WHERE conversation_id = ?1), ''))"
+        ),
+        [conversation_id],
+        |row| row.get(0),
+    )
+}
+
+pub(super) fn insert_prompt(
+    conn: &Connection,
+    conversation_id: &str,
+    id: Uuid,
+    prompt: &Redacted,
+    created_at: &str,
+    group: Option<Uuid>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, created_at, status,
+                               compare_group)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            id.to_string(),
+            conversation_id,
+            ChatRole::User.as_str(),
+            prompt.expose(),
+            created_at,
+            MessageStatus::Complete.as_str(),
+            group.map(|group| group.to_string())
+        ],
+    )?;
+    Ok(())
+}
+
+/// The empty `pending` row a reply by `model` streams into.
+pub(super) fn insert_pending_reply(
+    conn: &Connection,
+    conversation_id: &str,
+    id: Uuid,
+    model: &str,
+    created_at: &str,
+    group: Option<Uuid>,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO messages (id, conversation_id, role, content, created_at, status, model,
+                               compare_group)
+         VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7)",
+        params![
+            id.to_string(),
+            conversation_id,
+            ChatRole::Assistant.as_str(),
+            created_at,
+            MessageStatus::Pending.as_str(),
+            model,
+            group.map(|group| group.to_string())
+        ],
+    )?;
+    Ok(())
+}
+
 impl Storage {
     /// In one transaction: reads the settings and the history, lets `check`
     /// refuse them (size limits, settings changed since the send was
@@ -257,7 +361,8 @@ impl Storage {
     /// last message. Regenerate and Edit mark the rows they replace
     /// `superseded_by` the new reply: they disappear from the conversation
     /// now and are deleted only once that reply completes (see
-    /// [`TurnRecorder`]).
+    /// [`TurnRecorder`]). The reply row records `model`. Refused while a
+    /// comparison waits for a pick.
     pub fn begin_turn(
         &self,
         conversation_id: Uuid,
@@ -269,6 +374,7 @@ impl Storage {
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
+        check_no_comparison(&tx, &id)?;
 
         // `replaced`: the first row this turn replaces is after (`>`) or at
         // (`>=`) this position.
@@ -333,42 +439,11 @@ impl Storage {
                 ],
             )?;
         }
-        // Never before an existing row, even if the clock went back: the
-        // order is what a revision's undo relies on.
-        let created_at: String = tx.query_row(
-            &format!(
-                "SELECT max({NOW}, coalesce(
-                     (SELECT max(created_at) FROM messages WHERE conversation_id = ?1), ''))"
-            ),
-            [&id],
-            |row| row.get(0),
-        )?;
-        let insert = "INSERT INTO messages (id, conversation_id, role, content, created_at, status)
-                      VALUES (?1, ?2, ?3, ?4, ?5, ?6)";
+        let created_at = next_created_at(&tx, &id)?;
         if let Some(prompt) = input.prompt() {
-            tx.execute(
-                insert,
-                params![
-                    user_id.to_string(),
-                    id,
-                    ChatRole::User.as_str(),
-                    prompt.expose(),
-                    created_at,
-                    MessageStatus::Complete.as_str()
-                ],
-            )?;
+            insert_prompt(&tx, &id, user_id, prompt, &created_at, None)?;
         }
-        tx.execute(
-            insert,
-            params![
-                assistant_id.to_string(),
-                id,
-                ChatRole::Assistant.as_str(),
-                "",
-                created_at,
-                MessageStatus::Pending.as_str()
-            ],
-        )?;
+        insert_pending_reply(&tx, &id, assistant_id, model, &created_at, None)?;
         tx.execute(
             &format!("UPDATE conversations SET model = ?2, updated_at = {NOW} WHERE id = ?1"),
             params![id, model],

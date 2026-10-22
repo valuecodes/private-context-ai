@@ -6,6 +6,8 @@ import type {
   AppInfo,
   AuditEvent,
   ChatEvent,
+  CompareEvent,
+  CompareStarted,
   Conversation,
   ConversationSettings,
   ConversationWithMessages,
@@ -128,6 +130,42 @@ const chatEdit = (
 const chatCancel = (requestId: RequestId): Promise<void> =>
   invoke<undefined>("chat_cancel", { requestId });
 
+type ChatCompareArgs = {
+  conversationId: string;
+  prompt: string;
+  /** Two or three different models, answered in this order. */
+  models: string[];
+};
+
+/**
+ * Saves the prompt and has each model answer it in turn, never two at once.
+ * Resolves once Rust has admitted it; events may arrive before it resolves.
+ */
+const chatCompare = (
+  { conversationId, prompt, models }: ChatCompareArgs,
+  onEvent: (event: CompareEvent) => void
+): Promise<CompareStarted> =>
+  invoke<CompareStarted>("chat_compare", {
+    conversationId,
+    prompt,
+    models,
+    onEvent: new Channel<CompareEvent>(onEvent),
+  });
+
+/** Keeps the complete candidate `messageId`; the chat continues with its model. */
+const chatComparePick = (
+  conversationId: string,
+  messageId: string
+): Promise<void> =>
+  invoke<undefined>("chat_compare_pick", { conversationId, messageId });
+
+/** Deletes the compared prompt and every candidate. */
+const chatCompareDiscard = (
+  conversationId: string,
+  group: string
+): Promise<void> =>
+  invoke<undefined>("chat_compare_discard", { conversationId, group });
+
 /**
  * A temporary chat kept only in Rust's memory, with `settings` from its first
  * send on; resolves with its id.
@@ -215,6 +253,9 @@ export {
   activityList,
   appInfo,
   chatCancel,
+  chatCompare,
+  chatCompareDiscard,
+  chatComparePick,
   chatEdit,
   chatRegenerate,
   chatSend,

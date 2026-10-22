@@ -1,122 +1,28 @@
-import { DEFAULT_SETTINGS } from "~/features/chat/default-settings";
-import type { ReplyStats } from "~/features/chat/message-stats";
+import {
+  createChatState,
+  userBubble,
+  userId,
+} from "~/features/chat/chat-state";
 import type {
-  AppError,
-  ChatEvent,
-  ConversationSettings,
-  RequestId,
-  SendStarted,
-} from "~/lib/types";
-
-type MessageStatus = "complete" | "streaming" | "cancelled" | "error";
-
-type UiMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  status: MessageStatus;
-  /** A reply streamed in this view, rather than loaded. */
-  live?: true;
-  /** A prompt sent in this view whose saved id has not arrived yet. */
-  local?: true;
-  /** The model's reasoning, when it sent any. */
-  thinking?: string;
-  /** How long it thought before answering; null when not known. */
-  thinkingMs?: number | null;
-  /** When the first thinking chunk arrived, while it streams. */
-  thinkingStartedAt?: number;
-  /** A reply's counts, once it has finished. */
-  stats?: ReplyStats;
-};
-
-/** `busy`: a send while a reply streams. `length`: the reply was cut off. */
-type ChatNotice = "busy" | "length";
-
-type ChatState = {
-  /** The open conversation; `null` for a new chat the first send saves. */
-  conversationId: string | null;
-  /** A temporary chat: kept in Rust's memory only, never saved. */
-  temporary: boolean;
-  /** The saved messages are still loading; sending waits for them. */
-  loading: boolean;
-  messages: UiMessage[];
-  phase: "idle" | "streaming";
-  /** Local id of the current send; events for any other id are stale. */
-  streamId: string | null;
-  /** The send that ended last: only its reload may replace the messages. */
-  settledStreamId: string | null;
-  /** The streaming reply's bubble: a local id until Rust's arrives. */
-  replyId: string | null;
-  requestId: RequestId | null;
-  /**
-   * The messages before a regenerate or edit truncated them, shown again if
-   * its reply fails or is stopped.
-   */
-  revision: UiMessage[] | null;
-  error: AppError | null;
-  notice: ChatNotice | null;
-  /** Applied from the next send; a saved chat's load with its messages. */
-  settings: ConversationSettings;
-};
-
-type ChatAction =
-  | { type: "open"; conversationId: string | null }
-  | { type: "openTemporary" }
-  | {
-      type: "loaded";
-      conversationId: string;
-      messages: UiMessage[];
-      settings: ConversationSettings;
-    }
-  | { type: "loadFailed"; conversationId: string; error: AppError }
-  /**
-   * The saved messages again, after the regenerate or edit `streamId` was
-   * refused or stopped.
-   */
-  | {
-      type: "reloaded";
-      conversationId: string;
-      streamId: string;
-      messages: UiMessage[];
-    }
-  | { type: "send"; streamId: string; text: string }
-  | { type: "regenerate"; streamId: string }
-  | { type: "edit"; streamId: string; messageId: string; text: string }
-  | { type: "created"; streamId: string; conversationId: string }
-  | { type: "started"; streamId: string; started: SendStarted }
-  /** `at`: when the event arrived, in ms, so the reducer stays pure. */
-  | { type: "event"; streamId: string; event: ChatEvent; at: number }
-  | { type: "cancel" }
-  | { type: "failed"; streamId: string; error: AppError }
-  | { type: "deleted"; conversationId: string }
-  /** The open chat's settings changed; `error` when saving them failed. */
-  | { type: "settings"; settings: ConversationSettings; error?: AppError };
-
-type TurnAction = Extract<
   ChatAction,
-  { type: "send" } | { type: "regenerate" } | { type: "edit" }
->;
+  ChatState,
+  TurnAction,
+} from "~/features/chat/chat-state";
+import {
+  adoptCompareIds,
+  applyCompareEvent,
+  failCompare,
+  finishCompare,
+  startCompare,
+} from "~/features/chat/compare-state";
+import {
+  updateMessage,
+  withChunk,
+  withStats,
+} from "~/features/chat/ui-message";
+import type { MessageStatus, UiMessage } from "~/features/chat/ui-message";
+import type { AppError, ChatEvent, SendStarted } from "~/lib/types";
 
-const createChatState = (
-  conversationId: string | null = null,
-  temporary = false
-): ChatState => ({
-  conversationId,
-  temporary,
-  loading: false,
-  messages: [],
-  phase: "idle",
-  streamId: null,
-  settledStreamId: null,
-  replyId: null,
-  requestId: null,
-  revision: null,
-  error: null,
-  notice: null,
-  settings: DEFAULT_SETTINGS,
-});
-
-const userId = (streamId: string): string => `${streamId}:user`;
 const assistantId = (streamId: string): string => `${streamId}:assistant`;
 
 /**
@@ -126,6 +32,9 @@ const assistantId = (streamId: string): string => `${streamId}:assistant`;
 const replyAnnouncement = (state: ChatState): string => {
   if (state.phase === "streaming") {
     return "Assistant is replying…";
+  }
+  if (state.phase === "comparing") {
+    return "Models are answering…";
   }
   const last = state.messages.at(-1);
   if (last?.role !== "assistant" || last.live !== true) {
@@ -139,13 +48,6 @@ const replyAnnouncement = (state: ChatState): string => {
   }
   return last.status === "error" ? "Reply failed." : "";
 };
-
-const updateMessage = (
-  messages: UiMessage[],
-  id: string | null,
-  update: (message: UiMessage) => UiMessage
-): UiMessage[] =>
-  messages.map((message) => (message.id === id ? update(message) : message));
 
 /**
  * Ends the current stream, setting the assistant bubble's final status. A
@@ -180,16 +82,6 @@ const finishStream = (
   };
 };
 
-/** The thinking time once the answer starts, if it was not known yet. */
-const thoughtFor = (message: UiMessage, at: number): number | null => {
-  if (message.thinkingMs !== undefined && message.thinkingMs !== null) {
-    return message.thinkingMs;
-  }
-  return message.thinkingStartedAt === undefined
-    ? null
-    : at - message.thinkingStartedAt;
-};
-
 const applyEvent = (
   state: ChatState,
   event: ChatEvent,
@@ -202,32 +94,15 @@ const applyEvent = (
     ...state,
     messages: updateMessage(state.messages, state.replyId, change),
   });
-  if (event.type === "thinking") {
-    return update((message) => ({
-      ...message,
-      thinking: (message.thinking ?? "") + event.content,
-      thinkingStartedAt: message.thinkingStartedAt ?? at,
-    }));
-  }
-  if (event.type === "token") {
-    return update((message) => ({
-      ...message,
-      content: message.content + event.content,
-      ...(message.thinking === undefined
-        ? {}
-        : { thinkingMs: thoughtFor(message, at) }),
-    }));
+  if (event.type === "thinking" || event.type === "token") {
+    return update((message) => withChunk(message, event, at));
   }
   if (event.type === "done") {
-    const { completionTokens, durationMs, evalMs, thinkingMs } = event;
-    const finished = update((message) => ({
-      ...message,
-      stats: { completionTokens, durationMs, evalMs },
-      ...(thinkingMs === null ? {} : { thinkingMs }),
-    }));
-    return finishStream(finished, "complete", {
-      notice: event.doneReason === "length" ? "length" : null,
-    });
+    return finishStream(
+      update((message) => withStats(message, event)),
+      "complete",
+      { notice: event.doneReason === "length" ? "length" : null }
+    );
   }
   return finishStream(state, "error", { error: event.error });
 };
@@ -253,38 +128,41 @@ const startStream = (
   notice: null,
 });
 
-const userBubble = (streamId: string, text: string): UiMessage => ({
-  id: userId(streamId),
-  role: "user",
-  content: text,
-  status: "complete",
-  local: true,
-});
-
-const replyBubble = (streamId: string): UiMessage => ({
+const replyBubble = (streamId: string, model?: string): UiMessage => ({
   id: assistantId(streamId),
   role: "assistant",
   content: "",
   status: "streaming",
   live: true,
+  ...(model === undefined ? {} : { model }),
 });
 
-/** Starts a turn, or refuses it while a reply streams or messages load. */
+/**
+ * Starts a turn, or refuses it while a reply streams, a comparison waits
+ * for a pick, or messages load.
+ */
 const startTurn = (state: ChatState, action: TurnAction): ChatState => {
-  if (state.phase === "streaming") {
+  if (state.phase !== "idle") {
     return { ...state, notice: "busy" };
+  }
+  if (state.compare !== null) {
+    return { ...state, notice: "compare" };
   }
   // The load would replace the new bubbles when it lands.
   if (state.loading) {
     return state;
   }
   const { messages } = state;
-  const { streamId } = action;
+  const { streamId, model } = action;
   if (action.type === "send") {
     return startStream(
       state,
       streamId,
-      [...messages, userBubble(streamId, action.text), replyBubble(streamId)],
+      [
+        ...messages,
+        userBubble(streamId, action.text),
+        replyBubble(streamId, model),
+      ],
       null
     );
   }
@@ -293,7 +171,7 @@ const startTurn = (state: ChatState, action: TurnAction): ChatState => {
       ? startStream(
           state,
           streamId,
-          [...messages.slice(0, -1), replyBubble(streamId)],
+          [...messages.slice(0, -1), replyBubble(streamId, model)],
           messages
         )
       : state;
@@ -309,7 +187,7 @@ const startTurn = (state: ChatState, action: TurnAction): ChatState => {
         [
           ...messages.slice(0, edited),
           userBubble(streamId, action.text),
-          replyBubble(streamId),
+          replyBubble(streamId, model),
         ],
         messages
       );
@@ -379,21 +257,23 @@ const adoptIds = (
     : { ...state, messages };
 };
 
-const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
-  if (action.type === "open") {
-    // Switching away would orphan the live reply's bubbles. A temporary chat
-    // is discarded instead, and Rust cancels its reply.
-    if (state.phase === "streaming" && !state.temporary) {
-      return state;
+/** Loads, refreshes, settings and deletes: not tied to one send. */
+const applyChatChange = (
+  state: ChatState,
+  action: Extract<
+    ChatAction,
+    {
+      type:
+        | "loaded"
+        | "loadFailed"
+        | "refused"
+        | "refreshed"
+        | "settings"
+        | "reloaded"
+        | "deleted";
     }
-    return {
-      ...createChatState(action.conversationId),
-      loading: action.conversationId !== null,
-    };
-  }
-  if (action.type === "openTemporary") {
-    return state.phase === "streaming" ? state : createChatState(null, true);
-  }
+  >
+): ChatState => {
   if (action.type === "loaded" || action.type === "loadFailed") {
     // A slower load for a conversation that is no longer open is stale.
     if (action.conversationId !== state.conversationId || !state.loading) {
@@ -402,22 +282,18 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
     if (action.type === "loadFailed") {
       return { ...state, loading: false, error: action.error };
     }
-    const { messages, settings } = action;
-    return { ...state, loading: false, messages, settings };
+    const { messages, compare, settings } = action;
+    return { ...state, loading: false, messages, compare, settings };
+  }
+  if (action.type === "refused") {
+    return action.conversationId === state.conversationId
+      ? { ...state, error: action.error }
+      : state;
   }
   if (action.type === "settings") {
     // A new change replaces the last one's error; a failed save sets it.
     const { settings, error = null } = action;
     return { ...state, settings, error };
-  }
-  if (action.type === "reloaded") {
-    // Stale once another turn has started or ended since.
-    return action.conversationId === state.conversationId &&
-      action.streamId === state.settledStreamId &&
-      state.phase === "idle" &&
-      !state.loading
-      ? { ...state, messages: action.messages }
-      : state;
   }
   if (action.type === "deleted") {
     // Checked when the delete lands: another conversation may be open by now.
@@ -426,6 +302,43 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
       ? createChatState()
       : state;
   }
+  // A reload is stale once another turn has started or ended since; a
+  // refresh after a pick or discard only while idle.
+  return action.conversationId === state.conversationId &&
+    (action.type === "refreshed" ||
+      action.streamId === state.settledStreamId) &&
+    state.phase === "idle" &&
+    !state.loading
+    ? { ...state, messages: action.messages, compare: action.compare }
+    : state;
+};
+
+const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
+  if (action.type === "open") {
+    // Switching away would orphan the live reply's bubbles. A temporary chat
+    // is discarded instead, and Rust cancels its reply.
+    if (state.phase !== "idle" && !state.temporary) {
+      return state;
+    }
+    return {
+      ...createChatState(action.conversationId),
+      loading: action.conversationId !== null,
+    };
+  }
+  if (action.type === "openTemporary") {
+    return state.phase === "idle" ? createChatState(null, true) : state;
+  }
+  if (
+    action.type === "loaded" ||
+    action.type === "loadFailed" ||
+    action.type === "refused" ||
+    action.type === "refreshed" ||
+    action.type === "settings" ||
+    action.type === "reloaded" ||
+    action.type === "deleted"
+  ) {
+    return applyChatChange(state, action);
+  }
   if (
     action.type === "send" ||
     action.type === "regenerate" ||
@@ -433,8 +346,13 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   ) {
     return startTurn(state, action);
   }
+  if (action.type === "compare") {
+    return startCompare(state, action);
+  }
   if (action.type === "cancel") {
-    return finishStream(state, "cancelled");
+    return state.phase === "comparing"
+      ? finishCompare(state, true)
+      : finishStream(state, "cancelled");
   }
   if (action.type === "created") {
     // Adopted even after an early Stop: the turn is saved there, and the
@@ -453,8 +371,23 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
   if (action.type === "event") {
     return applyEvent(state, action.event, action.at);
   }
+  if (action.type === "compareStarted") {
+    return adoptCompareIds(state, action.started);
+  }
+  if (action.type === "compareEvent") {
+    return applyCompareEvent(state, action.event, action.at);
+  }
+  if (action.type === "compareFailed") {
+    return failCompare(state, action.error);
+  }
   return failSend(state, action.streamId, action.error);
 };
 
-export type { ChatState, TurnAction, UiMessage };
-export { chatReducer, createChatState, replyAnnouncement };
+export type {
+  ChatState,
+  CompareState,
+  TurnAction,
+} from "~/features/chat/chat-state";
+export { createChatState } from "~/features/chat/chat-state";
+export type { UiMessage } from "~/features/chat/ui-message";
+export { chatReducer, replyAnnouncement };

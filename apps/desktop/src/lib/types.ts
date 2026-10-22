@@ -126,6 +126,10 @@ type StoredMessage = {
   thinkingMs: number | null;
   /** Generating the completion tokens only; null for older replies. */
   evalMs: number | null;
+  /** The model that wrote a reply; null for prompts and older replies. */
+  model: string | null;
+  /** A compared prompt and its candidate replies, until one is picked. */
+  compareGroup: string | null;
 };
 
 /** What the `conversation_get` command returns. */
@@ -161,6 +165,22 @@ type SendStarted = {
   userMessageId: string;
   assistantMessageId: string;
 };
+
+/** What `chat_compare` returns once Rust admitted it. */
+type CompareStarted = {
+  /** Cancels the whole comparison: the running model and the rest. */
+  requestId: RequestId;
+  userMessageId: string;
+  compareGroup: string;
+  /** In run order. */
+  candidates: { messageId: string; model: string }[];
+};
+
+/** Streamed by `chat_compare` over its channel. */
+type CompareEvent =
+  | { type: "candidate"; messageId: string; event: ChatEvent }
+  /** Every candidate has ended. */
+  | { type: "finished" };
 
 /** `attempt`: started, no outcome yet (or the app stopped while it ran). */
 type AuditStatus = "attempt" | "ok" | "error" | "cancelled";
@@ -206,6 +226,8 @@ export type {
   AuditStatus,
   ChatEvent,
   ChatOptions,
+  CompareEvent,
+  CompareStarted,
   Conversation,
   ConversationSettings,
   ConversationWithMessages,

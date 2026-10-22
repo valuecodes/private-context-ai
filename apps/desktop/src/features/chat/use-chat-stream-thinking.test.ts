@@ -48,6 +48,8 @@ const stored = (
   thinking,
   thinkingMs,
   evalMs: null,
+  model: null,
+  compareGroup: null,
 });
 
 const noStats = { completionTokens: null, durationMs: null, evalMs: null };

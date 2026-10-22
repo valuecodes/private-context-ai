@@ -96,6 +96,13 @@ const AssistantReply = ({ message }: { message: UiMessage }) => {
   );
 };
 
+/** Which model wrote a reply. */
+const ModelLabel = ({ model }: { model: string }) => (
+  <span className="mb-1 block text-xs text-zinc-500 dark:text-zinc-400">
+    {model}
+  </span>
+);
+
 type MessageEditorProps = {
   text: string;
   busy: boolean;
@@ -250,6 +257,9 @@ const MessageItem = memo(
           }
         >
           <span className="sr-only">{user ? "You: " : "Assistant: "}</span>
+          {!user && message.model !== undefined && (
+            <ModelLabel model={message.model} />
+          )}
           {user ? message.content : <AssistantReply message={message} />}
         </div>
         {note !== "" && (
@@ -351,4 +361,4 @@ const MessageList = ({
   );
 };
 
-export { MessageList, STREAM_MARKDOWN_MAX_CHARS };
+export { AssistantReply, MessageList, STREAM_MARKDOWN_MAX_CHARS };

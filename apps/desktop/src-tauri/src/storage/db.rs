@@ -69,7 +69,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -183,6 +183,8 @@ mod tests {
              ALTER TABLE messages DROP COLUMN thinking;
              ALTER TABLE messages DROP COLUMN thinking_ms;
              ALTER TABLE messages DROP COLUMN eval_ms;
+             ALTER TABLE messages DROP COLUMN model;
+             ALTER TABLE messages DROP COLUMN compare_group;
              PRAGMA user_version = 1;
              INSERT INTO conversations VALUES ('c', 't', 'm', 'x', 'x');
              INSERT INTO messages (id, conversation_id, role, content, created_at, status)
@@ -215,6 +217,8 @@ mod tests {
              ALTER TABLE conversations DROP COLUMN num_ctx;
              ALTER TABLE conversations DROP COLUMN think;
              ALTER TABLE messages DROP COLUMN eval_ms;
+             ALTER TABLE messages DROP COLUMN model;
+             ALTER TABLE messages DROP COLUMN compare_group;
              PRAGMA user_version = 3;
              INSERT INTO conversations VALUES ('c', 't', 'm', 'x', 'x');",
         )
@@ -242,6 +246,8 @@ mod tests {
         // Back to what the previous release wrote.
         conn.execute_batch(
             "ALTER TABLE messages DROP COLUMN eval_ms;
+             ALTER TABLE messages DROP COLUMN model;
+             ALTER TABLE messages DROP COLUMN compare_group;
              PRAGMA user_version = 4;
              INSERT INTO conversations (id, title, model, created_at, updated_at)
                VALUES ('c', 't', 'm', 'x', 'x');
@@ -261,6 +267,36 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (Some(900), None));
+    }
+
+    #[test]
+    fn version_five_db_leaves_model_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        conn.execute_batch(
+            "ALTER TABLE messages DROP COLUMN model;
+             ALTER TABLE messages DROP COLUMN compare_group;
+             PRAGMA user_version = 5;
+             INSERT INTO conversations (id, title, model, created_at, updated_at)
+               VALUES ('c', 't', 'm', 'x', 'x');
+             INSERT INTO messages (id, conversation_id, role, content, created_at, status)
+               VALUES ('a', 'c', 'assistant', 'old', 'x', 'complete');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let row: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT content, model, compare_group FROM messages WHERE id = 'a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(row, ("old".to_owned(), None, None));
     }
 
     #[test]

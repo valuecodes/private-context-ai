@@ -58,8 +58,9 @@ fn open_fence(text: &str) -> Option<Fence<'_>> {
 }
 
 /// Title, model and date, then a `## You` or `## Assistant` section per
-/// message with text. Thinking is never included. A fence a stopped reply
-/// left open is closed, so it cannot swallow the next section.
+/// message with text. Thinking and an unpicked comparison are never
+/// included. A fence a stopped reply left open is closed, so it cannot
+/// swallow the next section.
 pub fn to_markdown(chat: &ConversationWithMessages) -> Redacted {
     let conversation = &chat.conversation;
     let date = conversation.created_at.get(..10).unwrap_or_default();
@@ -70,7 +71,11 @@ pub fn to_markdown(chat: &ConversationWithMessages) -> Redacted {
         doc.push_str(&format!("Model: {} · {date}", conversation.model));
     }
     doc.push('\n');
-    for message in &chat.messages {
+    for message in chat
+        .messages
+        .iter()
+        .filter(|message| message.compare_group.is_none())
+    {
         let heading = match message.role {
             ChatRole::User => "You",
             ChatRole::Assistant => "Assistant",
@@ -116,6 +121,8 @@ mod tests {
             thinking: None,
             thinking_ms: None,
             eval_ms: None,
+            model: None,
+            compare_group: None,
         }
     }
 
@@ -164,6 +171,19 @@ mod tests {
         let doc = markdown(vec![reply]);
         assert!(!doc.contains("reasoning"));
         assert!(doc.contains("Answer"));
+    }
+
+    #[test]
+    fn markdown_excludes_unpicked_comparison() {
+        let group = Some(Uuid::new_v4());
+        let mut prompt = message(ChatRole::User, "Compared prompt");
+        prompt.compare_group = group;
+        let mut candidate = message(ChatRole::Assistant, "Candidate");
+        candidate.compare_group = group;
+        let doc = markdown(vec![message(ChatRole::User, "Kept"), prompt, candidate]);
+        assert!(doc.contains("Kept"));
+        assert!(!doc.contains("Compared"));
+        assert!(!doc.contains("Candidate"));
     }
 
     #[test]

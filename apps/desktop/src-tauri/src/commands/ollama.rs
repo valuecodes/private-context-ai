@@ -234,9 +234,9 @@ impl ReplyRecorder for TurnRecorder {
 }
 
 pub(crate) type Shared<R> = Arc<Mutex<R>>;
-type SharedRecorder = Shared<TurnRecorder>;
+pub(crate) type SharedRecorder = Shared<TurnRecorder>;
 
-fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
+pub(crate) fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
     recorder.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -375,7 +375,7 @@ pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd)
 /// silence is on disk even though no further token triggers a write. A
 /// failed flush marks the recorder failed; the next event then stops the
 /// stream.
-fn spawn_ticker(recorder: SharedRecorder, every: Duration, stop: CancellationToken) {
+pub(crate) fn spawn_ticker(recorder: SharedRecorder, every: Duration, stop: CancellationToken) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(every);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -145,6 +145,10 @@ pub struct ChatRequest<'a> {
     pub options: Option<&'a ChatOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub think: Option<Think>,
+    /// Seconds Ollama keeps the model loaded afterwards; `0` unloads it at
+    /// once. Unset leaves Ollama's default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<u32>,
 }
 
 /// One NDJSON line of a streamed `/api/chat` response. Unknown fields are
@@ -489,10 +493,11 @@ mod tests {
                 stream: true,
                 options,
                 think: None,
+                keep_alive: None,
             })
             .unwrap();
             let object = body.as_object().unwrap();
-            for forbidden in ["tools", "format", "think"] {
+            for forbidden in ["tools", "format", "think", "keep_alive"] {
                 assert!(!object.contains_key(forbidden), "{forbidden} present");
             }
             let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
@@ -521,6 +526,7 @@ mod tests {
                 stream: true,
                 options: None,
                 think: Some(think),
+                keep_alive: None,
             })
             .unwrap();
             let object = body.as_object().unwrap();
@@ -528,6 +534,18 @@ mod tests {
             assert!(!object.contains_key("format"));
             assert_eq!(body["think"], expected);
         }
+
+        let body = serde_json::to_value(ChatRequest {
+            model: "qwen3",
+            messages: &messages,
+            stream: true,
+            options: None,
+            think: None,
+            keep_alive: Some(0),
+        })
+        .unwrap();
+        assert_eq!(body["keep_alive"], serde_json::json!(0));
+        assert!(!body.as_object().unwrap().contains_key("tools"));
     }
 
     fn show(json: &str) -> ShowResponse {
