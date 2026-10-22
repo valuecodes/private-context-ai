@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::ollama::Ollama;
 use crate::redacted::Redacted;
-use crate::storage::conversations::{Conversation, ConversationWithMessages};
+use crate::storage::conversations::{Conversation, ConversationSettings, ConversationWithMessages};
 use crate::storage::{StorageState, StorageStatus};
 
 #[tauri::command]
@@ -18,15 +18,29 @@ pub fn storage_status(storage: State<'_, StorageState>) -> StorageStatus {
     storage.status()
 }
 
+/// A new chat's settings come with its first send, so no update races it.
 #[tauri::command]
 pub async fn conversation_create(
     storage: State<'_, StorageState>,
     title: Option<Redacted>,
     model: String,
+    settings: Option<ConversationSettings>,
 ) -> Result<Conversation, AppError> {
-    storage
-        .get()?
-        .create_conversation(title.as_ref().map(Redacted::expose), &model)
+    storage.get()?.create_conversation_with(
+        title.as_ref().map(Redacted::expose),
+        &model,
+        &settings.unwrap_or_default(),
+    )
+}
+
+/// Applies from the conversation's next send.
+#[tauri::command]
+pub async fn conversation_update_settings(
+    storage: State<'_, StorageState>,
+    id: Uuid,
+    settings: ConversationSettings,
+) -> Result<Conversation, AppError> {
+    storage.get()?.update_settings(id, &settings)
 }
 
 #[tauri::command]

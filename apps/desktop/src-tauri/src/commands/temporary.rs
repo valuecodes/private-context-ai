@@ -9,19 +9,47 @@ use tauri::ipc::Channel;
 use uuid::Uuid;
 
 use crate::commands::ollama::{
-    SendRequest, SendStarted, Shared, channel_sink, check_prompt, finish_turn, recording_sink,
+    SendRequest, SendStarted, Shared, channel_sink, check_prompt, check_turn, finish_turn,
+    recording_sink,
 };
 use crate::error::AppError;
-use crate::ollama::Ollama;
-use crate::ollama::types::{ChatEvent, Think, validate_model};
+use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
+use crate::ollama::{ChatThink, Ollama};
 use crate::redacted::Redacted;
+use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::TurnInput;
 use crate::temporary::{MemoryRecorder, TempChats};
 
-/// Starts an empty temporary chat and returns its session id.
+/// Starts an empty temporary chat and returns its session id. Its settings
+/// come with its first send, like a new saved chat's.
 #[tauri::command]
-pub fn temp_chat_start(chats: State<'_, Arc<TempChats>>) -> Result<Uuid, AppError> {
-    chats.start()
+pub fn temp_chat_start(
+    chats: State<'_, Arc<TempChats>>,
+    settings: Option<ConversationSettings>,
+) -> Result<Uuid, AppError> {
+    chats.start_with(settings.unwrap_or_default())
+}
+
+/// Applies from the temporary chat's next send.
+#[tauri::command]
+pub fn temp_chat_update_settings(
+    chats: State<'_, Arc<TempChats>>,
+    session_id: Uuid,
+    settings: ConversationSettings,
+) -> Result<(), AppError> {
+    chats.update_settings(session_id, settings)
+}
+
+/// The session's Think setting and what it resolves to for `model`.
+async fn session_think(
+    ollama: &Ollama,
+    chats: &TempChats,
+    session_id: Uuid,
+    model: &str,
+) -> Result<(ThinkChoice, ChatThink), AppError> {
+    let choice = chats.settings(session_id)?.think;
+    let think = ollama.chat_think(model, choice.requested()).await?;
+    Ok((choice, think))
 }
 
 /// Like `chat_send`, but Rust builds the history from the session in memory.
@@ -32,10 +60,9 @@ pub async fn temp_chat_send(
     session_id: Uuid,
     model: String,
     prompt: Redacted,
-    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
-    let think = ollama.chat_think(&model, think).await?;
+    let (think_choice, think) = session_think(&ollama, &chats, session_id, &model).await?;
     send_temp_turn(
         &ollama,
         &chats,
@@ -43,7 +70,7 @@ pub async fn temp_chat_send(
             conversation_id: session_id,
             model,
             input: TurnInput::New(prompt),
-            options: None,
+            think_choice,
             think,
         },
         channel_sink(on_event),
@@ -57,10 +84,9 @@ pub async fn temp_chat_regenerate(
     chats: State<'_, Arc<TempChats>>,
     session_id: Uuid,
     model: String,
-    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
-    let think = ollama.chat_think(&model, think).await?;
+    let (think_choice, think) = session_think(&ollama, &chats, session_id, &model).await?;
     send_temp_turn(
         &ollama,
         &chats,
@@ -68,7 +94,7 @@ pub async fn temp_chat_regenerate(
             conversation_id: session_id,
             model,
             input: TurnInput::Regenerate,
-            options: None,
+            think_choice,
             think,
         },
         channel_sink(on_event),
@@ -77,7 +103,6 @@ pub async fn temp_chat_regenerate(
 
 /// Like `chat_edit`, for a temporary chat.
 #[tauri::command]
-#[allow(clippy::too_many_arguments)]
 pub async fn temp_chat_edit(
     ollama: State<'_, Arc<Ollama>>,
     chats: State<'_, Arc<TempChats>>,
@@ -85,10 +110,9 @@ pub async fn temp_chat_edit(
     message_id: Uuid,
     model: String,
     prompt: Redacted,
-    think: Option<Think>,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
-    let think = ollama.chat_think(&model, think).await?;
+    let (think_choice, think) = session_think(&ollama, &chats, session_id, &model).await?;
     send_temp_turn(
         &ollama,
         &chats,
@@ -96,7 +120,7 @@ pub async fn temp_chat_edit(
             conversation_id: session_id,
             model,
             input: TurnInput::Edit { message_id, prompt },
-            options: None,
+            think_choice,
             think,
         },
         channel_sink(on_event),
@@ -140,18 +164,15 @@ where
         conversation_id: session_id,
         model,
         input,
-        options,
+        think_choice,
         think,
     } = request;
     check_prompt(&input)?;
     validate_model(&model)?;
-    if let Some(options) = &options {
-        options.validate()?;
-    }
     let admission = ollama.admit(session_id)?;
     ollama.check_connection(think.connection)?;
-    let (user_id, history) = chats.begin(session_id, &input, |history| {
-        ollama.validate(&model, history, options.as_ref())
+    let turn = chats.begin(session_id, &input, |history, settings| {
+        check_turn(ollama, &model, &think_choice, history, settings)
     })?;
 
     let assistant_id = Uuid::new_v4();
@@ -167,8 +188,8 @@ where
         .start(
             admission,
             &model,
-            &history,
-            options.as_ref(),
+            &turn.history,
+            turn.options.as_ref(),
             think,
             sink,
             move |end| finish_turn(&recorder, end),
@@ -182,7 +203,7 @@ where
         })?;
     Ok(SendStarted {
         request_id,
-        user_message_id: user_id,
+        user_message_id: turn.user_id,
         assistant_message_id: assistant_id,
     })
 }
@@ -207,7 +228,7 @@ mod tests {
                 conversation_id: session,
                 model: "llama3.2".into(),
                 input,
-                options: None,
+                think_choice: ThinkChoice::Off,
                 think: no_think(ollama),
             },
             |_| true,

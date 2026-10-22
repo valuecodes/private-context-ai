@@ -4,19 +4,17 @@ import { useEffect, useRef, useState } from "react";
 
 import { stopsReply } from "~/features/chat/chat-keys";
 import type { ChatState } from "~/features/chat/chat-reducer";
+import { ChatSettings } from "~/features/chat/chat-settings";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
-import { thinkToSend } from "~/features/chat/think-choice";
-import type { ThinkChoice } from "~/features/chat/think-choice";
-import { ThinkControl } from "~/features/chat/think-control";
 import { toAppError } from "~/lib/app-error";
 import { ollamaListModels, ollamaModelCapabilities } from "~/lib/ipc";
 import type {
   AppError,
+  ConversationSettings,
   ModelCapabilities,
   ModelInfo,
-  Think,
 } from "~/lib/types";
 
 const NOTICE_TEXT: Record<NonNullable<ChatState["notice"]>, string> = {
@@ -48,15 +46,12 @@ const modelLabel = (
 type ChatViewProps = {
   reachable: boolean;
   state: ChatState;
-  send: (model: string, text: string, think: Think | null) => boolean;
-  regenerate: (model: string, think: Think | null) => boolean;
-  edit: (
-    model: string,
-    messageId: string,
-    text: string,
-    think: Think | null
-  ) => boolean;
+  send: (model: string, text: string) => boolean;
+  regenerate: (model: string) => boolean;
+  edit: (model: string, messageId: string, text: string) => boolean;
   stop: () => void;
+  /** The open chat's settings changed; applied from its next send. */
+  onSettings: (settings: ConversationSettings) => void;
   /** Turns an empty new chat into a temporary one, or back. */
   onTemporary: (on: boolean) => void;
   /** Owned by the parent, so opening a conversation can pick its model. */
@@ -64,9 +59,6 @@ type ChatViewProps = {
   setModel: Dispatch<SetStateAction<string>>;
   /** From Settings; used when `model` is empty or not installed. */
   defaultModel: string;
-  /** Owned by the parent, so switching views keeps it. */
-  think: ThinkChoice;
-  setThink: Dispatch<SetStateAction<ThinkChoice>>;
 };
 
 const ChatView = ({
@@ -76,12 +68,11 @@ const ChatView = ({
   regenerate,
   edit,
   stop,
+  onSettings,
   onTemporary,
   model,
   setModel,
   defaultModel,
-  think,
-  setThink,
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
@@ -220,13 +211,12 @@ const ChatView = ({
             </option>
           ))}
         </select>
-        {selectedCaps !== undefined && (
-          <ThinkControl
-            caps={selectedCaps}
-            choice={think}
-            onChange={setThink}
-          />
-        )}
+        <ChatSettings
+          settings={state.settings}
+          onChange={onSettings}
+          caps={selectedCaps}
+          disabled={state.loading}
+        />
         {models.phase === "failed" && (
           <>
             <span className="text-xs text-red-600 dark:text-red-400">
@@ -290,16 +280,9 @@ const ChatView = ({
               messages={state.messages}
               busy={streaming || state.loading || selected === ""}
               onRegenerate={() => {
-                regenerate(selected, thinkToSend(selectedCaps, think));
+                regenerate(selected);
               }}
-              onEdit={(messageId, text) =>
-                edit(
-                  selected,
-                  messageId,
-                  text,
-                  thinkToSend(selectedCaps, think)
-                )
-              }
+              onEdit={(messageId, text) => edit(selected, messageId, text)}
             />
           </div>
         </div>
@@ -318,9 +301,7 @@ const ChatView = ({
         <Composer
           streaming={streaming}
           canSend={selected !== "" && !state.loading}
-          onSend={(text) =>
-            send(selected, text, thinkToSend(selectedCaps, think))
-          }
+          onSend={(text) => send(selected, text)}
           onStop={stop}
           temporary={state.temporary}
         />

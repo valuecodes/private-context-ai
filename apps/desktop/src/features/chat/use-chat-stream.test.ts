@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ChatEvent, StoredMessage } from "~/lib/types";
+import type {
+  ChatEvent,
+  ConversationSettings,
+  StoredMessage,
+} from "~/lib/types";
 
 import type { ChatState } from "./chat-reducer";
 import {
@@ -9,9 +13,16 @@ import {
   fromStored,
   replyAnnouncement,
 } from "./chat-reducer";
+import { DEFAULT_SETTINGS } from "./default-settings";
 import { titleFromPrompt } from "./send-request";
 
 vi.mock("~/lib/ipc");
+
+const finnish: ConversationSettings = {
+  systemPrompt: "Answer only in Finnish",
+  options: { temperature: 0.7, num_ctx: 8192 },
+  think: { kind: "level", level: "high" },
+};
 
 const sent = (text = "Hi", streamId = "s1"): ChatState =>
   chatReducer(createChatState("c1"), { type: "send", streamId, text });
@@ -206,11 +217,13 @@ describe("opening conversations", () => {
       type: "loaded",
       conversationId: "c2",
       messages: fromStored([stored("u", "user", "complete")]),
+      settings: finnish,
     });
     expect(state.loading).toBe(false);
     expect(state.messages).toEqual([
       { id: "u", role: "user", content: "u", status: "complete" },
     ]);
+    expect(state.settings).toEqual(finnish);
   });
 
   it("refuses a send until the saved messages have loaded", () => {
@@ -251,6 +264,7 @@ describe("opening conversations", () => {
       type: "loaded",
       conversationId: "a",
       messages: fromStored([stored("x", "user", "complete")]),
+      settings: finnish,
     });
     state = chatReducer(state, {
       type: "loadFailed",
@@ -374,6 +388,7 @@ describe("replyAnnouncement", () => {
           stored("u", "user", "complete"),
           stored("a", "assistant", "complete"),
         ]),
+        settings: DEFAULT_SETTINGS,
       }
     );
     expect(replyAnnouncement(loaded)).toBe("");

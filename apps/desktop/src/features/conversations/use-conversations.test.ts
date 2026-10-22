@@ -16,6 +16,7 @@ const conversation = (id: string, title = id): Conversation => ({
   model: "llama3.2",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
+  settings: { systemPrompt: "", options: {}, think: { kind: "off" } },
 });
 
 const loaded = (...ids: string[]): ConversationsState =>

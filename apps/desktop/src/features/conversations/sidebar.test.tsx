@@ -14,6 +14,7 @@ const conversation = (id: string, title: string): Conversation => ({
   model: "m",
   createdAt: "x",
   updatedAt: "x",
+  settings: { systemPrompt: "", options: {}, think: { kind: "off" } },
 });
 
 const noop = () => undefined;

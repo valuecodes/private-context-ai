@@ -1,6 +1,8 @@
+import { DEFAULT_SETTINGS } from "~/features/chat/default-settings";
 import type {
   AppError,
   ChatEvent,
+  ConversationSettings,
   RequestId,
   SendStarted,
   StoredMessage,
@@ -51,12 +53,19 @@ type ChatState = {
   revision: UiMessage[] | null;
   error: AppError | null;
   notice: ChatNotice | null;
+  /** Applied from the next send; a saved chat's load with its messages. */
+  settings: ConversationSettings;
 };
 
 type ChatAction =
   | { type: "open"; conversationId: string | null }
   | { type: "openTemporary" }
-  | { type: "loaded"; conversationId: string; messages: UiMessage[] }
+  | {
+      type: "loaded";
+      conversationId: string;
+      messages: UiMessage[];
+      settings: ConversationSettings;
+    }
   | { type: "loadFailed"; conversationId: string; error: AppError }
   /**
    * The saved messages again, after the regenerate or edit `streamId` was
@@ -77,7 +86,9 @@ type ChatAction =
   | { type: "event"; streamId: string; event: ChatEvent; at: number }
   | { type: "cancel" }
   | { type: "failed"; streamId: string; error: AppError }
-  | { type: "deleted"; conversationId: string };
+  | { type: "deleted"; conversationId: string }
+  /** The open chat's settings changed; `error` when saving them failed. */
+  | { type: "settings"; settings: ConversationSettings; error?: AppError };
 
 type TurnAction = Extract<
   ChatAction,
@@ -100,6 +111,7 @@ const createChatState = (
   revision: null,
   error: null,
   notice: null,
+  settings: DEFAULT_SETTINGS,
 });
 
 const userId = (streamId: string): string => `${streamId}:user`;
@@ -406,9 +418,15 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
     if (action.conversationId !== state.conversationId || !state.loading) {
       return state;
     }
-    return action.type === "loaded"
-      ? { ...state, loading: false, messages: action.messages }
-      : { ...state, loading: false, error: action.error };
+    if (action.type === "loadFailed") {
+      return { ...state, loading: false, error: action.error };
+    }
+    const { messages, settings } = action;
+    return { ...state, loading: false, messages, settings };
+  }
+  if (action.type === "settings") {
+    const { settings, error = state.error } = action;
+    return { ...state, settings, error };
   }
   if (action.type === "reloaded") {
     // Stale once another turn has started or ended since.

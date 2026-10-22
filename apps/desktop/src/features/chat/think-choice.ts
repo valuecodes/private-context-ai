@@ -1,45 +1,27 @@
-import type { ModelCapabilities, Think, ThinkLevel } from "~/lib/types";
+import type { ModelCapabilities, ThinkChoice, ThinkLevel } from "~/lib/types";
+
+const THINK_OFF: ThinkChoice = { kind: "off" };
 
 /**
- * What the user picked: thinking on or off, and a level for models that take
- * one. Off by default.
+ * The level the control shows as selected for a levels model; null is Off.
+ * Mirrors Rust's `resolve_think`: an unknown level or plain "on" is the
+ * default level, and Off is the default level for a model that always
+ * thinks.
  */
-type ThinkChoice = { on: boolean; level: ThinkLevel | null };
-
-const THINK_OFF: ThinkChoice = { on: false, level: null };
-
-/**
- * The `think` value `chat_send` gets, or `null` when the model cannot think
- * or its capabilities are not known yet. Rust checks it again against the
- * model and always sends an explicit value to a thinking model.
- */
-const thinkToSend = (
-  caps: ModelCapabilities | undefined,
-  choice: ThinkChoice
-): Think | null => {
-  if (caps === undefined || !caps.thinking) {
-    return null;
-  }
-  const style = caps.thinkStyle;
-  if (style.kind === "bool") {
-    return choice.on;
-  }
-  if (!choice.on && style.canDisable) {
-    return false;
-  }
-  return choice.level !== null && style.levels.includes(choice.level)
-    ? choice.level
-    : style.default;
-};
-
-/** The level the control shows as selected for a levels model; null is Off. */
 const selectedLevel = (
   caps: ModelCapabilities,
   choice: ThinkChoice
 ): ThinkLevel | null => {
-  const think = thinkToSend(caps, choice);
-  return typeof think === "string" ? think : null;
+  const style = caps.thinkStyle;
+  if (style.kind === "bool") {
+    return null;
+  }
+  if (choice.kind === "off") {
+    return style.canDisable ? null : style.default;
+  }
+  return choice.kind === "level" && style.levels.includes(choice.level)
+    ? choice.level
+    : style.default;
 };
 
-export type { ThinkChoice };
-export { selectedLevel, THINK_OFF, thinkToSend };
+export { selectedLevel, THINK_OFF };

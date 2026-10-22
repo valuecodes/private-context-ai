@@ -9,7 +9,12 @@ import {
   tempChatSend,
   tempChatStart,
 } from "~/lib/ipc";
-import type { ChatEvent, Conversation, SendStarted, Think } from "~/lib/types";
+import type {
+  ChatEvent,
+  Conversation,
+  ConversationSettings,
+  SendStarted,
+} from "~/lib/types";
 
 const TITLE_CHARS = 60;
 
@@ -51,55 +56,52 @@ type TurnInput =
   | { kind: "regenerate" }
   | { kind: "edit"; messageId: string; prompt: string };
 
-type SendRequest = { model: string; think: Think | null; input: TurnInput };
+/**
+ * `settings` are what a new chat is created with; a saved or temporary chat
+ * is sent with the settings Rust holds for it.
+ */
+type SendRequest = {
+  model: string;
+  settings: ConversationSettings;
+  input: TurnInput;
+};
 
 type OnEvent = (event: ChatEvent) => void;
 
 const sendSaved = (
   conversationId: string,
-  { model, think, input }: SendRequest,
+  { model, input }: SendRequest,
   onEvent: OnEvent
 ): Promise<SendStarted> => {
   if (input.kind === "regenerate") {
-    return chatRegenerate({ conversationId, model, think }, onEvent);
+    return chatRegenerate({ conversationId, model }, onEvent);
   }
   if (input.kind === "edit") {
     const { messageId, prompt } = input;
-    return chatEdit(
-      { conversationId, messageId, model, prompt, think },
-      onEvent
-    );
+    return chatEdit({ conversationId, messageId, model, prompt }, onEvent);
   }
-  return chatSend(
-    { conversationId, model, prompt: input.prompt, think },
-    onEvent
-  );
+  return chatSend({ conversationId, model, prompt: input.prompt }, onEvent);
 };
 
 const sendTemporary = (
   sessionId: string,
-  { model, think, input }: SendRequest,
+  { model, input }: SendRequest,
   onEvent: OnEvent
 ): Promise<SendStarted> => {
   if (input.kind === "regenerate") {
-    return tempChatRegenerate({ sessionId, model, think }, onEvent);
+    return tempChatRegenerate({ sessionId, model }, onEvent);
   }
   if (input.kind === "edit") {
     const { messageId, prompt } = input;
-    return tempChatEdit(
-      { sessionId, messageId, model, prompt, think },
-      onEvent
-    );
+    return tempChatEdit({ sessionId, messageId, model, prompt }, onEvent);
   }
-  return tempChatSend(
-    { sessionId, model, prompt: input.prompt, think },
-    onEvent
-  );
+  return tempChatSend({ sessionId, model, prompt: input.prompt }, onEvent);
 };
 
 /**
  * Starts the request once `ready` settles and resolves with its ids. A new
- * chat is created at once, so the sidebar shows it without waiting.
+ * chat is created at once, with its settings, so the sidebar shows it
+ * without waiting.
  */
 const startRequest = (
   target: SendTarget,
@@ -113,13 +115,14 @@ const startRequest = (
       .then(() => target.sessionId)
       .then((sessionId) => sendTemporary(sessionId, request, onEvent));
   }
-  const { input, model } = request;
+  const { input, model, settings } = request;
   const conversationId: Promise<string> =
     target.kind === "saved"
       ? Promise.resolve(target.conversationId)
       : conversationCreate(
           titleFromPrompt(input.kind === "regenerate" ? "" : input.prompt),
-          model
+          model,
+          settings
         ).then((created) => {
           onCreated(created);
           return created.id;
@@ -135,8 +138,11 @@ const startRequest = (
 };
 
 type TempSession = {
-  /** The session id, starting the session on the first call. */
-  id: () => Promise<string>;
+  /**
+   * The session id, starting the session with `settings` on the first call;
+   * later calls ignore them.
+   */
+  id: (settings: ConversationSettings) => Promise<string>;
   discard: () => void;
 };
 
@@ -148,9 +154,9 @@ type TempSession = {
 const tempSession = (): TempSession => {
   let current: Promise<string> | null = null;
   return {
-    id: () => {
+    id: (settings) => {
       if (current === null) {
-        const started = tempChatStart();
+        const started = tempChatStart(settings);
         current = started;
         // A refused start is not kept, so the next send tries again.
         started.catch(() => {

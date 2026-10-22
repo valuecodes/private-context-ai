@@ -1,8 +1,7 @@
 import { Brain } from "lucide-react";
 
-import { selectedLevel } from "~/features/chat/think-choice";
-import type { ThinkChoice } from "~/features/chat/think-choice";
-import type { ModelCapabilities, ThinkLevel } from "~/lib/types";
+import { selectedLevel, THINK_OFF } from "~/features/chat/think-choice";
+import type { ModelCapabilities, ThinkChoice, ThinkLevel } from "~/lib/types";
 
 /** A level as Ollama names it, capitalized: `xhigh` → `Xhigh`. */
 const levelLabel = (level: ThinkLevel): string =>
@@ -24,15 +23,16 @@ const ThinkControl = ({ caps, choice, onChange }: ThinkControlProps) => {
   }
   const style = caps.thinkStyle;
   if (style.kind === "bool") {
+    const on = choice.kind !== "off";
     return (
       <button
         type="button"
-        aria-pressed={choice.on}
+        aria-pressed={on}
         onClick={() => {
-          onChange({ ...choice, on: !choice.on });
+          onChange(on ? THINK_OFF : { kind: "on" });
         }}
         title="Let the model think before it answers"
-        className={`flex items-center gap-1 rounded border px-2 py-0.5 text-sm ${choice.on ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900" : "border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"}`}
+        className={`flex items-center gap-1 rounded border px-2 py-0.5 text-sm ${on ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900" : "border-zinc-300 hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"}`}
       >
         <Brain aria-hidden="true" className="size-4" />
         Think
@@ -61,9 +61,7 @@ const ThinkControl = ({ caps, choice, onChange }: ThinkControlProps) => {
             aria-checked={selected === option}
             onClick={() => {
               onChange(
-                option === null
-                  ? { ...choice, on: false }
-                  : { on: true, level: option }
+                option === null ? THINK_OFF : { kind: "level", level: option }
               );
             }}
             className={`px-2 py-0.5 ${selected === option ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}
