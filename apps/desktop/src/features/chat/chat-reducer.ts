@@ -37,6 +37,8 @@ type ChatState = {
   phase: "idle" | "streaming";
   /** Local id of the current send; events for any other id are stale. */
   streamId: string | null;
+  /** The send that ended last: only its reload may replace the messages. */
+  settledStreamId: string | null;
   /** The streaming reply's bubble: a local id until Rust's arrives. */
   replyId: string | null;
   requestId: RequestId | null;
@@ -54,8 +56,16 @@ type ChatAction =
   | { type: "openTemporary" }
   | { type: "loaded"; conversationId: string; messages: UiMessage[] }
   | { type: "loadFailed"; conversationId: string; error: AppError }
-  /** The saved messages again, after a regenerate or edit was refused. */
-  | { type: "reloaded"; conversationId: string; messages: UiMessage[] }
+  /**
+   * The saved messages again, after the regenerate or edit `streamId` was
+   * refused or stopped.
+   */
+  | {
+      type: "reloaded";
+      conversationId: string;
+      streamId: string;
+      messages: UiMessage[];
+    }
   | { type: "send"; streamId: string; text: string }
   | { type: "regenerate"; streamId: string }
   | { type: "edit"; streamId: string; messageId: string; text: string }
@@ -82,6 +92,7 @@ const createChatState = (
   messages: [],
   phase: "idle",
   streamId: null,
+  settledStreamId: null,
   replyId: null,
   requestId: null,
   revision: null,
@@ -168,6 +179,7 @@ const finishStream = (
     messages,
     phase: "idle",
     streamId: null,
+    settledStreamId: state.streamId,
     replyId: null,
     requestId: null,
     revision: null,
@@ -331,6 +343,7 @@ const failSend = (
       ),
     phase: "idle",
     streamId: null,
+    settledStreamId: streamId,
     replyId: null,
     requestId: null,
     revision: null,
@@ -395,7 +408,9 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
       : { ...state, loading: false, error: action.error };
   }
   if (action.type === "reloaded") {
+    // Stale once another turn has started or ended since.
     return action.conversationId === state.conversationId &&
+      action.streamId === state.settledStreamId &&
       state.phase === "idle" &&
       !state.loading
       ? { ...state, messages: action.messages }

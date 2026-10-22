@@ -44,6 +44,8 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const pending = useRef<{
     streamId: string;
     requestId: Promise<RequestId | null>;
+    /** Shows the saved conversation again, for a revision that ended. */
+    reload: () => void;
   } | null>(null);
   // The latest cancel. A new send waits for it, and `chat_cancel` returns
   // only once Rust has freed the slot, so the resend is not refused as busy.
@@ -106,13 +108,22 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     }
     const saved = state.conversationId;
     // A refused regenerate or edit was undone in Rust before the refusal
-    // arrived; show the saved conversation as it really is.
+    // arrived, and a stopped one may have completed there first: show the
+    // saved conversation as it really is. A reply still pending there (the
+    // cancel stopped waiting) keeps what the view restored.
     const reload = () => {
       if (input.kind !== "send" && !state.temporary && saved !== null) {
         loadConversation(
           saved,
           (messages) => {
-            dispatch({ type: "reloaded", conversationId: saved, messages });
+            if (messages.every(({ status }) => status !== "streaming")) {
+              dispatch({
+                type: "reloaded",
+                conversationId: saved,
+                streamId,
+                messages,
+              });
+            }
           },
           () => undefined
         );
@@ -153,7 +164,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
         return null;
       }
     );
-    pending.current = { streamId, requestId };
+    pending.current = { streamId, requestId, reload };
     return true;
   };
 
@@ -200,6 +211,8 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     cancelling.current = current.requestId
       .then((id) => (id === null ? undefined : chatCancel(id)))
       .catch(() => undefined);
+    // Once Rust has ended the reply: it may have completed before the Stop.
+    void cancelling.current.then(current.reload);
     dispatch({ type: "cancel" });
   };
 
