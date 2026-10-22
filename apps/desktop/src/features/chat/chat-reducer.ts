@@ -425,7 +425,8 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
     return { ...state, loading: false, messages, settings };
   }
   if (action.type === "settings") {
-    const { settings, error = state.error } = action;
+    // A new change replaces the last one's error; a failed save sets it.
+    const { settings, error = null } = action;
     return { ...state, settings, error };
   }
   if (action.type === "reloaded") {

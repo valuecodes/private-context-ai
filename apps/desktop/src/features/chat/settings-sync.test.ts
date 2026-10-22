@@ -155,6 +155,24 @@ describe("settingsSync", () => {
     expect(sync.current().saved).toEqual(finnish);
   });
 
+  it("does not wait for a send started after the change", async () => {
+    const first = Promise.withResolvers<Conversation>();
+    vi.mocked(conversationUpdateSettings).mockReturnValueOnce(first.promise);
+    const sync = settingsSync();
+    const chat = sync.open("c1");
+    sync.save(hot, vi.fn());
+    sync.save(finnish, vi.fn());
+    // A send that waits for both saves replaces `started`.
+    const send = Promise.withResolvers<string>();
+    chat.started = sync.settled().then(() => send.promise);
+
+    first.resolve(saved("c1"));
+    await sync.settled();
+    send.resolve("r1");
+
+    expect(conversationUpdateSettings).toHaveBeenLastCalledWith("c1", finnish);
+  });
+
   it("settles only after a save in flight", async () => {
     const pending = Promise.withResolvers<Conversation>();
     vi.mocked(conversationUpdateSettings).mockReturnValueOnce(pending.promise);
