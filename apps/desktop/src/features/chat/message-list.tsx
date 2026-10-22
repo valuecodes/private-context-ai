@@ -215,8 +215,10 @@ const MessageItem = memo(
     // No copy button until there is an answer to copy; thinking is not
     // copied.
     const waiting = message.status === "streaming" && message.content === "";
-    // A failed prompt was never saved, so there is nothing to replace.
-    const editable = user && message.status !== "error";
+    // A failed prompt was never saved, so there is nothing to replace; a
+    // new one is editable once its saved id has arrived.
+    const editable =
+      user && message.status !== "error" && message.local !== true;
     if (editing) {
       return (
         <li className="flex flex-col items-end">

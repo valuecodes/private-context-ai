@@ -15,6 +15,8 @@ type UiMessage = {
   status: MessageStatus;
   /** A reply streamed in this view, rather than loaded. */
   live?: true;
+  /** A prompt sent in this view whose saved id has not arrived yet. */
+  local?: true;
   /** The model's reasoning, when it sent any. */
   thinking?: string;
   /** How long it thought before answering; null when not known. */
@@ -263,6 +265,7 @@ const userBubble = (streamId: string, text: string): UiMessage => ({
   role: "user",
   content: text,
   status: "complete",
+  local: true,
 });
 
 const replyBubble = (streamId: string): UiMessage => ({
@@ -372,7 +375,7 @@ const adoptIds = (
   }
   const messages = state.messages.map((message) => {
     if (message.id === local) {
-      return { ...message, id: userMessageId };
+      return { ...message, id: userMessageId, local: undefined };
     }
     return message.id === reply
       ? { ...message, id: assistantMessageId }
