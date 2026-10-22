@@ -131,7 +131,7 @@ const applyCompareEvent = (
     if (chat.type === "done") {
       return { ...withStats(candidate, chat), status: "complete" };
     }
-    return { ...candidate, status: "error" };
+    return { ...candidate, status: "error", failure: chat.error.message };
   };
   return {
     ...state,

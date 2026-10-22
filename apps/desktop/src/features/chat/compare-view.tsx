@@ -36,7 +36,11 @@ const Candidate = ({
   onPick: (messageId: string) => void;
 }) => {
   const waiting = progress === "waiting";
-  const note = waiting ? "Waiting" : STATUS_NOTE[candidate.status];
+  const failure =
+    candidate.status === "error" && candidate.failure !== undefined
+      ? `Failed: ${candidate.failure}`
+      : null;
+  const note = waiting ? "Waiting" : (failure ?? STATUS_NOTE[candidate.status]);
   return (
     <li className="flex min-w-0 flex-col gap-2 rounded-2xl border border-zinc-200 p-3 dark:border-zinc-800">
       <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300">

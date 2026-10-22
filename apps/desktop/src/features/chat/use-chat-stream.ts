@@ -343,6 +343,8 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
           return null;
         }
       );
+    // A settings change waits for it, as for a send.
+    sync.current().started = requestId;
     pending.current = { streamId, requestId, reload };
     return true;
   };

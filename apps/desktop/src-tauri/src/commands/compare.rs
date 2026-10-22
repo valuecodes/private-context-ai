@@ -243,9 +243,21 @@ where
             }
         };
         let sink = recording_sink(Arc::clone(&recorder), candidate);
+        // A Stop during the lookup ends it at once, so the slot is free
+        // within `chat_cancel`'s wait.
+        let lookup = tokio::select! {
+            () = admission.cancelled() => None,
+            think = ollama.chat_think(model, choice.requested()) => Some(think),
+        };
+        let Some(lookup) = lookup else {
+            if let Err(error) = lock(&recorder).finish(MessageStatus::Cancelled) {
+                tracing::warn!(kind = error.kind(), "could not save a stopped answer");
+            }
+            continue;
+        };
         // The connection is checked after the lookup: its ids only grow, so
         // a `think` resolved on any other connection fails here.
-        let think = match ollama.chat_think(model, choice.requested()).await {
+        let think = match lookup {
             Ok(think) => ollama.check_connection(connection).map(|()| think),
             Err(error) => Err(error),
         };
@@ -313,6 +325,7 @@ mod tests {
                 return match model {
                     "thinker" => Reply::Json(ALWAYS_THINKS),
                     "missing" => Reply::Status(404, r#"{"error":"model not found"}"#),
+                    "hanging" => Reply::Silent,
                     _ => Reply::Json(PLAIN),
                 };
             }
@@ -601,6 +614,28 @@ mod tests {
         );
         assert_eq!(chat_bodies(&setup.fake).len(), 1);
         assert_eq!(setup.ollama.inflight_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn compare_cancel_during_lookup_frees_slot() {
+        let setup = setup(ollama_reply(Duration::ZERO, false)).await;
+        let (events, send) = collector();
+
+        let started = compare(&setup, &["hanging", "a"], send).unwrap();
+        for _ in 0..500 {
+            if !setup.fake.log.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        // Returns once the slot is free, well before the lookup's timeout.
+        setup.ollama.chat_cancel(started.request_id).await.unwrap();
+        assert_eq!(setup.ollama.inflight_len(), 0);
+        wait_finished(&events).await;
+
+        let statuses: Vec<MessageStatus> = rows(&setup)[1..].iter().map(|row| row.status).collect();
+        assert_eq!(statuses, [MessageStatus::Cancelled, MessageStatus::Error]);
+        assert!(chat_bodies(&setup.fake).is_empty());
     }
 
     #[tokio::test]

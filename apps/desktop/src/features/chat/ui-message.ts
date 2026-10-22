@@ -22,6 +22,8 @@ type UiMessage = {
   stats?: ReplyStats;
   /** The model that wrote a reply, when known. */
   model?: string;
+  /** Why a compared reply failed, while it is shown live. */
+  failure?: string;
 };
 
 const updateMessage = (

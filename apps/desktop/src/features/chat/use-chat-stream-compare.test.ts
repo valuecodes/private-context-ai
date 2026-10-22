@@ -191,6 +191,7 @@ describe("comparing models in the reducer", () => {
       "error",
       "complete",
     ]);
+    expect(state.compare?.candidates[0]?.failure).toBe("no such model");
     expect(state.error).toBeNull();
     state = apply(state, { type: "finished" });
     expect(state.phase).toBe("idle");

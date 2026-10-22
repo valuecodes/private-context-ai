@@ -122,6 +122,11 @@ impl Admission {
     pub fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
     }
+
+    /// Completes once the slot's request is cancelled.
+    pub async fn cancelled(&self) {
+        self.cancel.cancelled().await;
+    }
 }
 
 /// One `/api/chat` request for [`Ollama::run`].

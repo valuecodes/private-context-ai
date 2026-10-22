@@ -339,7 +339,7 @@ const ChatView = ({
       <div className={`mx-auto w-full max-w-3xl ${empty ? "flex-1" : ""}`}>
         <Composer
           streaming={streaming}
-          canSend={selected !== "" && !state.loading}
+          canSend={selected !== "" && !state.loading && comparison === null}
           onSend={(text) => send(selected, text)}
           onStop={stop}
           temporary={state.temporary}

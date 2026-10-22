@@ -70,6 +70,11 @@ describe("CompareView", () => {
     expect(html).not.toMatch(/disabled=""[^>]*>Continue with this/);
     expect(html).toContain("Stopped");
     expect(html).toContain("Failed");
+    const explained = render(
+      [{ ...candidate("other", "error"), failure: "model not found" }],
+      false
+    );
+    expect(explained).toContain("Failed: model not found");
     expect(html).not.toMatch(/disabled=""[^>]*>Discard/);
   });
 });
