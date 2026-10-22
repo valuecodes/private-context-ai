@@ -4,12 +4,9 @@ import { selectedLevel } from "~/features/chat/think-choice";
 import type { ThinkChoice } from "~/features/chat/think-choice";
 import type { ModelCapabilities, ThinkLevel } from "~/lib/types";
 
-const LEVEL_LABEL: Record<ThinkLevel | "off", string> = {
-  off: "Off",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-};
+/** A level as Ollama names it, capitalized: `xhigh` → `Xhigh`. */
+const levelLabel = (level: ThinkLevel): string =>
+  level.charAt(0).toUpperCase() + level.slice(1);
 
 type ThinkControlProps = {
   caps: ModelCapabilities;
@@ -43,8 +40,9 @@ const ThinkControl = ({ caps, choice, onChange }: ThinkControlProps) => {
     );
   }
   const selected = selectedLevel(caps, choice);
-  const options: (ThinkLevel | "off")[] = style.canDisable
-    ? ["off", ...style.levels]
+  // `null` is Off, so a level a model happens to call "off" stays distinct.
+  const options: (ThinkLevel | null)[] = style.canDisable
+    ? [null, ...style.levels]
     : style.levels;
   return (
     <div className="flex items-center gap-2">
@@ -56,20 +54,21 @@ const ThinkControl = ({ caps, choice, onChange }: ThinkControlProps) => {
         <Brain aria-hidden="true" className="mx-1.5 size-4" />
         {options.map((option) => (
           <button
-            key={option}
+            // Rust drops empty level names, so "" is free for Off.
+            key={option ?? ""}
             type="button"
             role="radio"
             aria-checked={selected === option}
             onClick={() => {
               onChange(
-                option === "off"
+                option === null
                   ? { ...choice, on: false }
                   : { on: true, level: option }
               );
             }}
             className={`px-2 py-0.5 ${selected === option ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}
           >
-            {LEVEL_LABEL[option]}
+            {option === null ? "Off" : levelLabel(option)}
           </button>
         ))}
       </div>

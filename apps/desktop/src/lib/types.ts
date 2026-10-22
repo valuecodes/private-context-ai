@@ -47,7 +47,8 @@ type ModelInfo = {
   parameterSize: string | null;
 };
 
-type ThinkLevel = "low" | "medium" | "high";
+/** A model-defined level (`low`, `high`, `max`, …), as `/api/show` lists it. */
+type ThinkLevel = string;
 
 /** Ollama's `think`: on/off, or a level for models that take one. */
 type Think = boolean | ThinkLevel;
