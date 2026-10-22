@@ -205,23 +205,28 @@ describe("regenerate and edit", () => {
     expect(contents(state)).toEqual(["Hi", "Par"]);
   });
 
-  it("applies a reload only to the open, idle conversation", () => {
+  it("applies a reload only for the revision that ended last", () => {
     const messages = fromStored([stored("x", "user")]);
-    const idle = twoTurns();
-    expect(
-      chatReducer(idle, { type: "reloaded", conversationId: "c1", messages })
-        .messages
-    ).toEqual(messages);
-    expect(
-      chatReducer(idle, { type: "reloaded", conversationId: "c2", messages })
-    ).toBe(idle);
+    const reload = (conversationId = "c1", streamId = "s1") =>
+      ({ type: "reloaded", conversationId, streamId, messages }) as const;
+    const stopped = chatReducer(regenerated(), { type: "cancel" });
+
+    expect(chatReducer(stopped, reload()).messages).toEqual(messages);
+    expect(chatReducer(stopped, reload("c2"))).toBe(stopped);
+    expect(chatReducer(stopped, reload("c1", "s0"))).toBe(stopped);
     const streaming = regenerated();
-    expect(
-      chatReducer(streaming, {
-        type: "reloaded",
-        conversationId: "c1",
-        messages,
-      })
-    ).toBe(streaming);
+    expect(chatReducer(streaming, reload())).toBe(streaming);
+    // A later turn has ended since: the older reload is stale.
+    const later = event(
+      chatReducer(stopped, { type: "send", streamId: "s2", text: "Next" }),
+      { type: "token", content: "x" }
+    );
+    const finished = chatReducer(later, {
+      type: "event",
+      streamId: "s2",
+      event: done,
+      at: 0,
+    });
+    expect(chatReducer(finished, reload())).toBe(finished);
   });
 });
