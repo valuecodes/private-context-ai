@@ -286,6 +286,11 @@ where
             })
             .await;
     }
+    // Every candidate ends with a final status, even one whose own final
+    // write failed, so the group can be picked or discarded.
+    if let Err(error) = storage.settle_compare(turn.group) {
+        tracing::warn!(kind = error.kind(), "could not settle the comparison");
+    }
     // Free the slot first, so a send right after `Finished` is admitted.
     drop(admission);
     send(CompareEvent::Finished);
