@@ -2,6 +2,7 @@
 //! can be tested without Tauri.
 
 pub mod activity;
+pub mod compare;
 pub mod conversations;
 pub mod ollama;
 pub mod settings;

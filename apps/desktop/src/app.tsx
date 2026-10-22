@@ -40,7 +40,7 @@ const Workspace = () => {
     onStarted: conversations.touched,
   });
   // A temporary chat can be left while it answers; leaving discards it.
-  const locked = chat.state.phase === "streaming" && !chat.state.temporary;
+  const locked = chat.state.phase !== "idle" && !chat.state.temporary;
 
   useEffect(() => {
     let cancelled = false;
@@ -145,6 +145,9 @@ const Workspace = () => {
               send={chat.send}
               regenerate={chat.regenerate}
               edit={chat.edit}
+              compare={chat.compare}
+              pick={chat.pick}
+              discard={chat.discard}
               stop={chat.stop}
               onSettings={chat.updateSettings}
               onTemporary={temporary}

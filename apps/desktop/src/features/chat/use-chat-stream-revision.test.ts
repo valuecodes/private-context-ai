@@ -25,6 +25,8 @@ const stored = (
   thinking: null,
   thinkingMs: null,
   evalMs: null,
+  model: null,
+  compareGroup: null,
 });
 
 const event = (state: ChatState, chatEvent: ChatEvent): ChatState =>
@@ -73,6 +75,7 @@ const twoTurns = (): ChatState =>
         stored("u2", "user", "Two"),
         stored("a2", "assistant", "A2"),
       ]),
+      compare: null,
       settings: DEFAULT_SETTINGS,
     }
   );
@@ -215,7 +218,13 @@ describe("regenerate and edit", () => {
   it("applies a reload only for the revision that ended last", () => {
     const messages = fromStored([stored("x", "user")]);
     const reload = (conversationId = "c1", streamId = "s1") =>
-      ({ type: "reloaded", conversationId, streamId, messages }) as const;
+      ({
+        type: "reloaded",
+        conversationId,
+        streamId,
+        messages,
+        compare: null,
+      }) as const;
     const stopped = chatReducer(regenerated(), { type: "cancel" });
 
     expect(chatReducer(stopped, reload()).messages).toEqual(messages);

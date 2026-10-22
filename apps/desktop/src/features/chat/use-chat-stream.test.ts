@@ -44,6 +44,8 @@ const stored = (
   thinking: null,
   thinkingMs: null,
   evalMs: null,
+  model: null,
+  compareGroup: null,
 });
 
 const event = (
@@ -219,6 +221,7 @@ describe("opening conversations", () => {
       type: "loaded",
       conversationId: "c2",
       messages: fromStored([stored("u", "user", "complete")]),
+      compare: null,
       settings: finnish,
     });
     expect(state.loading).toBe(false);
@@ -266,6 +269,7 @@ describe("opening conversations", () => {
       type: "loaded",
       conversationId: "a",
       messages: fromStored([stored("x", "user", "complete")]),
+      compare: null,
       settings: finnish,
     });
     state = chatReducer(state, {
@@ -390,6 +394,7 @@ describe("replyAnnouncement", () => {
           stored("u", "user", "complete"),
           stored("a", "assistant", "complete"),
         ]),
+        compare: null,
         settings: DEFAULT_SETTINGS,
       }
     );

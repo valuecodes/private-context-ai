@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { stopsReply } from "~/features/chat/chat-keys";
 import type { ChatState } from "~/features/chat/chat-reducer";
 import { ChatSettings } from "~/features/chat/chat-settings";
+import { CompareView } from "~/features/chat/compare-view";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
@@ -20,6 +21,7 @@ import type {
 const NOTICE_TEXT: Record<NonNullable<ChatState["notice"]>, string> = {
   busy: "Still answering. Stop it or wait for it to finish.",
   length: "The reply reached the length limit and was cut off.",
+  compare: "Keep one of the compared answers or discard them first.",
 };
 
 type Models =
@@ -49,6 +51,11 @@ type ChatViewProps = {
   send: (model: string, text: string) => boolean;
   regenerate: (model: string) => boolean;
   edit: (model: string, messageId: string, text: string) => boolean;
+  /** Asks `models` the prompt `text` one after another; saved chats only. */
+  compare: (models: string[], text: string) => boolean;
+  /** Keeps a compared answer; resolves `false` when refused. */
+  pick: (messageId: string) => Promise<boolean>;
+  discard: () => void;
   stop: () => void;
   /** The open chat's settings changed; applied from its next send. */
   onSettings: (settings: ConversationSettings) => void;
@@ -67,6 +74,9 @@ const ChatView = ({
   send,
   regenerate,
   edit,
+  compare,
+  pick,
+  discard,
   stop,
   onSettings,
   onTemporary,
@@ -84,7 +94,8 @@ const ChatView = ({
   const content = useRef<HTMLDivElement>(null);
   // Follow new tokens unless the user has scrolled up to read.
   const followBottom = useRef(true);
-  const empty = state.messages.length === 0 && !state.loading;
+  const empty =
+    state.messages.length === 0 && state.compare === null && !state.loading;
 
   // Follows the content's height rather than `state.messages`: a reply's
   // Markdown renders deferred, after the message state has changed.
@@ -141,7 +152,11 @@ const ChatView = ({
   );
   // An opened conversation may name a model that is no longer installed.
   const selected = pickModel(modelList, model, defaultModel);
-  const streaming = state.phase === "streaming";
+  // A reply or a comparison is running: Stop applies to either.
+  const streaming = state.phase !== "idle";
+  const comparison = state.compare;
+  // Only a saved chat compares: the candidates are saved rows.
+  const canCompare = !state.temporary && state.conversationId !== null;
   // Only an empty new chat can switch: a started chat is saved or not.
   const canToggleTemporary =
     state.conversationId === null &&
@@ -278,12 +293,36 @@ const ChatView = ({
           <div ref={content} className="mx-auto w-full max-w-3xl">
             <MessageList
               messages={state.messages}
-              busy={streaming || state.loading || selected === ""}
+              busy={
+                streaming ||
+                state.loading ||
+                selected === "" ||
+                comparison !== null
+              }
               onRegenerate={() => {
                 regenerate(selected);
               }}
               onEdit={(messageId, text) => edit(selected, messageId, text)}
             />
+            {comparison !== null && (
+              <div className={state.messages.length === 0 ? "" : "mt-4"}>
+                <CompareView
+                  compare={comparison}
+                  comparing={state.phase === "comparing"}
+                  onPick={(messageId) => {
+                    const model = comparison.candidates.find(
+                      ({ id }) => id === messageId
+                    )?.model;
+                    void pick(messageId).then((kept) => {
+                      if (kept && model !== undefined) {
+                        setModel(model);
+                      }
+                    });
+                  }}
+                  onDiscard={discard}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -304,6 +343,15 @@ const ChatView = ({
           onSend={(text) => send(selected, text)}
           onStop={stop}
           temporary={state.temporary}
+          compare={
+            canCompare
+              ? {
+                  models: modelList.map(({ name }) => name),
+                  current: selected,
+                  onCompare: (text, models) => compare(models, text),
+                }
+              : undefined
+          }
         />
       </div>
     </div>

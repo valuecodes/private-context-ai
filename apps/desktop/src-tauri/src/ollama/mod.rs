@@ -5,6 +5,8 @@
 
 pub mod client;
 pub mod stream;
+#[cfg(test)]
+pub(crate) mod testing;
 pub mod types;
 
 use std::collections::HashMap;
@@ -108,6 +110,29 @@ impl Drop for InflightGuard {
 pub struct Admission {
     guard: InflightGuard,
     cancel: CancellationToken,
+}
+
+impl Admission {
+    /// The id `chat_cancel` takes for this slot.
+    pub fn request_id(&self) -> Uuid {
+        self.guard.request_id
+    }
+
+    /// Cancelled by `chat_cancel` or `cancel_conversation`.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.is_cancelled()
+    }
+}
+
+/// One `/api/chat` request for [`Ollama::run`].
+pub struct ChatCall<'a> {
+    pub model: &'a str,
+    pub messages: &'a [ChatMessage],
+    pub options: Option<&'a ChatOptions>,
+    /// From [`Ollama::chat_think`].
+    pub think: ChatThink,
+    /// `Some(0)` unloads the model once it has answered.
+    pub keep_alive: Option<u32>,
 }
 
 /// Which [`Connection`] something was decided against. Every
@@ -440,26 +465,104 @@ impl Ollama {
     /// last, so a request refused here leaves no `attempt` behind.
     fn prepare_chat(
         &self,
-        model: &str,
-        messages: &[ChatMessage],
-        options: Option<&ChatOptions>,
-        think: ChatThink,
+        call: ChatCall<'_>,
     ) -> Result<(reqwest::Client, url::Url, Vec<u8>, Tracked), AppError> {
         let connection = self.connection();
-        if connection.id != think.connection {
+        if connection.id != call.think.connection {
             return Err(connection_changed());
         }
         let (base, http) = connection.get()?;
         let body = serde_json::to_vec(&ChatRequest {
-            model,
-            messages,
+            model: call.model,
+            messages: call.messages,
             stream: true,
-            options,
-            think: think.think,
+            options: call.options,
+            think: call.think.think,
+            keep_alive: call.keep_alive,
         })
         .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
-        let tracked = Tracked::begin(&self.audit, "ollama.chat", base, "/api/chat", Some(model))?;
+        let tracked = Tracked::begin(
+            &self.audit,
+            "ollama.chat",
+            base,
+            "/api/chat",
+            Some(call.model),
+        )?;
         Ok((http.clone(), base.endpoint("/api/chat"), body, tracked))
+    }
+
+    /// Streams one prepared request to its end. A failure that was not a
+    /// cancel reaches `sink` as an `Error` event. Returns the end and the
+    /// outcome to write once the caller has handled the end.
+    async fn stream(
+        &self,
+        http: &reqwest::Client,
+        url: url::Url,
+        body: Vec<u8>,
+        cancel: &CancellationToken,
+        sink: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
+    ) -> (ChatEnd, AuditOutcome) {
+        let run = run_chat(http, url, body, &self.limits, cancel, sink).await;
+        if let ChatEnd::Failed(error) = &run.end
+            && !cancel.is_cancelled()
+        {
+            sink(ChatEvent::Error {
+                error: error.clone(),
+            });
+        }
+        let outcome = match &run.end {
+            ChatEnd::Done {
+                prompt_tokens,
+                completion_tokens,
+                ..
+            } => AuditOutcome {
+                prompt_tokens: *prompt_tokens,
+                completion_tokens: *completion_tokens,
+                ..AuditOutcome::new(AuditStatus::Ok)
+            },
+            ChatEnd::Cancelled => AuditOutcome::new(AuditStatus::Cancelled),
+            ChatEnd::Failed(error) => AuditOutcome::failed(error, run.http_status),
+        };
+        (run.end, outcome)
+    }
+
+    /// Runs one chat on `admission`'s slot and waits for its end, so several
+    /// chats can run one after another on one slot. Otherwise like
+    /// [`Self::start`]: the `attempt` row is written before the socket
+    /// opens, and `on_end` runs exactly once, before the outcome is written.
+    /// A request refused before its socket opens also reaches `sink` as an
+    /// `Error` event. Once the admission is cancelled, a run ends as
+    /// `Cancelled` without a request.
+    pub async fn run<E>(
+        &self,
+        admission: &Admission,
+        call: ChatCall<'_>,
+        sink: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
+        on_end: E,
+    ) where
+        E: FnOnce(&ChatEnd),
+    {
+        if admission.is_cancelled() {
+            on_end(&ChatEnd::Cancelled);
+            return;
+        }
+        let (http, url, body, tracked) = match self.prepare_chat(call) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                sink(ChatEvent::Error {
+                    error: error.clone(),
+                });
+                on_end(&ChatEnd::Failed(error));
+                return;
+            }
+        };
+        let span = tracked.span.clone();
+        let (end, outcome) = self
+            .stream(&http, url, body, &admission.cancel, sink)
+            .instrument(span)
+            .await;
+        on_end(&end);
+        tracked.finish(outcome);
     }
 
     /// Writes the request's `attempt` row, spawns the streaming worker for an
@@ -483,7 +586,14 @@ impl Ollama {
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
         E: FnOnce(&ChatEnd) + Send + 'static,
     {
-        let (http, url, body, tracked) = match self.prepare_chat(model, messages, options, think) {
+        let call = ChatCall {
+            model,
+            messages,
+            options,
+            think,
+            keep_alive: None,
+        };
+        let (http, url, body, tracked) = match self.prepare_chat(call) {
             Ok(prepared) => prepared,
             Err(err) => {
                 on_end(&ChatEnd::Failed(err.clone()));
@@ -498,28 +608,8 @@ impl Ollama {
         tokio::spawn(
             async move {
                 let _guard = guard;
-                let run = run_chat(&http, url, body, &this.limits, &cancel, &sink).await;
-                if let ChatEnd::Failed(error) = &run.end
-                    && !cancel.is_cancelled()
-                {
-                    sink(ChatEvent::Error {
-                        error: error.clone(),
-                    });
-                }
-                on_end(&run.end);
-                let outcome = match &run.end {
-                    ChatEnd::Done {
-                        prompt_tokens,
-                        completion_tokens,
-                        ..
-                    } => AuditOutcome {
-                        prompt_tokens: *prompt_tokens,
-                        completion_tokens: *completion_tokens,
-                        ..AuditOutcome::new(AuditStatus::Ok)
-                    },
-                    ChatEnd::Cancelled => AuditOutcome::new(AuditStatus::Cancelled),
-                    ChatEnd::Failed(error) => AuditOutcome::failed(error, run.http_status),
-                };
+                let (end, outcome) = this.stream(&http, url, body, &cancel, &sink).await;
+                on_end(&end);
                 tracked.finish(outcome);
             }
             .instrument(span),
@@ -580,8 +670,7 @@ mod tests {
     use std::net::SocketAddr;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::{TcpListener, TcpStream};
+    use tokio::net::TcpListener;
 
     use super::*;
     use crate::audit::AuditEvent;
@@ -590,118 +679,7 @@ mod tests {
     use crate::storage::Storage;
     use crate::storage::testing::{break_writes, temp_storage};
 
-    /// What the fake Ollama answers to every connection.
-    #[derive(Clone)]
-    enum Reply {
-        /// `200` with these NDJSON lines, each sent after `delay`.
-        Lines(Vec<&'static str>, Duration),
-        /// `200` with a JSON body.
-        Json(&'static str),
-        /// An error status with a JSON body.
-        Status(u16, &'static str),
-        /// Accepts and reads the request, then never answers.
-        Silent,
-        /// `200`, then `chunk` repeated until the client hangs up.
-        Endless(&'static str),
-    }
-
-    type Bodies = Arc<Mutex<Vec<serde_json::Value>>>;
-
-    struct Fake {
-        addr: SocketAddr,
-        accepted: Arc<AtomicUsize>,
-        /// Every JSON request body received, in order.
-        bodies: Bodies,
-    }
-
-    async fn fake_ollama(reply: Reply) -> Fake {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        let accepted = Arc::new(AtomicUsize::new(0));
-        let counter = Arc::clone(&accepted);
-        let bodies = Bodies::default();
-        let received = Arc::clone(&bodies);
-        tokio::spawn(async move {
-            while let Ok((socket, _)) = listener.accept().await {
-                counter.fetch_add(1, Ordering::SeqCst);
-                tokio::spawn(serve(socket, reply.clone(), Arc::clone(&received)));
-            }
-        });
-        Fake {
-            addr,
-            accepted,
-            bodies,
-        }
-    }
-
-    /// Reads one request (headers plus `content-length` body), then answers.
-    async fn serve(mut socket: TcpStream, reply: Reply, bodies: Bodies) {
-        let mut request = Vec::new();
-        let mut buf = [0u8; 4096];
-        let body_start = loop {
-            let Ok(n) = socket.read(&mut buf).await else {
-                return;
-            };
-            if n == 0 {
-                return;
-            }
-            request.extend_from_slice(&buf[..n]);
-            if let Some(pos) = request.windows(4).position(|w| w == b"\r\n\r\n") {
-                break pos + 4;
-            }
-        };
-        let headers = String::from_utf8_lossy(&request[..body_start]).to_ascii_lowercase();
-        let length: usize = headers
-            .lines()
-            .find_map(|line| line.strip_prefix("content-length:"))
-            .map_or(0, |value| value.trim().parse().unwrap());
-        while request.len() < body_start + length {
-            match socket.read(&mut buf).await {
-                Ok(0) | Err(_) => return,
-                Ok(n) => request.extend_from_slice(&buf[..n]),
-            }
-        }
-        if let Ok(body) = serde_json::from_slice(&request[body_start..]) {
-            bodies.lock().unwrap().push(body);
-        }
-
-        let head = |status: u16| {
-            format!(
-                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n"
-            )
-        };
-        match reply {
-            Reply::Lines(lines, delay) => {
-                let _ = socket.write_all(head(200).as_bytes()).await;
-                for line in lines {
-                    tokio::time::sleep(delay).await;
-                    if socket
-                        .write_all(format!("{line}\n").as_bytes())
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-            }
-            Reply::Json(body) => {
-                let _ = socket.write_all(head(200).as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-            }
-            Reply::Status(status, body) => {
-                let _ = socket.write_all(head(status).as_bytes()).await;
-                let _ = socket.write_all(body.as_bytes()).await;
-            }
-            Reply::Silent => std::future::pending::<()>().await,
-            Reply::Endless(chunk) => {
-                let _ = socket.write_all(head(200).as_bytes()).await;
-                while socket.write_all(chunk.as_bytes()).await.is_ok() {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            }
-        }
-        let _ = socket.shutdown().await;
-    }
+    use super::testing::{Reply, fake_ollama};
 
     fn test_limits() -> Limits {
         Limits {

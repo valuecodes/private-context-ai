@@ -2,6 +2,7 @@
 //! keychain and never reaches the webview.
 
 pub mod audit;
+pub mod compare;
 pub mod conversations;
 pub mod db;
 pub mod export;

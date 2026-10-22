@@ -54,6 +54,7 @@ describe("chat settings in the reducer", () => {
       type: "loaded",
       conversationId: "c1",
       messages: [],
+      compare: null,
       settings: finnish,
     });
     expect(state.settings).toEqual(finnish);

@@ -52,6 +52,7 @@ What the app guarantees, and what enforces it:
   model advertises, and only to models whose audited `/api/show` lists `thinking`; it
   is `false` unless you turn Think on (models that always think get a level). Thinking
   text is stored encrypted, shown collapsed, and never sent back to the model.
+  Comparing models adds only `keep_alive: 0`, which unloads each model but the last.
   Replies are rendered as Markdown into
   React elements with raw HTML disabled: links and images are inert (no `href`, nothing
   fetched), code highlighting is local JS, and nothing in a reply is executed.

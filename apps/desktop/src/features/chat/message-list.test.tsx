@@ -151,4 +151,15 @@ describe("MessageList", () => {
     );
     expect(render([message("assistant", fence)])).toContain("hljs-");
   });
+
+  it("labels a reply with its model, and older replies with none", () => {
+    const labelled: UiMessage = {
+      ...message("assistant", "Reply"),
+      model: "qwen3.5:9b",
+    };
+    expect(render([labelled])).toContain(">qwen3.5:9b</span>");
+    const older = render([message("assistant", "Old")]);
+    expect(older).not.toContain("qwen");
+    expect(older).not.toContain("mb-1 block text-xs");
+  });
 });
