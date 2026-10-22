@@ -78,9 +78,10 @@ const settingsSync = () => {
     save: (settings: ConversationSettings, onFailed: OnFailed) => {
       const target = current;
       target.revision += 1;
-      const { revision } = target;
+      // Read now: a later send replaces `started` and waits for this save.
+      const { revision, started } = target;
       chain = chain
-        .then(() => target.started)
+        .then(() => started)
         .then(() => store(target, settings))
         .then(
           () => {

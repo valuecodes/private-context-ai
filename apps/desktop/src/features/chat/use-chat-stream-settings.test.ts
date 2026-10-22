@@ -70,5 +70,9 @@ describe("chat settings in the reducer", () => {
     );
     expect(state.settings).toEqual(DEFAULT_SETTINGS);
     expect(state.error).toEqual(error);
+
+    // The next change clears it.
+    const retried = chatReducer(state, { type: "settings", settings: finnish });
+    expect(retried.error).toBeNull();
   });
 });
