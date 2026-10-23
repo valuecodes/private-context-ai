@@ -44,11 +44,24 @@ describe("ChatSettingsPanel", () => {
     );
   });
 
+  it("disables the Charts switch for a model without tools", () => {
+    const off = panel(DEFAULT_SETTINGS, { ...qwen3, tools: false });
+    expect(off).toMatch(/<input[^>]*id="charts"[^>]*disabled=""/);
+    expect(off).toContain("doesn&#x27;t support tools");
+    const unknown = panel(DEFAULT_SETTINGS);
+    expect(unknown).toMatch(/<input[^>]*id="charts"[^>]*disabled=""/);
+
+    const on = panel({ ...DEFAULT_SETTINGS, charts: true }, qwen3);
+    expect(on).toMatch(/<input[^>]*id="charts"[^>]*checked=""/);
+    expect(on).not.toMatch(/<input[^>]*id="charts"[^>]*disabled=""/);
+  });
+
   it("shows the saved values", () => {
     const html = panel({
       systemPrompt: "Answer only in Finnish",
       options: { temperature: 0.7, num_ctx: 16_384 },
       think: { kind: "off" },
+      charts: false,
     });
     expect(html).toContain("Answer only in Finnish</textarea>");
     expect(html).toContain("0.7");

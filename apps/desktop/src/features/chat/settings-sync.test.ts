@@ -12,12 +12,14 @@ const finnish: ConversationSettings = {
   systemPrompt: "Answer only in Finnish",
   options: {},
   think: { kind: "off" },
+  charts: false,
 };
 
 const hot: ConversationSettings = {
   systemPrompt: "",
   options: { temperature: 1.9 },
   think: { kind: "on" },
+  charts: true,
 };
 
 const refused: AppError = { kind: "invalidInput", message: "too hot" };

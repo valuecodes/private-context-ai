@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::commands::ollama::ReplyRecorder;
 use crate::error::AppError;
+use crate::ollama::chart_tool::{ChartEntry, replay};
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
@@ -21,6 +22,20 @@ const MAX_SESSIONS: usize = 8;
 struct TempMessage {
     id: Uuid,
     message: ChatMessage,
+    /// A reply's `render_chart` calls.
+    charts: Vec<ChartEntry>,
+}
+
+impl TempMessage {
+    /// What the model is sent for this message: a charted reply as its
+    /// calls and their results.
+    fn history(&self) -> Vec<ChatMessage> {
+        if self.message.role == ChatRole::Assistant && !self.charts.is_empty() {
+            replay(self.message.content.expose(), &self.charts)
+        } else {
+            vec![self.message.clone()]
+        }
+    }
 }
 
 /// What a running regenerate or edit replaced: the messages from `base` on,
@@ -45,6 +60,8 @@ pub struct TempTurn {
     /// The system prompt, earlier messages and the prompt.
     pub history: Vec<ChatMessage>,
     pub options: Option<ChatOptions>,
+    /// The Charts setting, read with the history.
+    pub charts: bool,
 }
 
 impl Session {
@@ -176,19 +193,18 @@ impl TempChats {
         };
         let prompt = input.prompt().map(|prompt| TempMessage {
             id: user_id,
-            message: ChatMessage {
-                role: ChatRole::User,
-                content: prompt.clone(),
-            },
+            message: ChatMessage::new(ChatRole::User, prompt.clone()),
+            charts: Vec::new(),
         });
         let history: Vec<ChatMessage> = session.messages[..cut.unwrap_or(session.messages.len())]
             .iter()
             .chain(&prompt)
-            .map(|message| message.message.clone())
+            .flat_map(TempMessage::history)
             .collect();
         let history = with_system_prompt(&session.settings, history);
         check(&history, &session.settings)?;
         let options = session.settings.options();
+        let charts = session.settings.charts;
         if let Some(base) = cut {
             let tail = session.messages.split_off(base);
             session.revision = Some(Revision { base, tail });
@@ -198,6 +214,7 @@ impl TempChats {
             user_id,
             history,
             options,
+            charts,
         })
     }
 
@@ -266,6 +283,7 @@ pub struct MemoryRecorder {
     /// replaced.
     revision: bool,
     content: String,
+    charts: Vec<ChartEntry>,
     finished: bool,
 }
 
@@ -277,6 +295,7 @@ impl MemoryRecorder {
             message_id,
             revision,
             content: String::new(),
+            charts: Vec::new(),
             finished: false,
         }
     }
@@ -289,10 +308,11 @@ impl MemoryRecorder {
         if let Some(chats) = self.chats.upgrade() {
             let reply = keep.then(|| TempMessage {
                 id: self.message_id,
-                message: ChatMessage {
-                    role: ChatRole::Assistant,
-                    content: Redacted::new(std::mem::take(&mut self.content)),
-                },
+                message: ChatMessage::new(
+                    ChatRole::Assistant,
+                    Redacted::new(std::mem::take(&mut self.content)),
+                ),
+                charts: std::mem::take(&mut self.charts),
             });
             chats.end_reply(self.session_id, reply);
         }
@@ -309,6 +329,17 @@ impl ReplyRecorder for MemoryRecorder {
 
     fn push_thinking(&mut self, _chunk: &Redacted) -> Result<(), AppError> {
         Ok(())
+    }
+
+    fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError> {
+        if !self.finished {
+            self.charts.push(entry.clone());
+        }
+        Ok(())
+    }
+
+    fn text(&self) -> String {
+        self.content.clone()
     }
 
     fn complete(&mut self, _stats: ReplyStats) -> Result<(), AppError> {
@@ -606,6 +637,51 @@ mod tests {
                 (ChatRole::User, "Four"),
             ]
         );
+    }
+
+    #[test]
+    fn temp_history_replays_chart() {
+        use crate::ollama::chart_tool::{ChartKind, ChartSpec};
+
+        let chats = Arc::new(TempChats::default());
+        let id = chats
+            .start_with(ConversationSettings {
+                charts: true,
+                ..ConversationSettings::default()
+            })
+            .unwrap();
+        let turn = chats.begin(id, &new("Chart it"), |_, _| Ok(())).unwrap();
+        assert!(turn.charts);
+        let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
+        recorder.push(&Redacted::new("Here:")).unwrap();
+        recorder
+            .push_chart(&ChartEntry {
+                offset: 5,
+                spec: Some(ChartSpec {
+                    title: "t".into(),
+                    kind: ChartKind::Pie,
+                    labels: vec!["a".into()],
+                    values: vec![1.0],
+                }),
+                error: None,
+            })
+            .unwrap();
+        assert_eq!(recorder.text(), "Here:");
+        recorder.push(&Redacted::new(" Done.")).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
+
+        let next = chats.begin(id, &new("Thanks"), |_, _| Ok(())).unwrap();
+        assert_eq!(
+            texts(&next.history),
+            [
+                (ChatRole::User, "Chart it"),
+                (ChatRole::Assistant, "Here:"),
+                (ChatRole::Tool, "The chart was shown to the user."),
+                (ChatRole::Assistant, " Done."),
+                (ChatRole::User, "Thanks"),
+            ]
+        );
+        assert!(next.history[1].tool_calls.is_some());
     }
 
     #[test]

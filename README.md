@@ -2,8 +2,9 @@
 
 A secure local AI sandbox: a Tauri 2 desktop app that streams chat replies from an
 Ollama server you run yourself, on this computer. Chat history is encrypted at rest, the
-model gets no tools, the app contacts nothing but Ollama on loopback, and an Activity
-view lists every request it made.
+model gets at most one display-only tool (`render_chart`, only when you turn Charts on),
+the app contacts nothing but Ollama on loopback, and an Activity view lists every request
+it made.
 
 ## Architecture
 
@@ -47,8 +48,15 @@ What the app guarantees, and what enforces it:
   credentials, path, query or fragment. The HTTP client ignores system proxies, follows
   no redirects and pins `localhost` to `127.0.0.1`. `reqwest` is built without any TLS
   backend, so the binary cannot speak HTTPS at all.
-- **The model gets no tools.** `/api/chat` is sent without `tools` or `format`; the
-  request type has no such fields. `think` is sent only as a boolean or a level the
+- **The model gets one display-only tool, only when you turn Charts on, never with
+  `format`.** The request type has no `format` field. `tools` is only ever the fixed
+  `render_chart` definition in Rust, sent on the first request of a turn when the chat's
+  Charts switch is on and the model's audited `/api/show` lists `tools`. Rust validates
+  each call (bar, line or pie; 1 to 100 finite values; short trimmed text), and the
+  webview draws it as SVG from those numbers: nothing runs, nothing is fetched, the model
+  supplies no markup, and its text reaches the page only as text. A follow-up request with
+  a fixed result line and no `tools` lets the model comment, so it cannot call again.
+  Each request writes its own audit row. `think` is sent only as a boolean or a level the
   model advertises, and only to models whose audited `/api/show` lists `thinking`; it
   is `false` unless you turn Think on (models that always think get a level). Thinking
   text is stored encrypted, shown collapsed, and never sent back to the model.

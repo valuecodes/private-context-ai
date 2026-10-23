@@ -26,8 +26,8 @@ type ChatSettingsProps = {
 };
 
 /**
- * The open chat's settings: system prompt, temperature, context size and
- * Think. Each change applies from the next send.
+ * The open chat's settings: system prompt, temperature, context size, Think
+ * and Charts. Each change applies from the next send.
  */
 const ChatSettingsPanel = ({
   settings,
@@ -138,6 +138,29 @@ const ChatSettingsPanel = ({
           />
         </div>
       )}
+      <div className="flex flex-col gap-1">
+        <label className="flex items-center gap-2 font-medium">
+          <input
+            id="charts"
+            type="checkbox"
+            checked={settings.charts}
+            disabled={caps?.tools !== true}
+            aria-describedby="charts-hint"
+            onChange={(event) => {
+              onChange({ ...settings, charts: event.currentTarget.checked });
+            }}
+          />
+          Charts
+        </label>
+        <p
+          id="charts-hint"
+          className="text-xs text-zinc-500 dark:text-zinc-400"
+        >
+          {caps?.tools === true
+            ? "Lets the model draw bar, line and pie charts. Nothing is run or fetched."
+            : "This model can't draw charts: it doesn't support tools."}
+        </p>
+      </div>
     </fieldset>
   );
 };

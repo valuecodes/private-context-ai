@@ -9,9 +9,10 @@ use std::time::Duration;
 
 use private_context_ai_lib::audit::Audit;
 use private_context_ai_lib::observability;
+use private_context_ai_lib::ollama::chart_tool::ChartEntry;
 use private_context_ai_lib::ollama::client::OllamaBaseUrl;
 use private_context_ai_lib::ollama::types::{ChatMessage, ChatRole};
-use private_context_ai_lib::ollama::{ChatThink, Ollama};
+use private_context_ai_lib::ollama::{ChatCall, ChatThink, Ollama};
 use private_context_ai_lib::redacted::Redacted;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -84,24 +85,30 @@ async fn request_log_has_counts_and_no_content() {
 
     let base = OllamaBaseUrl::parse(&fake_ollama().await);
     let ollama = Arc::new(Ollama::new(base, Arc::new(Audit::new())));
-    let messages = vec![ChatMessage {
-        role: ChatRole::User,
-        content: Redacted::new("secret-prompt"),
-    }];
+    let messages = vec![ChatMessage::new(
+        ChatRole::User,
+        Redacted::new("secret-prompt"),
+    )];
     let admission = ollama.admit(Uuid::new_v4()).unwrap();
     // A model that cannot think, on the current connection.
     let think = ChatThink {
         think: None,
         connection: ollama.connection_id(),
+        tools: false,
     };
     ollama
         .start(
             admission,
-            "llama3.2",
-            &messages,
-            None,
-            think,
+            ChatCall {
+                model: "llama3.2",
+                messages: &messages,
+                options: None,
+                think,
+                keep_alive: None,
+                tools: false,
+            },
             |_| true,
+            |_: &[ChartEntry]| Vec::new(),
             |_| {},
         )
         .unwrap();

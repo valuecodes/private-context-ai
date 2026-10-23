@@ -152,6 +152,46 @@ describe("MessageList", () => {
     expect(render([message("assistant", fence)])).toContain("hljs-");
   });
 
+  it("shows the text before a chart, the chart, then the rest", () => {
+    const charted: UiMessage = {
+      ...message("assistant", "Before text.After text."),
+      charts: [
+        {
+          offset: 12,
+          spec: { title: "Pop", type: "line", labels: ["a"], values: [1] },
+        },
+        { offset: 12, spec: null, error: "a chart has 1 to 100 values" },
+      ],
+    };
+    const html = render([charted]);
+    const before = html.indexOf("Before text.");
+    const chart = html.indexOf("<svg");
+    const failed = html.indexOf("Chart could not be shown");
+    const after = html.indexOf("After text.");
+    expect(before).toBeGreaterThan(-1);
+    expect(chart).toBeGreaterThan(before);
+    expect(failed).toBeGreaterThan(chart);
+    expect(after).toBeGreaterThan(failed);
+    expect(html).not.toContain("Before text.After");
+  });
+
+  it("waits for the commentary under a chart while it streams", () => {
+    const html = render([
+      {
+        ...message("assistant", "", "streaming"),
+        charts: [
+          {
+            offset: 0,
+            spec: { title: "Pop", type: "bar", labels: ["a"], values: [1] },
+          },
+        ],
+      },
+    ]);
+    expect(html.indexOf("<svg")).toBeLessThan(
+      html.indexOf("Assistant is typing")
+    );
+  });
+
   it("labels a reply with its model, and older replies with none", () => {
     const labelled: UiMessage = {
       ...message("assistant", "Reply"),

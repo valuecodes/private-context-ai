@@ -9,12 +9,12 @@ use tauri::ipc::Channel;
 use uuid::Uuid;
 
 use crate::commands::ollama::{
-    SendRequest, SendStarted, Shared, channel_sink, check_prompt, check_turn, finish_turn,
-    recording_sink,
+    SendRequest, SendStarted, Shared, channel_sink, chart_follow_up, check_prompt, check_turn,
+    finish_turn, recording_sink,
 };
 use crate::error::AppError;
 use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
-use crate::ollama::{ChatThink, Ollama};
+use crate::ollama::{ChatCall, ChatThink, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::TurnInput;
@@ -184,14 +184,21 @@ where
         revision,
     )));
     let sink = recording_sink(Arc::clone(&recorder), send);
+    let tools = turn.charts && think.tools;
+    let follow_up = chart_follow_up(&recorder, &turn.history, tools);
     let request_id = ollama
         .start(
             admission,
-            &model,
-            &turn.history,
-            turn.options.as_ref(),
-            think,
+            ChatCall {
+                model: &model,
+                messages: &turn.history,
+                options: turn.options.as_ref(),
+                think,
+                keep_alive: None,
+                tools,
+            },
             sink,
+            follow_up,
             move |end| finish_turn(&recorder, end),
         )
         .inspect_err(|_| {

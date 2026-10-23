@@ -7,10 +7,11 @@ use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use super::Limits;
+use super::chart_tool::{ChartEntry, MAX_CHARTS, utf16_len};
 use super::client::{
     MAX_ERROR_BODY, MAX_ERROR_CHARS, http_error, map_reqwest, read_limited, truncate,
 };
-use super::types::{ChatEvent, ChatLine};
+use super::types::{ChatEvent, ChatLine, ChatLineMessage};
 use crate::error::AppError;
 
 /// Splits a byte stream into NDJSON lines, keeping a partial line between
@@ -74,7 +75,7 @@ fn parse_line(bytes: &[u8]) -> Result<Option<ChatLine>, AppError> {
 }
 
 /// How a chat stream ended.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ChatEnd {
     Done {
         prompt_tokens: Option<u64>,
@@ -82,6 +83,9 @@ pub enum ChatEnd {
         duration_ms: Option<u64>,
         thinking_ms: Option<u64>,
         eval_ms: Option<u64>,
+        /// The reply's `render_chart` calls. When there are any, no `Done`
+        /// event was emitted: a follow-up request continues the reply.
+        charts: Vec<ChartEntry>,
     },
     Cancelled,
     Failed(AppError),
@@ -96,16 +100,25 @@ pub struct ChatRun {
 
 /// Sends the request and streams the reply into `emit`. Never emits after
 /// `cancel` fires; a `false` from `emit` (the receiver is gone) cancels.
+/// Tool calls are read only when the request offered `tools`.
 pub async fn run_chat(
     http: &reqwest::Client,
     url: Url,
     body: Vec<u8>,
+    tools: bool,
     limits: &Limits,
     cancel: &CancellationToken,
     emit: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
 ) -> ChatRun {
     let mut http_status = None;
-    let end = match stream_reply(http, url, body, limits, cancel, emit, &mut http_status).await {
+    let reply = Reply {
+        http,
+        url,
+        body,
+        tools,
+        limits,
+    };
+    let end = match stream_reply(reply, cancel, emit, &mut http_status).await {
         Ok(end) => end,
         Err(_) if cancel.is_cancelled() => ChatEnd::Cancelled,
         Err(err) => ChatEnd::Failed(err),
@@ -176,15 +189,59 @@ fn emit_checked(
     }
 }
 
-async fn stream_reply(
-    http: &reqwest::Client,
+/// One request for [`stream_reply`].
+struct Reply<'a> {
+    http: &'a reqwest::Client,
     url: Url,
     body: Vec<u8>,
-    limits: &Limits,
+    tools: bool,
+    limits: &'a Limits,
+}
+
+/// Checks the first [`MAX_CHARTS`] calls and emits a `Chart` or `ChartError`
+/// for each, all at `offset`. `None` when the receiver is gone.
+fn emit_charts(
+    calls: Vec<super::types::ToolCallLine>,
+    offset: u64,
+    cancel: &CancellationToken,
+    emit: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
+) -> Option<Vec<ChartEntry>> {
+    let charts: Vec<ChartEntry> = calls
+        .into_iter()
+        .take(MAX_CHARTS)
+        .map(|call| ChartEntry::checked(offset, &call.function.name, &call.function.arguments))
+        .collect();
+    for entry in &charts {
+        let event = match &entry.spec {
+            Some(spec) => ChatEvent::Chart {
+                offset,
+                spec: spec.clone(),
+            },
+            None => ChatEvent::ChartError {
+                offset,
+                reason: entry.error.clone().unwrap_or_default(),
+            },
+        };
+        if !emit_checked(cancel, emit, event) {
+            return None;
+        }
+    }
+    Some(charts)
+}
+
+async fn stream_reply(
+    reply: Reply<'_>,
     cancel: &CancellationToken,
     emit: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
     http_status: &mut Option<u16>,
 ) -> Result<ChatEnd, AppError> {
+    let Reply {
+        http,
+        url,
+        body,
+        tools,
+        limits,
+    } = reply;
     // One deadline covers the response headers and the first body chunk,
     // since a cold model load can take a while before either arrives.
     let first_deadline = Instant::now() + limits.first_chunk;
@@ -217,6 +274,9 @@ async fn stream_reply(
     // Answer and thinking bytes together, against `max_content_bytes`.
     let mut content = 0usize;
     let mut thinking = ThinkingClock::default();
+    // The answer's length in UTF-16 units, where its charts go.
+    let mut answer_units = 0u64;
+    let mut calls = Vec::new();
     let mut deadline = first_deadline;
     loop {
         let chunk = match step(cancel, deadline, resp.chunk()).await? {
@@ -243,9 +303,18 @@ async fn stream_reply(
             if let Some(error) = line.error {
                 return Err(AppError::Ollama(truncate(&error, MAX_ERROR_CHARS)));
             }
-            let message = line.message.unwrap_or_default();
+            let ChatLineMessage {
+                content: answer,
+                thinking: thought,
+                tool_calls,
+            } = line.message.unwrap_or_default();
+            if tools && let Some(tool_calls) = tool_calls {
+                // Only the first few are used; the rest are never kept.
+                let room = MAX_CHARTS.saturating_sub(calls.len());
+                calls.extend(tool_calls.into_iter().take(room));
+            }
             // Thinking comes first: within one line it precedes the answer.
-            for (text, is_thinking) in [(message.thinking, true), (message.content, false)] {
+            for (text, is_thinking) in [(thought, true), (answer, false)] {
                 let Some(text) = text.filter(|text| !text.is_empty()) else {
                     continue;
                 };
@@ -261,6 +330,7 @@ async fn stream_reply(
                     ChatEvent::Thinking { content: text }
                 } else {
                     thinking.answered();
+                    answer_units += utf16_len(text.expose());
                     ChatEvent::Token { content: text }
                 };
                 if !emit_checked(cancel, emit, event) {
@@ -272,23 +342,31 @@ async fn stream_reply(
                 let eval_ms = line.eval_duration.map(|nanos| nanos / 1_000_000);
                 thinking.answered();
                 let thinking_ms = thinking.ms();
-                let done = ChatEvent::Done {
-                    prompt_tokens: line.prompt_eval_count,
-                    completion_tokens: line.eval_count,
-                    duration_ms,
-                    done_reason: line.done_reason,
-                    thinking_ms,
-                    eval_ms,
+                let Some(charts) =
+                    emit_charts(std::mem::take(&mut calls), answer_units, cancel, emit)
+                else {
+                    return Ok(ChatEnd::Cancelled);
                 };
-                // The reply is complete either way; a closed receiver only
-                // means nobody sees the summary.
-                emit_checked(cancel, emit, done);
+                if charts.is_empty() {
+                    let done = ChatEvent::Done {
+                        prompt_tokens: line.prompt_eval_count,
+                        completion_tokens: line.eval_count,
+                        duration_ms,
+                        done_reason: line.done_reason,
+                        thinking_ms,
+                        eval_ms,
+                    };
+                    // The reply is complete either way; a closed receiver
+                    // only means nobody sees the summary.
+                    emit_checked(cancel, emit, done);
+                }
                 return Ok(ChatEnd::Done {
                     prompt_tokens: line.prompt_eval_count,
                     completion_tokens: line.eval_count,
                     duration_ms,
                     thinking_ms,
                     eval_ms,
+                    charts,
                 });
             }
         }

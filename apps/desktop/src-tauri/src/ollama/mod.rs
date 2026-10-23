@@ -3,6 +3,7 @@
 //! Only this module opens sockets, and only to a base URL that passed the
 //! loopback guard in [`client::OllamaBaseUrl`].
 
+pub mod chart_tool;
 pub mod client;
 pub mod stream;
 #[cfg(test)]
@@ -18,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
+use self::chart_tool::{CHART_TOOLS, ChartEntry};
 use self::client::{MAX_SHOW_BODY, OllamaBaseUrl, build_http, get_json, post_json};
 use self::stream::{ChatEnd, run_chat};
 use self::types::{
@@ -138,6 +140,91 @@ pub struct ChatCall<'a> {
     pub think: ChatThink,
     /// `Some(0)` unloads the model once it has answered.
     pub keep_alive: Option<u32>,
+    /// Offers the display-only `render_chart` tool.
+    pub tools: bool,
+}
+
+/// What the request continuing a charted reply reuses from the first one.
+struct FollowUpCall {
+    model: String,
+    options: Option<ChatOptions>,
+    think: ChatThink,
+}
+
+/// `a + b`, where a missing count is left out rather than unknown.
+fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.saturating_add(b)),
+        (a, None) => a,
+        (None, b) => b,
+    }
+}
+
+/// A follow-up's `Done` with the first request's counts added, so the reply
+/// shows what both requests took.
+fn summed_event(first: &ChatEnd, event: ChatEvent) -> ChatEvent {
+    let (
+        ChatEnd::Done {
+            prompt_tokens: p,
+            completion_tokens: c,
+            duration_ms: d,
+            thinking_ms: t,
+            eval_ms: e,
+            ..
+        },
+        ChatEvent::Done {
+            prompt_tokens,
+            completion_tokens,
+            duration_ms,
+            done_reason,
+            thinking_ms,
+            eval_ms,
+        },
+    ) = (first, &event)
+    else {
+        return event;
+    };
+    ChatEvent::Done {
+        prompt_tokens: plus(*p, *prompt_tokens),
+        completion_tokens: plus(*c, *completion_tokens),
+        duration_ms: plus(*d, *duration_ms),
+        done_reason: done_reason.clone(),
+        thinking_ms: plus(*t, *thinking_ms),
+        eval_ms: plus(*e, *eval_ms),
+    }
+}
+
+/// Like [`summed_event`], for the end; the charts are the first request's.
+fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
+    let (
+        ChatEnd::Done {
+            prompt_tokens: p,
+            completion_tokens: c,
+            duration_ms: d,
+            thinking_ms: t,
+            eval_ms: e,
+            charts,
+        },
+        ChatEnd::Done {
+            prompt_tokens,
+            completion_tokens,
+            duration_ms,
+            thinking_ms,
+            eval_ms,
+            ..
+        },
+    ) = (first, &end)
+    else {
+        return end;
+    };
+    ChatEnd::Done {
+        prompt_tokens: plus(*p, *prompt_tokens),
+        completion_tokens: plus(*c, *completion_tokens),
+        duration_ms: plus(*d, *duration_ms),
+        thinking_ms: plus(*t, *thinking_ms),
+        eval_ms: plus(*e, *eval_ms),
+        charts: charts.clone(),
+    }
 }
 
 /// Which [`Connection`] something was decided against. Every
@@ -151,6 +238,9 @@ pub struct ConnectionId(u64);
 pub struct ChatThink {
     pub think: Option<Think>,
     pub connection: ConnectionId,
+    /// The model's audited capabilities list `tools`, so it may be offered
+    /// `render_chart`.
+    pub tools: bool,
 }
 
 /// A base URL and the client built for it. An invalid URL is kept as the
@@ -222,6 +312,15 @@ impl Tracked {
         });
         self.audit.finish(self.id, &outcome);
     }
+}
+
+/// A chat request ready to send, its `attempt` row written.
+struct Prepared {
+    http: reqwest::Client,
+    url: url::Url,
+    body: Vec<u8>,
+    tools: bool,
+    tracked: Tracked,
 }
 
 fn connection_changed() -> AppError {
@@ -373,6 +472,7 @@ impl Ollama {
         Ok(ChatThink {
             think: resolve_think(&caps, requested)?,
             connection: connection.id,
+            tools: caps.tools,
         })
     }
 
@@ -468,10 +568,7 @@ impl Ollama {
 
     /// Everything `start` needs before spawning; the audit row is written
     /// last, so a request refused here leaves no `attempt` behind.
-    fn prepare_chat(
-        &self,
-        call: ChatCall<'_>,
-    ) -> Result<(reqwest::Client, url::Url, Vec<u8>, Tracked), AppError> {
+    fn prepare_chat(&self, call: ChatCall<'_>) -> Result<Prepared, AppError> {
         let connection = self.connection();
         if connection.id != call.think.connection {
             return Err(connection_changed());
@@ -484,6 +581,7 @@ impl Ollama {
             options: call.options,
             think: call.think.think,
             keep_alive: call.keep_alive,
+            tools: call.tools.then_some(&*CHART_TOOLS),
         })
         .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
         let tracked = Tracked::begin(
@@ -493,7 +591,13 @@ impl Ollama {
             "/api/chat",
             Some(call.model),
         )?;
-        Ok((http.clone(), base.endpoint("/api/chat"), body, tracked))
+        Ok(Prepared {
+            http: http.clone(),
+            url: base.endpoint("/api/chat"),
+            body,
+            tools: call.tools,
+            tracked,
+        })
     }
 
     /// Streams one prepared request to its end. A failure that was not a
@@ -504,10 +608,11 @@ impl Ollama {
         http: &reqwest::Client,
         url: url::Url,
         body: Vec<u8>,
+        tools: bool,
         cancel: &CancellationToken,
         sink: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
     ) -> (ChatEnd, AuditOutcome) {
-        let run = run_chat(http, url, body, &self.limits, cancel, sink).await;
+        let run = run_chat(http, url, body, tools, &self.limits, cancel, sink).await;
         if let ChatEnd::Failed(error) = &run.end
             && !cancel.is_cancelled()
         {
@@ -551,7 +656,13 @@ impl Ollama {
             on_end(&ChatEnd::Cancelled);
             return;
         }
-        let (http, url, body, tracked) = match self.prepare_chat(call) {
+        let Prepared {
+            http,
+            url,
+            body,
+            tools,
+            tracked,
+        } = match self.prepare_chat(call) {
             Ok(prepared) => prepared,
             Err(error) => {
                 sink(ChatEvent::Error {
@@ -563,7 +674,7 @@ impl Ollama {
         };
         let span = tracked.span.clone();
         let (end, outcome) = self
-            .stream(&http, url, body, &admission.cancel, sink)
+            .stream(&http, url, body, tools, &admission.cancel, sink)
             .instrument(span)
             .await;
         on_end(&end);
@@ -572,54 +683,112 @@ impl Ollama {
 
     /// Writes the request's `attempt` row, spawns the streaming worker for an
     /// admitted request and returns its id. `on_end` runs exactly once, on
-    /// every path, before the outcome is written. A request cancelled while
-    /// admitted ends at once as `Cancelled`. Must be called inside a tokio
-    /// runtime. `think` comes from [`Self::chat_think`]; a request whose
-    /// connection is no longer current is refused before its socket opens.
-    #[allow(clippy::too_many_arguments)]
-    pub fn start<F, E>(
+    /// every path, before the last outcome is written. A request cancelled
+    /// while admitted ends at once as `Cancelled`. Must be called inside a
+    /// tokio runtime. `think` comes from [`Self::chat_think`]; a request
+    /// whose connection is no longer current is refused before its socket
+    /// opens.
+    ///
+    /// When the reply calls `render_chart`, a second request on the same slot
+    /// continues it: `follow_up` builds its history from the calls, and it
+    /// goes with the same model, options and think but no `tools`, so the
+    /// model cannot call again. It writes its own audit row, and its `Done`
+    /// carries both requests' counts. A follow-up over the request limits is
+    /// refused without a request, as an `Error`.
+    pub fn start<F, U, E>(
         self: &Arc<Self>,
         admission: Admission,
-        model: &str,
-        messages: &[ChatMessage],
-        options: Option<&ChatOptions>,
-        think: ChatThink,
+        call: ChatCall<'_>,
         sink: F,
+        follow_up: U,
         on_end: E,
     ) -> Result<Uuid, AppError>
     where
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
+        U: FnOnce(&[ChartEntry]) -> Vec<ChatMessage> + Send + 'static,
         E: FnOnce(&ChatEnd) + Send + 'static,
     {
-        let call = ChatCall {
-            model,
-            messages,
-            options,
-            think,
-            keep_alive: None,
+        let next = FollowUpCall {
+            model: call.model.to_owned(),
+            options: call.options.copied(),
+            think: call.think.clone(),
         };
-        let (http, url, body, tracked) = match self.prepare_chat(call) {
+        let Prepared {
+            http,
+            url,
+            body,
+            tools,
+            tracked,
+        } = match self.prepare_chat(call) {
             Ok(prepared) => prepared,
             Err(err) => {
                 on_end(&ChatEnd::Failed(err.clone()));
                 return Err(err);
             }
         };
-        let Admission { guard, cancel } = admission;
-        let request_id = guard.request_id;
+        let request_id = admission.request_id();
 
         let this = Arc::clone(self);
         let span = tracked.span.clone();
         tokio::spawn(
             async move {
-                let _guard = guard;
-                let (end, outcome) = this.stream(&http, url, body, &cancel, &sink).await;
-                on_end(&end);
+                let (end, outcome) = this
+                    .stream(&http, url, body, tools, &admission.cancel, &sink)
+                    .await;
+                let charts = match &end {
+                    ChatEnd::Done { charts, .. } if !charts.is_empty() => charts.clone(),
+                    _ => {
+                        on_end(&end);
+                        tracked.finish(outcome);
+                        return;
+                    }
+                };
                 tracked.finish(outcome);
+                let messages = follow_up(&charts);
+                let end = this
+                    .continue_reply(&admission, &next, &messages, &end, &sink)
+                    .await;
+                on_end(&end);
             }
             .instrument(span),
         );
         Ok(request_id)
+    }
+
+    /// The follow-up request of a charted reply, ended by `first`.
+    async fn continue_reply<F>(
+        &self,
+        admission: &Admission,
+        next: &FollowUpCall,
+        messages: &[ChatMessage],
+        first: &ChatEnd,
+        sink: &F,
+    ) -> ChatEnd
+    where
+        F: Fn(ChatEvent) -> bool + Send + Sync,
+    {
+        if admission.is_cancelled() {
+            return ChatEnd::Cancelled;
+        }
+        if let Err(error) = self.validate(&next.model, messages, next.options.as_ref()) {
+            sink(ChatEvent::Error {
+                error: error.clone(),
+            });
+            return ChatEnd::Failed(error);
+        }
+        let summing = |event| sink(summed_event(first, event));
+        let call = ChatCall {
+            model: &next.model,
+            messages,
+            options: next.options.as_ref(),
+            think: next.think.clone(),
+            keep_alive: None,
+            tools: false,
+        };
+        let mut last = ChatEnd::Cancelled;
+        self.run(admission, call, &summing, |end| last = end.clone())
+            .await;
+        summed_end(first, last)
     }
 
     /// Cancels a running request and waits (up to `cancel_wait`) for its
@@ -751,10 +920,7 @@ mod tests {
     }
 
     fn prompt() -> Vec<ChatMessage> {
-        vec![ChatMessage {
-            role: ChatRole::User,
-            content: Redacted::new("hi"),
-        }]
+        vec![ChatMessage::new(ChatRole::User, Redacted::new("hi"))]
     }
 
     type Ends = Arc<Mutex<Vec<ChatEnd>>>;
@@ -764,7 +930,24 @@ mod tests {
         ChatThink {
             think,
             connection: ollama.connection_id(),
+            tools: false,
         }
+    }
+
+    /// A call of `messages` with `think`, no tools.
+    fn call<'a>(model: &'a str, messages: &'a [ChatMessage], think: ChatThink) -> ChatCall<'a> {
+        ChatCall {
+            model,
+            messages,
+            options: None,
+            think,
+            keep_alive: None,
+            tools: false,
+        }
+    }
+
+    fn no_follow_up(_: &[ChartEntry]) -> Vec<ChatMessage> {
+        Vec::new()
     }
 
     fn send_with_end<F>(
@@ -795,13 +978,11 @@ mod tests {
         let ends = Arc::clone(ends);
         ollama.start(
             admission,
-            "llama3.2",
-            &messages,
-            None,
-            current(ollama, think),
+            call("llama3.2", &messages, current(ollama, think)),
             sink,
+            no_follow_up,
             move |end| {
-                ends.lock().unwrap().push(clone_end(end));
+                ends.lock().unwrap().push(end.clone());
             },
         )
     }
@@ -811,26 +992,6 @@ mod tests {
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
     {
         send_with_end(ollama, conversation, sink, &Ends::default())
-    }
-
-    fn clone_end(end: &ChatEnd) -> ChatEnd {
-        match end {
-            ChatEnd::Done {
-                prompt_tokens,
-                completion_tokens,
-                duration_ms,
-                thinking_ms,
-                eval_ms,
-            } => ChatEnd::Done {
-                prompt_tokens: *prompt_tokens,
-                completion_tokens: *completion_tokens,
-                duration_ms: *duration_ms,
-                thinking_ms: *thinking_ms,
-                eval_ms: *eval_ms,
-            },
-            ChatEnd::Cancelled => ChatEnd::Cancelled,
-            ChatEnd::Failed(error) => ChatEnd::Failed(error.clone()),
-        }
     }
 
     async fn wait_idle(ollama: &Ollama) {
@@ -1048,15 +1209,14 @@ mod tests {
         let admission = ollama.admit(Uuid::new_v4()).unwrap();
         let ends = Ends::default();
         let recorded = Arc::clone(&ends);
+        let messages = prompt();
         let err = ollama
             .start(
                 admission,
-                "qwen3:8b",
-                &prompt(),
-                None,
-                think,
+                call("qwen3:8b", &messages, think),
                 |_| true,
-                move |end| recorded.lock().unwrap().push(clone_end(end)),
+                no_follow_up,
+                move |end| recorded.lock().unwrap().push(end.clone()),
             )
             .unwrap_err();
 
@@ -1497,6 +1657,7 @@ mod tests {
                 duration_ms: Some(5),
                 thinking_ms: None,
                 eval_ms: Some(2000),
+                ..
             }]
         ));
 
@@ -1563,16 +1724,15 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let recorded = Arc::clone(&ends);
+        let messages = prompt();
         ollama
             .start(
                 admission,
-                "m",
-                &prompt(),
-                None,
-                current(&ollama, None),
+                call("m", &messages, current(&ollama, None)),
                 sink,
+                no_follow_up,
                 move |end| {
-                    recorded.lock().unwrap().push(clone_end(end));
+                    recorded.lock().unwrap().push(end.clone());
                 },
             )
             .unwrap();
@@ -1638,6 +1798,316 @@ mod tests {
         assert_eq!(event.prompt_tokens, Some(3));
         assert_eq!(event.completion_tokens, Some(2));
         assert!(event.duration_ms.is_some());
+    }
+
+    const BEFORE: &str = r#"{"message":{"role":"assistant","content":"Here:"},"done":false}"#;
+    const CALL: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"render_chart","arguments":{"title":"Pop","type":"bar","labels":["1950","1960"],"values":[4.0,4.4]}}}]},"done":false}"#;
+    const CALL_BAD: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"render_chart","arguments":{"title":"Pop","type":"bar","labels":["1950"],"values":[4.0,4.4]}}}]},"done":false}"#;
+    const CALL_OTHER: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"run_shell","arguments":{"cmd":"ls"}}}]},"done":false}"#;
+    /// One NDJSON line.
+    const CALL_FOUR: &str = concat!(
+        r#"{"message":{"role":"assistant","content":"","tool_calls":["#,
+        r#"{"function":{"name":"render_chart","arguments":{"title":"1","type":"bar","labels":["a"],"values":[1]}}},"#,
+        r#"{"function":{"name":"render_chart","arguments":{"title":"2","type":"bar","labels":["a"],"values":[1]}}},"#,
+        r#"{"function":{"name":"render_chart","arguments":{"title":"3","type":"bar","labels":["a"],"values":[1]}}},"#,
+        r#"{"function":{"name":"render_chart","arguments":{"title":"4","type":"bar","labels":["a"],"values":[1]}}}"#,
+        r#"]},"done":false}"#
+    );
+    const AFTER: &str = r#"{"message":{"role":"assistant","content":" Grew."},"done":false}"#;
+    const AFTER_DONE: &str = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":7000000,"prompt_eval_count":10,"eval_count":4,"eval_duration":1000000000}"#;
+
+    /// Answers a request offering tools with `first`, any other with
+    /// `follow`.
+    async fn charted(first: Vec<&'static str>, follow: Reply) -> testing::Fake {
+        fake_ollama(Reply::Route(Arc::new(move |_, body| {
+            if body.get("tools").is_some() {
+                Reply::Lines(first.clone(), Duration::ZERO)
+            } else {
+                follow.clone()
+            }
+        })))
+        .await
+    }
+
+    fn commentary() -> Reply {
+        Reply::Lines(vec![AFTER, AFTER_DONE], Duration::ZERO)
+    }
+
+    /// Sends with `render_chart` offered; the follow-up answers "Here:".
+    fn send_charted<F>(
+        ollama: &Arc<Ollama>,
+        tools: bool,
+        sink: F,
+        ends: &Ends,
+    ) -> Result<Uuid, AppError>
+    where
+        F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
+    {
+        let messages = prompt();
+        let admission = ollama.admit(Uuid::new_v4())?;
+        let ends = Arc::clone(ends);
+        ollama.start(
+            admission,
+            ChatCall {
+                tools,
+                ..call(
+                    "qwen3",
+                    &messages,
+                    current(ollama, Some(Think::Enabled(false))),
+                )
+            },
+            sink,
+            |charts: &[ChartEntry]| chart_tool::follow_up_history(prompt(), "Here:", charts),
+            move |end| ends.lock().unwrap().push(end.clone()),
+        )
+    }
+
+    fn chart_events(events: &Events) -> Vec<ChatEvent> {
+        snapshot(events)
+            .into_iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ChatEvent::Chart { .. } | ChatEvent::ChartError { .. }
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn tool_call_emits_chart_then_follow_up() {
+        let fake = charted(vec![BEFORE, CALL, DONE], commentary()).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let (events, sink) = collector();
+        let ends = Ends::default();
+
+        send_charted(&ollama, true, sink, &ends).unwrap();
+        wait_idle(&ollama).await;
+
+        let events = snapshot(&events);
+        assert_eq!(events.len(), 4, "{events:?}");
+        assert_eq!(events[0], token("Here:"));
+        let ChatEvent::Chart { offset, spec } = &events[1] else {
+            panic!("expected a chart, got {:?}", events[1]);
+        };
+        assert_eq!(*offset, 5);
+        assert_eq!(spec.labels, ["1950", "1960"]);
+        assert_eq!(events[2], token(" Grew."));
+        // One `Done`, with both requests' counts.
+        assert_eq!(
+            events[3],
+            ChatEvent::Done {
+                prompt_tokens: Some(13),
+                completion_tokens: Some(6),
+                duration_ms: Some(12),
+                done_reason: Some("stop".into()),
+                thinking_ms: None,
+                eval_ms: Some(3000),
+            }
+        );
+        let ends = ends.lock().unwrap();
+        let [
+            ChatEnd::Done {
+                completion_tokens: Some(6),
+                charts,
+                ..
+            },
+        ] = ends.as_slice()
+        else {
+            panic!("expected one summed end, got {ends:?}");
+        };
+        assert_eq!(charts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn follow_up_has_no_tools_and_is_audited_separately() {
+        let fake = charted(vec![BEFORE, CALL, DONE], commentary()).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+
+        send_charted(&ollama, true, |_| true, &Ends::default()).unwrap();
+        wait_idle(&ollama).await;
+
+        let bodies = fake.bodies.lock().unwrap().clone();
+        let [first, second] = bodies.as_slice() else {
+            panic!("expected two requests, got {bodies:?}");
+        };
+        assert_eq!(first["tools"][0]["function"]["name"], "render_chart");
+        assert!(second.get("tools").is_none());
+        for body in &bodies {
+            assert!(body.get("format").is_none());
+            assert_eq!(body["think"], serde_json::json!(false));
+        }
+        let messages = second["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["content"], "Here:");
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["arguments"]["values"],
+            serde_json::json!([4.0, 4.4])
+        );
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(messages[2]["tool_name"], "render_chart");
+        assert_eq!(messages[2]["content"], "The chart was shown to the user.");
+
+        let rows: Vec<(String, AuditStatus)> = log
+            .all()
+            .into_iter()
+            .map(|event| (event.kind, event.status))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("ollama.chat".to_owned(), AuditStatus::Ok),
+                ("ollama.chat".to_owned(), AuditStatus::Ok)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_call_sends_error_result() {
+        for (line, reason) in [
+            (CALL_BAD, "labels and values differ in length"),
+            (CALL_OTHER, "only render_chart can be called"),
+        ] {
+            let fake = charted(vec![line, DONE], commentary()).await;
+            let (ollama, _) = ollama_at(fake.addr, test_limits());
+            let (events, sink) = collector();
+
+            send_charted(&ollama, true, sink, &Ends::default()).unwrap();
+            wait_idle(&ollama).await;
+
+            assert_eq!(
+                chart_events(&events),
+                [ChatEvent::ChartError {
+                    offset: 0,
+                    reason: reason.into()
+                }]
+            );
+            let bodies = fake.bodies.lock().unwrap().clone();
+            assert_eq!(bodies.len(), 2);
+            assert_eq!(
+                bodies[1]["messages"][2]["content"],
+                format!("The chart could not be shown: {reason}")
+            );
+            assert!(matches!(
+                snapshot(&events).last(),
+                Some(ChatEvent::Done { .. })
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn more_than_three_calls_ignored() {
+        let fake = charted(vec![CALL_FOUR, DONE], commentary()).await;
+        let limits = Limits {
+            max_line_bytes: 4096,
+            ..test_limits()
+        };
+        let (ollama, _) = ollama_at(fake.addr, limits);
+        let (events, sink) = collector();
+
+        send_charted(&ollama, true, sink, &Ends::default()).unwrap();
+        wait_idle(&ollama).await;
+
+        let titles: Vec<String> = chart_events(&events)
+            .into_iter()
+            .filter_map(|event| match event {
+                ChatEvent::Chart { spec, .. } => Some(spec.title),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(titles, ["1", "2", "3"]);
+        let bodies = fake.bodies.lock().unwrap().clone();
+        let tools = bodies[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "tool")
+            .count();
+        assert_eq!(tools, 3);
+    }
+
+    #[tokio::test]
+    async fn cancel_during_follow_up() {
+        let fake = charted(vec![CALL, DONE], Reply::Silent).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+        let (events, sink) = collector();
+        let ends = Ends::default();
+
+        let id = send_charted(&ollama, true, sink, &ends).unwrap();
+        for _ in 0..500 {
+            if fake.bodies.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ollama.chat_cancel(id).await.unwrap();
+
+        assert_eq!(ollama.inflight_len(), 0);
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Cancelled]
+        ));
+        assert_eq!(chart_events(&events).len(), 1);
+        assert!(
+            !snapshot(&events)
+                .iter()
+                .any(|event| matches!(event, ChatEvent::Done { .. } | ChatEvent::Error { .. }))
+        );
+        assert_eq!(log.last().status, AuditStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn tool_calls_ignored_when_not_offered() {
+        let fake = fake_ollama(Reply::Lines(vec![BEFORE, CALL, DONE], Duration::ZERO)).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let (events, sink) = collector();
+
+        send_charted(&ollama, false, sink, &Ends::default()).unwrap();
+        wait_idle(&ollama).await;
+
+        assert!(chart_events(&events).is_empty());
+        assert!(matches!(
+            snapshot(&events).last(),
+            Some(ChatEvent::Done { .. })
+        ));
+        let bodies = fake.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].get("tools").is_none());
+    }
+
+    #[tokio::test]
+    async fn follow_up_over_limit_ends_in_error() {
+        let fake = charted(vec![CALL, DONE], commentary()).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let (events, sink) = collector();
+        let ends = Ends::default();
+        let recorded = Arc::clone(&ends);
+        let messages = prompt();
+
+        ollama
+            .start(
+                ollama.admit(Uuid::new_v4()).unwrap(),
+                ChatCall {
+                    tools: true,
+                    ..call("qwen3", &messages, current(&ollama, None))
+                },
+                sink,
+                // Over `max_messages`.
+                |charts: &[ChartEntry]| {
+                    chart_tool::follow_up_history(vec![prompt()[0].clone(); 10], "", charts)
+                },
+                move |end| recorded.lock().unwrap().push(end.clone()),
+            )
+            .unwrap();
+        wait_idle(&ollama).await;
+
+        assert!(matches!(last_error(&events), AppError::InvalidInput(_)));
+        assert_eq!(chart_events(&events).len(), 1);
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Failed(AppError::InvalidInput(_))]
+        ));
+        assert_eq!(fake.bodies.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

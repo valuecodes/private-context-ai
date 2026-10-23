@@ -27,6 +27,7 @@ const stored = (
   evalMs: null,
   model: null,
   compareGroup: null,
+  charts: [],
 });
 
 const event = (state: ChatState, chatEvent: ChatEvent): ChatState =>

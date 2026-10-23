@@ -1,5 +1,5 @@
 import type { ReplyStats } from "~/features/chat/message-stats";
-import type { ChatEvent } from "~/lib/types";
+import type { ChartEntry, ChatEvent } from "~/lib/types";
 
 type MessageStatus = "complete" | "streaming" | "cancelled" | "error";
 
@@ -24,6 +24,8 @@ type UiMessage = {
   model?: string;
   /** Why a compared reply failed, while it is shown live. */
   failure?: string;
+  /** A reply's `render_chart` calls, when it made any. */
+  charts?: ChartEntry[];
 };
 
 const updateMessage = (
@@ -63,6 +65,18 @@ const withChunk = (
           : { thinkingMs: thoughtFor(message, at) }),
       };
 
+/** A reply with a chart, or a refused chart call, added. */
+const withChart = (
+  message: UiMessage,
+  event: Extract<ChatEvent, { type: "chart" | "chartError" }>
+): UiMessage => {
+  const entry: ChartEntry =
+    event.type === "chart"
+      ? { offset: event.offset, spec: event.spec }
+      : { offset: event.offset, spec: null, error: event.reason };
+  return { ...message, charts: [...(message.charts ?? []), entry] };
+};
+
 /** A finished reply with its counts. */
 const withStats = (
   message: UiMessage,
@@ -79,4 +93,4 @@ const withStats = (
 });
 
 export type { MessageStatus, UiMessage };
-export { updateMessage, withChunk, withStats };
+export { updateMessage, withChart, withChunk, withStats };

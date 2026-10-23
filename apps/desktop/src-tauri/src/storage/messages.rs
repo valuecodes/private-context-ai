@@ -11,6 +11,7 @@ use uuid::Uuid;
 use super::Storage;
 use super::conversations::{ConversationSettings, NOW, load_settings, uuid_column};
 use crate::error::AppError;
+use crate::ollama::chart_tool::{ChartEntry, replay};
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 
@@ -45,7 +46,7 @@ impl MessageStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredMessage {
     pub id: Uuid,
@@ -67,6 +68,25 @@ pub struct StoredMessage {
     pub model: Option<String>,
     /// A compared prompt and its candidate replies, until one is picked.
     pub compare_group: Option<Uuid>,
+    /// A reply's `render_chart` calls; empty for most.
+    pub charts: Vec<ChartEntry>,
+}
+
+/// The `charts` column: JSON, `NULL` when there are none.
+pub(super) fn charts_column(row: &Row<'_>, index: usize) -> rusqlite::Result<Vec<ChartEntry>> {
+    row.get::<_, Option<String>>(index)?
+        .map(|json| serde_json::from_str(&json).map_err(|_| bad_text(index, "charts")))
+        .transpose()
+        .map(Option::unwrap_or_default)
+}
+
+fn charts_json(charts: &[ChartEntry]) -> Result<Option<String>, AppError> {
+    if charts.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(charts)
+        .map(Some)
+        .map_err(|err| AppError::Internal(format!("charts: {err}")))
 }
 
 pub(super) fn bad_text(index: usize, what: &str) -> rusqlite::Error {
@@ -110,6 +130,7 @@ fn message_row(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
             .get::<_, Option<String>>(12)?
             .map(|group| Uuid::parse_str(&group).map_err(|_| bad_text(12, "compare group")))
             .transpose()?,
+        charts: charts_column(row, 13)?,
     })
 }
 
@@ -135,7 +156,7 @@ pub(super) fn load_messages(
 ) -> Result<Vec<StoredMessage>, AppError> {
     let mut statement = conn.prepare(&format!(
         "SELECT id, role, content, status, created_at, prompt_tokens, completion_tokens,
-                duration_ms, thinking, thinking_ms, eval_ms, model, compare_group
+                duration_ms, thinking, thinking_ms, eval_ms, model, compare_group, charts
          FROM messages WHERE {LIVE} ORDER BY created_at, rowid"
     ))?;
     let messages = statement
@@ -224,16 +245,16 @@ fn position_row(row: &Row<'_>) -> rusqlite::Result<Position> {
 
 /// Every `complete` message plus the visible part of a `cancelled` reply;
 /// failed and unfinished replies are left out, and so is an unpicked
-/// comparison. Role and content only: thinking is never sent back to the
-/// model. With `until`, only the rows before that position (`<`) or up to it
-/// (`<=`).
+/// comparison. Role and content only, with a charted reply replayed as its
+/// calls and their results: thinking is never sent back to the model. With
+/// `until`, only the rows before that position (`<`) or up to it (`<=`).
 pub(super) fn load_history(
     conn: &Connection,
     conversation_id: &str,
     until: Option<(&Position, &str)>,
 ) -> rusqlite::Result<Vec<ChatMessage>> {
     let mut sql = format!(
-        "SELECT role, content FROM messages
+        "SELECT role, content, charts FROM messages
          WHERE {SETTLED} AND (status = 'complete' OR (status = 'cancelled' AND content <> ''))"
     );
     let mut args: Vec<Value> = vec![conversation_id.to_owned().into()];
@@ -244,15 +265,20 @@ pub(super) fn load_history(
     }
     sql.push_str(" ORDER BY created_at, rowid");
     let mut statement = conn.prepare(&sql)?;
-    statement
+    let rows = statement
         .query_map(params_from_iter(args), |row| {
             let role: String = row.get(0)?;
-            Ok(ChatMessage {
-                role: ChatRole::parse(&role).ok_or_else(|| bad_text(0, "role"))?,
-                content: Redacted::new(row.get::<_, String>(1)?),
+            let role = ChatRole::parse(&role).ok_or_else(|| bad_text(0, "role"))?;
+            let content: String = row.get(1)?;
+            let charts = charts_column(row, 2)?;
+            Ok(if role == ChatRole::Assistant && !charts.is_empty() {
+                replay(&content, &charts)
+            } else {
+                vec![ChatMessage::new(role, Redacted::new(content))]
             })
         })?
-        .collect()
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows.into_iter().flatten().collect())
 }
 
 /// A turn that was saved and is ready to stream.
@@ -268,6 +294,8 @@ pub struct Turn {
     pub history: Vec<ChatMessage>,
     /// From the conversation's settings.
     pub options: Option<ChatOptions>,
+    /// The Charts setting, read with the history.
+    pub charts: bool,
 }
 
 /// The conversation's system prompt as the first message, when not blank.
@@ -278,10 +306,7 @@ pub(crate) fn with_system_prompt(
     if settings.system_prompt.expose().trim().is_empty() {
         return history;
     }
-    let system = ChatMessage {
-        role: ChatRole::System,
-        content: settings.system_prompt.clone(),
-    };
+    let system = ChatMessage::new(ChatRole::System, settings.system_prompt.clone());
     std::iter::once(system).chain(history).collect()
 }
 
@@ -416,10 +441,7 @@ impl Storage {
             }
         };
         if let Some(prompt) = input.prompt() {
-            history.push(ChatMessage {
-                role: ChatRole::User,
-                content: prompt.clone(),
-            });
+            history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
         }
         let history = with_system_prompt(&settings, history);
         check(&history, &settings)?;
@@ -454,15 +476,22 @@ impl Storage {
             user_id,
             history,
             options: settings.options(),
+            charts: settings.charts,
         })
     }
 
     /// Only a `pending` row changes, so a late write can never undo a final
     /// status. A deleted row is silently skipped.
-    fn save_pending(&self, id: Uuid, content: &str, thinking: &str) -> Result<(), AppError> {
+    fn save_pending(&self, id: Uuid, reply: &ReplyText<'_>) -> Result<(), AppError> {
         self.conn().execute(
-            "UPDATE messages SET content = ?2, thinking = ?3 WHERE id = ?1 AND status = 'pending'",
-            params![id.to_string(), content, thinking_column(thinking)],
+            "UPDATE messages SET content = ?2, thinking = ?3, charts = ?4
+             WHERE id = ?1 AND status = 'pending'",
+            params![
+                id.to_string(),
+                reply.content,
+                thinking_column(reply.thinking),
+                charts_json(reply.charts)?
+            ],
         )?;
         Ok(())
     }
@@ -472,28 +501,29 @@ impl Storage {
     fn save_final(
         &self,
         id: Uuid,
-        content: &str,
-        thinking: &str,
+        reply: &ReplyText<'_>,
         end: &FinalState,
     ) -> Result<(), AppError> {
+        let charts = charts_json(reply.charts)?;
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let id = id.to_string();
         let changed = tx.execute(
             "UPDATE messages
              SET content = ?2, status = ?3, prompt_tokens = ?4, completion_tokens = ?5,
-                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8, eval_ms = ?9
+                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8, eval_ms = ?9, charts = ?10
              WHERE id = ?1 AND status = 'pending'",
             params![
                 id,
-                content,
+                reply.content,
                 end.status.as_str(),
                 to_sql_count(end.prompt_tokens),
                 to_sql_count(end.completion_tokens),
                 to_sql_count(end.duration_ms),
-                thinking_column(thinking),
+                thinking_column(reply.thinking),
                 to_sql_count(end.thinking_ms),
-                to_sql_count(end.eval_ms)
+                to_sql_count(end.eval_ms),
+                charts
             ],
         )?;
         if changed == 1 {
@@ -524,6 +554,13 @@ impl Default for FlushPolicy {
             tokens: 64,
         }
     }
+}
+
+/// What a reply row holds so far.
+struct ReplyText<'a> {
+    content: &'a str,
+    thinking: &'a str,
+    charts: &'a [ChartEntry],
 }
 
 #[derive(Debug)]
@@ -566,6 +603,7 @@ pub struct TurnRecorder {
     message_id: Uuid,
     content: String,
     thinking: String,
+    charts: Vec<ChartEntry>,
     unflushed: usize,
     policy: FlushPolicy,
     /// A write failed: the turn ends as `error` whatever the stream does.
@@ -580,6 +618,7 @@ impl TurnRecorder {
             message_id,
             content: String::new(),
             thinking: String::new(),
+            charts: Vec::new(),
             unflushed: 0,
             policy,
             failed: false,
@@ -600,6 +639,33 @@ impl TurnRecorder {
     /// Buffers a thinking chunk, flushed like [`Self::push`].
     pub fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError> {
         self.buffer(chunk, true)
+    }
+
+    /// Buffers a chart call, flushed like [`Self::push`].
+    pub fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError> {
+        self.check_failed()?;
+        if self.finished {
+            return Ok(());
+        }
+        self.charts.push(entry.clone());
+        self.unflushed += 1;
+        if self.unflushed >= self.policy.tokens {
+            self.flush()?;
+        }
+        Ok(())
+    }
+
+    /// The answer so far.
+    pub fn text(&self) -> String {
+        self.content.clone()
+    }
+
+    fn reply(&self) -> ReplyText<'_> {
+        ReplyText {
+            content: &self.content,
+            thinking: &self.thinking,
+            charts: &self.charts,
+        }
     }
 
     fn buffer(&mut self, text: &Redacted, thinking: bool) -> Result<(), AppError> {
@@ -657,9 +723,9 @@ impl TurnRecorder {
         } else {
             end
         };
-        if let Err(err) =
-            self.storage
-                .save_final(self.message_id, &self.content, &self.thinking, &end)
+        if let Err(err) = self
+            .storage
+            .save_final(self.message_id, &self.reply(), &end)
         {
             self.failed = true;
             return Err(err);
@@ -669,10 +735,7 @@ impl TurnRecorder {
     }
 
     fn flush(&mut self) -> Result<(), AppError> {
-        match self
-            .storage
-            .save_pending(self.message_id, &self.content, &self.thinking)
-        {
+        match self.storage.save_pending(self.message_id, &self.reply()) {
             Ok(()) => {
                 self.unflushed = 0;
                 Ok(())
@@ -1274,6 +1337,106 @@ mod tests {
         assert_eq!(saved.thinking.unwrap().expose(), "Let me see");
         assert_eq!(saved.thinking_ms, Some(1500));
         assert_eq!(saved.content.expose(), "Hi");
+    }
+
+    fn bar_chart(offset: u64) -> ChartEntry {
+        use crate::ollama::chart_tool::{ChartKind, ChartSpec};
+        ChartEntry {
+            offset,
+            spec: Some(ChartSpec {
+                title: "Population".into(),
+                kind: ChartKind::Bar,
+                labels: vec!["1950".into()],
+                values: vec![4.0],
+            }),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn reply_charts_persist() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        let turn = turn(&storage, id, "Chart it");
+        let policy = FlushPolicy {
+            every: Duration::from_secs(60),
+            tokens: 2,
+        };
+        let mut recorder = TurnRecorder::new(Arc::clone(&storage), turn.assistant_id, policy);
+        assert!(!turn.charts);
+
+        recorder.push(&token("Here:")).unwrap();
+        recorder.push_chart(&bar_chart(5)).unwrap();
+        // Two buffered: on disk while it streams.
+        let pending = message(&storage, id, turn.assistant_id);
+        assert_eq!(pending.charts, [bar_chart(5)]);
+        assert_eq!(recorder.text(), "Here:");
+
+        recorder.push(&token(" Grew.")).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
+        let saved = message(&storage, id, turn.assistant_id);
+        assert_eq!(saved.content.expose(), "Here: Grew.");
+        assert_eq!(saved.charts, [bar_chart(5)]);
+        // A reply without charts keeps the column NULL.
+        assert!(
+            message(&storage, id, user_ids(&storage, id)[0])
+                .charts
+                .is_empty()
+        );
+        let nulls: i64 = storage
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM messages WHERE charts IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(nulls, 1);
+    }
+
+    #[test]
+    fn history_replays_tool_call_and_result() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        let first = turn(&storage, id, "Chart it");
+        let mut recorder = recorder(&storage, &first);
+        recorder.push(&token("Here:")).unwrap();
+        recorder.push_chart(&bar_chart(5)).unwrap();
+        recorder.push(&token(" Grew.")).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
+
+        let next = turn(&storage, id, "Thanks");
+        assert_eq!(
+            texts(&next.history),
+            [
+                (ChatRole::User, "Chart it"),
+                (ChatRole::Assistant, "Here:"),
+                (ChatRole::Tool, "The chart was shown to the user."),
+                (ChatRole::Assistant, " Grew."),
+                (ChatRole::User, "Thanks"),
+            ]
+        );
+        let calls = next.history[1].tool_calls.as_ref().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(next.history[2].tool_name, Some("render_chart"));
+    }
+
+    #[test]
+    fn begin_turn_reads_charts_setting() {
+        use crate::storage::conversations::ConversationSettings;
+
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        storage
+            .update_settings(
+                id,
+                &ConversationSettings {
+                    charts: true,
+                    ..ConversationSettings::default()
+                },
+            )
+            .unwrap();
+        assert!(turn(&storage, id, "Hi").charts);
     }
 
     #[test]

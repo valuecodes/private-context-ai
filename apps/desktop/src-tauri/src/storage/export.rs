@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::Storage;
 use super::conversations::ConversationWithMessages;
 use crate::error::AppError;
+use crate::ollama::chart_tool::{ChartEntry, ChartSpec, byte_index};
 use crate::ollama::types::ChatRole;
 use crate::redacted::Redacted;
 
@@ -57,6 +58,36 @@ fn open_fence(text: &str) -> Option<Fence<'_>> {
     open
 }
 
+/// `content` with each shown chart's spec as a fenced `json` block at its
+/// offset. The fence is longer than any backtick run in the JSON.
+fn with_charts(content: &str, charts: &[ChartEntry]) -> String {
+    let mut shown: Vec<(&ChartEntry, &ChartSpec)> = charts
+        .iter()
+        .filter_map(|entry| entry.spec.as_ref().map(|spec| (entry, spec)))
+        .collect();
+    shown.sort_by_key(|(entry, _)| entry.offset);
+    let mut out = String::new();
+    let mut at = 0;
+    for (entry, spec) in shown {
+        let index = byte_index(content, entry.offset).max(at);
+        out.push_str(&content[at..index]);
+        at = index;
+        let Ok(json) = serde_json::to_string_pretty(spec) else {
+            continue;
+        };
+        let mut longest = 0;
+        let mut run = 0;
+        for c in json.chars() {
+            run = if c == '`' { run + 1 } else { 0 };
+            longest = longest.max(run);
+        }
+        let fence = "`".repeat((longest + 1).max(3));
+        out.push_str(&format!("\n\n{fence}json\n{json}\n{fence}\n\n"));
+    }
+    out.push_str(&content[at..]);
+    out
+}
+
 /// Title, model and date, then a `## You` or `## Assistant` section per
 /// message with text. Thinking and an unpicked comparison are never
 /// included. A fence a stopped reply left open is closed, so it cannot
@@ -79,9 +110,10 @@ pub fn to_markdown(chat: &ConversationWithMessages) -> Redacted {
         let heading = match message.role {
             ChatRole::User => "You",
             ChatRole::Assistant => "Assistant",
-            ChatRole::System => continue,
+            ChatRole::System | ChatRole::Tool => continue,
         };
-        let text = message.content.expose().trim_end();
+        let text = with_charts(message.content.expose(), &message.charts);
+        let text = text.trim_start_matches('\n').trim_end();
         if text.is_empty() {
             continue;
         }
@@ -123,7 +155,53 @@ mod tests {
             eval_ms: None,
             model: None,
             compare_group: None,
+            charts: Vec::new(),
         }
+    }
+
+    #[test]
+    fn markdown_includes_chart_json() {
+        use crate::ollama::chart_tool::ChartKind;
+        let spec = ChartSpec {
+            title: "Pop ```".into(),
+            kind: ChartKind::Line,
+            labels: vec!["1950".into()],
+            values: vec![4.0],
+        };
+        let mut reply = message(ChatRole::Assistant, "Here: Grew.");
+        reply.charts = vec![
+            ChartEntry {
+                offset: 5,
+                spec: Some(spec.clone()),
+                error: None,
+            },
+            ChartEntry {
+                offset: 5,
+                spec: None,
+                error: Some("x".into()),
+            },
+        ];
+        let doc = markdown(vec![reply]);
+        let json = serde_json::to_string_pretty(&spec).unwrap();
+        assert!(
+            doc.ends_with(&format!(
+                "## Assistant\n\nHere:\n\n````json\n{json}\n````\n\n Grew.\n"
+            )),
+            "{doc}"
+        );
+
+        // A reply that is only a chart is still exported.
+        let mut only = message(ChatRole::Assistant, "");
+        only.charts = vec![ChartEntry {
+            offset: 0,
+            spec: Some(ChartSpec {
+                title: "t".into(),
+                ..spec
+            }),
+            error: None,
+        }];
+        let doc = markdown(vec![only]);
+        assert!(doc.contains("## Assistant\n\n```json\n{"), "{doc}");
     }
 
     fn chat(messages: Vec<StoredMessage>) -> ConversationWithMessages {
