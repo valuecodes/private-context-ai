@@ -993,12 +993,23 @@ impl Ollama {
     /// chats, and waits like [`Self::chat_cancel`]. Nothing running is a
     /// no-op.
     pub async fn cancel_conversation(&self, conversation_id: Uuid) {
+        self.cancel_where(|entry| {
+            entry.conversation_id == conversation_id || entry.summarizing == Some(conversation_id)
+        })
+        .await;
+    }
+
+    /// Cancels only a background summary of `conversation_id`, never the
+    /// chat's own reply, and waits like [`Self::chat_cancel`].
+    pub async fn cancel_background(&self, conversation_id: Uuid) {
+        self.cancel_where(|entry| entry.background && entry.summarizing == Some(conversation_id))
+            .await;
+    }
+
+    async fn cancel_where(&self, matches: impl Fn(&InflightEntry) -> bool) {
         let finished: Vec<CancellationToken> = lock(&self.inflight)
             .values()
-            .filter(|entry| {
-                entry.conversation_id == conversation_id
-                    || entry.summarizing == Some(conversation_id)
-            })
+            .filter(|entry| matches(entry))
             .map(|entry| {
                 entry.cancel.cancel();
                 entry.finished.clone()
@@ -1772,6 +1783,25 @@ mod tests {
             Err(AppError::Busy(_))
         ));
         drop(more);
+    }
+
+    #[tokio::test]
+    async fn cancel_background_leaves_the_chat_reply() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let limits = Limits {
+            cancel_wait: Duration::from_millis(50),
+            ..test_limits()
+        };
+        let (ollama, _) = ollama_at(fake.addr, limits);
+        let chat = Uuid::new_v4();
+        let background = ollama.admit_background(Uuid::new_v4(), chat).unwrap();
+        // The chat's own turn, admitted while the summary winds down.
+        let turn = ollama.admit(chat).unwrap();
+
+        ollama.cancel_background(chat).await;
+
+        assert!(background.is_cancelled());
+        assert!(!turn.is_cancelled());
     }
 
     #[tokio::test]
