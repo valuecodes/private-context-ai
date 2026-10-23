@@ -10,7 +10,7 @@ pub mod stream;
 pub(crate) mod testing;
 pub mod types;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
@@ -353,6 +353,21 @@ pub struct Ollama {
     capabilities: CapabilityCache,
     /// The id the next connection gets.
     next_connection: AtomicU64,
+    /// Projects whose whole memory is being refreshed, chat by chat.
+    refreshing: Mutex<HashSet<Uuid>>,
+}
+
+/// Holds a project's whole-memory refresh until dropped; from
+/// [`Ollama::reserve_refresh`].
+pub struct RefreshReservation<'a> {
+    ollama: &'a Ollama,
+    project_id: Uuid,
+}
+
+impl Drop for RefreshReservation<'_> {
+    fn drop(&mut self) {
+        self.ollama.refreshing().remove(&self.project_id);
+    }
 }
 
 impl Ollama {
@@ -372,7 +387,29 @@ impl Ollama {
             limits,
             capabilities: Mutex::default(),
             next_connection: AtomicU64::new(1),
+            refreshing: Mutex::default(),
         }
+    }
+
+    fn refreshing(&self) -> MutexGuard<'_, HashSet<Uuid>> {
+        // Every critical section is one set operation.
+        self.refreshing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Reserves project `project_id` for one whole-memory refresh, so two
+    /// cannot interleave chat by chat. `Busy` while another holds it.
+    pub fn reserve_refresh(&self, project_id: Uuid) -> Result<RefreshReservation<'_>, AppError> {
+        if !self.refreshing().insert(project_id) {
+            return Err(AppError::Busy(
+                "project memory is already being refreshed".into(),
+            ));
+        }
+        Ok(RefreshReservation {
+            ollama: self,
+            project_id,
+        })
     }
 
     fn capability_cache(&self) -> MutexGuard<'_, HashMap<(String, String), ModelCapabilities>> {
@@ -555,13 +592,6 @@ impl Ollama {
         conversation_id: Uuid,
     ) -> Result<Admission, AppError> {
         self.admit_entry(project_id, Some(conversation_id))
-    }
-
-    /// Whether a memory summary of project `project_id` holds a slot.
-    pub fn summary_running(&self, project_id: Uuid) -> bool {
-        lock(&self.inflight)
-            .values()
-            .any(|entry| entry.conversation_id == project_id && entry.summarizing.is_some())
     }
 
     fn admit_entry(

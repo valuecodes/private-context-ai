@@ -25,6 +25,9 @@ pub const MAX_MEMORY_BYTES: usize = 4 * 1024;
 const MAX_MEMORY_SECTION_BYTES: usize = 16 * 1024;
 /// The context window Ollama uses when a chat sets no `num_ctx`.
 pub const OLLAMA_DEFAULT_NUM_CTX: u32 = 4096;
+/// What a summary request adds around each message: the longest speaker
+/// label (`Assistant: `) and the blank line after it.
+const ROW_FRAMING_BYTES: usize = "Assistant: \n\n".len();
 
 const INSTRUCTIONS_HEADING: &str = "## Project instructions";
 const MEMORY_HEADING: &str = "## Project memory";
@@ -512,11 +515,13 @@ fn next_chunk(
     let mut last = None;
     let mut cut = false;
     for (id, role, content) in rows {
-        let len = content.len();
+        // Counted as the summary request sends it, with its speaker label.
+        let len = content.len() + ROW_FRAMING_BYTES;
         if messages.is_empty() && len > chunk_bytes {
+            let room = chunk_bytes.saturating_sub(ROW_FRAMING_BYTES);
             messages.push(ChatMessage::new(
                 role,
-                Redacted::new(truncate_at(&content, chunk_bytes)),
+                Redacted::new(truncate_at(&content, room)),
             ));
             last = Some(id);
             cut = true;
@@ -693,7 +698,7 @@ impl Storage {
     /// and the next chunk of rows to summarize. `chunk_bytes` sizes the
     /// chunk from the context size and the previous summary's length, or
     /// refuses. `None` when the entry is current or there is nothing to
-    /// summarize.
+    /// summarize; a stale entry with nothing left to summarize is deleted.
     pub fn memory_snapshot(
         &self,
         conversation_id: Uuid,
@@ -740,6 +745,14 @@ impl Storage {
         let budget = chunk_bytes(num_ctx, previous.as_ref().map_or(0, Redacted::len_bytes))?;
         let Some((messages, checkpoint, cut)) = next_chunk(&tx, &id, after.as_ref(), budget)?
         else {
+            // A stale entry of a chat with no history left covers nothing.
+            if rebuild {
+                tx.execute(
+                    "DELETE FROM project_memories WHERE conversation_id = ?1",
+                    [&id],
+                )?;
+                tx.commit()?;
+            }
             return Ok(None);
         };
         if model.is_empty() {
@@ -1350,7 +1363,8 @@ mod tests {
         let snapshot = storage.memory_snapshot(a, |_, _| Ok(51)).unwrap().unwrap();
         assert!(snapshot.cut);
         assert_eq!(snapshot.messages.len(), 1);
-        assert_eq!(snapshot.messages[0].content.expose(), "é".repeat(25));
+        // 51 bytes less the speaker label's 13, at a char boundary.
+        assert_eq!(snapshot.messages[0].content.expose(), "é".repeat(19));
 
         let loose = storage.create_conversation(None, "m").unwrap().id;
         assert!(matches!(
@@ -1364,6 +1378,39 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+
+        // Each row counts with its speaker label, so short rows fill the
+        // chunk too: 14 + 15 + 14 + 15 bytes fit in 60, a fifth does not.
+        let short = chat(&storage, project, "s");
+        for _ in 0..5 {
+            say(&storage, short, "a");
+        }
+        let snapshot = storage
+            .memory_snapshot(short, |_, _| Ok(60))
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.messages.len(), 4);
+        assert!(!snapshot.cut);
+
+        // A stale entry whose chat has no history left is dropped.
+        let gone = chat(&storage, project, "g");
+        say(&storage, gone, "One");
+        assert!(remember(&storage, gone, "Notes"));
+        storage
+            .conn()
+            .execute(
+                "DELETE FROM messages WHERE conversation_id = ?1",
+                [gone.to_string()],
+            )
+            .unwrap();
+        assert_eq!(state(&storage, project, gone), MemoryState::Stale);
+        assert!(
+            storage
+                .memory_snapshot(gone, |_, _| Ok(1 << 20))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(count_rows(&storage, "project_memories"), 0);
     }
 
     #[test]
