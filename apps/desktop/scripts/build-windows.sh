@@ -7,8 +7,8 @@
 # build-windows.ps1 there through WSL interop. The installer it prints is built
 # from exactly that commit.
 #
-# Exit code is the Windows build's own. 2 means WSL interop is unavailable and
-# 3 that another run holds the build directory's lock.
+# Exit code is the Windows build's own. 2 means WSL interop is unavailable or
+# failed and 3 that another run holds the build directory's lock.
 set -eu
 
 if ! command -v powershell.exe >/dev/null 2>&1 || ! command -v wslpath >/dev/null 2>&1; then
@@ -24,6 +24,10 @@ if [ -n "$(git -C "$repo_root" status --porcelain)" ]; then
 fi
 
 local_app_data=$(powershell.exe -NoProfile -NonInteractive -Command '$env:LOCALAPPDATA' | tr -d '\r')
+if [ -z "$local_app_data" ]; then
+  echo "Could not read %LOCALAPPDATA% through powershell.exe." >&2
+  exit 2
+fi
 build_dir_win="$local_app_data\\pcai-build"
 build_dir=$(wslpath -u "$build_dir_win")
 mkdir -p "$build_dir"
