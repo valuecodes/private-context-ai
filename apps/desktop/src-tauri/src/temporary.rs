@@ -12,6 +12,7 @@ use crate::ollama::chart_tool::{ChartEntry, replay};
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
+use crate::storage::memory::ProjectContext;
 use crate::storage::messages::{MessageStatus, ReplyStats, TurnInput, with_system_message};
 
 /// How many temporary chats may exist at once. The UI keeps one; the rest
@@ -193,14 +194,16 @@ impl TempChats {
 
     /// Under one lock, so a discard or settings change cannot land halfway:
     /// the history `input` sends with the chat's settings and its project's
-    /// `project_instructions` (read by the caller just before), which
-    /// `check` may refuse (size limits, settings changed) before anything
-    /// changes. Then the prompt is kept, and a regenerate or edit sets aside
-    /// the messages it replaces until its reply ends ([`MemoryRecorder`]).
+    /// `context` (instructions and memory, read by the caller just before;
+    /// memory fills only what `max_prompt_bytes` leaves), which `check` may
+    /// refuse (size limits, settings changed) before anything changes. Then
+    /// the prompt is kept, and a regenerate or edit sets aside the messages
+    /// it replaces until its reply ends ([`MemoryRecorder`]).
     pub fn begin(
         &self,
         id: Uuid,
-        project_instructions: &Redacted,
+        context: &ProjectContext,
+        max_prompt_bytes: usize,
         input: &TurnInput,
         check: impl FnOnce(&[ChatMessage], &ConversationSettings) -> Result<(), AppError>,
     ) -> Result<TempTurn, AppError> {
@@ -235,7 +238,7 @@ impl TempChats {
             .chain(&prompt)
             .flat_map(TempMessage::history)
             .collect();
-        let history = with_system_message(project_instructions, &session.settings, history);
+        let history = with_system_message(context, &session.settings, history, max_prompt_bytes);
         check(&history, &session.settings)?;
         let options = session.settings.options();
         let charts = session.settings.charts;
@@ -392,6 +395,7 @@ impl ReplyRecorder for MemoryRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::testing::PROMPT_LIMIT;
 
     fn texts(history: &[ChatMessage]) -> Vec<(ChatRole, &str)> {
         history
@@ -404,15 +408,15 @@ mod tests {
         TurnInput::New(Redacted::new(prompt))
     }
 
-    /// The instructions of a chat outside any project.
-    fn no_project() -> Redacted {
-        Redacted::default()
+    /// The context of a chat outside any project.
+    fn no_project() -> ProjectContext {
+        ProjectContext::default()
     }
 
     /// Runs one turn of `input` that ends with `reply`, or fails when `None`.
     fn run(chats: &Arc<TempChats>, id: Uuid, input: &TurnInput, reply: Option<&str>) {
         chats
-            .begin(id, &no_project(), input, |_, _| Ok(()))
+            .begin(id, &no_project(), PROMPT_LIMIT, input, |_, _| Ok(()))
             .unwrap();
         let revision = !matches!(input, TurnInput::New(_));
         let mut recorder = MemoryRecorder::new(chats, id, Uuid::new_v4(), revision);
@@ -441,7 +445,13 @@ mod tests {
         let ids = chats.ids(id);
 
         let turn = chats
-            .begin(id, &no_project(), &TurnInput::Regenerate, |_, _| Ok(()))
+            .begin(
+                id,
+                &no_project(),
+                PROMPT_LIMIT,
+                &TurnInput::Regenerate,
+                |_, _| Ok(()),
+            )
             .unwrap();
         assert_eq!(turn.user_id, ids[2]);
         assert_eq!(
@@ -482,7 +492,7 @@ mod tests {
         assert_eq!(chats.history(id).unwrap(), before);
         assert_eq!(chats.ids(id), ids);
         chats
-            .begin(id, &no_project(), &edit, |_, _| Ok(()))
+            .begin(id, &no_project(), PROMPT_LIMIT, &edit, |_, _| Ok(()))
             .unwrap();
         let mut stopped = MemoryRecorder::new(&chats, id, Uuid::new_v4(), true);
         stopped.push(&Redacted::new("Half")).unwrap();
@@ -511,13 +521,19 @@ mod tests {
                 prompt: Redacted::new("x"),
             };
             assert!(matches!(
-                chats.begin(id, &no_project(), &edit, |_, _| Ok(())),
+                chats.begin(id, &no_project(), PROMPT_LIMIT, &edit, |_, _| Ok(())),
                 Err(AppError::NotFound(_))
             ));
         }
         let empty = chats.start().unwrap();
         assert!(matches!(
-            chats.begin(empty, &no_project(), &TurnInput::Regenerate, |_, _| Ok(())),
+            chats.begin(
+                empty,
+                &no_project(),
+                PROMPT_LIMIT,
+                &TurnInput::Regenerate,
+                |_, _| Ok(())
+            ),
             Err(AppError::InvalidInput(_))
         ));
     }
@@ -534,10 +550,16 @@ mod tests {
 
         let mut seen = None;
         let turn = chats
-            .begin(id, &no_project(), &new("Hi"), |_, settings| {
-                seen = Some(settings.clone());
-                Ok(())
-            })
+            .begin(
+                id,
+                &no_project(),
+                PROMPT_LIMIT,
+                &new("Hi"),
+                |_, settings| {
+                    seen = Some(settings.clone());
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(seen.as_ref(), Some(&finnish));
         assert_eq!(
@@ -561,7 +583,13 @@ mod tests {
         chats.update_settings(id, warm.clone()).unwrap();
         chats.rollback(id);
         let turn = chats
-            .begin(id, &no_project(), &new("Again"), |_, _| Ok(()))
+            .begin(
+                id,
+                &no_project(),
+                PROMPT_LIMIT,
+                &new("Again"),
+                |_, _| Ok(()),
+            )
             .unwrap();
         assert_eq!(texts(&turn.history), [(ChatRole::User, "Again")]);
         assert_eq!(turn.options, warm.options());
@@ -604,10 +632,12 @@ mod tests {
         let id = chats.start_with(finnish, Some(project)).unwrap();
         assert_eq!(chats.project(id).unwrap(), Some(project));
 
+        let context = ProjectContext {
+            instructions: Redacted::new("Cite sources."),
+            memories: Vec::new(),
+        };
         let turn = chats
-            .begin(id, &Redacted::new("Cite sources."), &new("Hi"), |_, _| {
-                Ok(())
-            })
+            .begin(id, &context, PROMPT_LIMIT, &new("Hi"), |_, _| Ok(()))
             .unwrap();
         assert_eq!(
             texts(&turn.history),
@@ -669,7 +699,7 @@ mod tests {
         let id = chats.start().unwrap();
 
         let err = chats
-            .begin(id, &no_project(), &new("Hi"), |_, _| {
+            .begin(id, &no_project(), PROMPT_LIMIT, &new("Hi"), |_, _| {
                 Err(AppError::TooLarge("big".into()))
             })
             .unwrap_err();
@@ -686,9 +716,9 @@ mod tests {
         };
         assert!(
             chats
-                .begin(id, &no_project(), &edit, |_, _| Err(AppError::TooLarge(
-                    "big".into()
-                )))
+                .begin(id, &no_project(), PROMPT_LIMIT, &edit, |_, _| Err(
+                    AppError::TooLarge("big".into())
+                ))
                 .is_err()
         );
         assert_eq!(chats.history(id).unwrap(), before);
@@ -698,7 +728,13 @@ mod tests {
     fn begin_unknown_chat_is_not_found() {
         let chats = TempChats::default();
         assert!(matches!(
-            chats.begin(Uuid::new_v4(), &no_project(), &new("Hi"), |_, _| Ok(())),
+            chats.begin(
+                Uuid::new_v4(),
+                &no_project(),
+                PROMPT_LIMIT,
+                &new("Hi"),
+                |_, _| Ok(())
+            ),
             Err(AppError::NotFound(_))
         ));
     }
@@ -708,7 +744,7 @@ mod tests {
         let chats = TempChats::default();
         let id = chats.start().unwrap();
         chats
-            .begin(id, &no_project(), &new("Hi"), |_, _| Ok(()))
+            .begin(id, &no_project(), PROMPT_LIMIT, &new("Hi"), |_, _| Ok(()))
             .unwrap();
 
         chats.rollback(id);
@@ -722,7 +758,7 @@ mod tests {
         let id = chats.start().unwrap();
         let turn = |prompt: &str, reply: &str, status: Option<MessageStatus>| {
             chats
-                .begin(id, &no_project(), &new(prompt), |_, _| Ok(()))
+                .begin(id, &no_project(), PROMPT_LIMIT, &new(prompt), |_, _| Ok(()))
                 .unwrap();
             let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
             recorder.push_thinking(&Redacted::new("hmm")).unwrap();
@@ -768,7 +804,9 @@ mod tests {
             )
             .unwrap();
         let turn = chats
-            .begin(id, &no_project(), &new("Chart it"), |_, _| Ok(()))
+            .begin(id, &no_project(), PROMPT_LIMIT, &new("Chart it"), |_, _| {
+                Ok(())
+            })
             .unwrap();
         assert!(turn.charts);
         let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
@@ -790,7 +828,9 @@ mod tests {
         recorder.complete(ReplyStats::default()).unwrap();
 
         let next = chats
-            .begin(id, &no_project(), &new("Thanks"), |_, _| Ok(()))
+            .begin(id, &no_project(), PROMPT_LIMIT, &new("Thanks"), |_, _| {
+                Ok(())
+            })
             .unwrap();
         assert_eq!(
             texts(&next.history),
@@ -816,7 +856,13 @@ mod tests {
             .unwrap();
         stopped.finish(MessageStatus::Cancelled).unwrap();
         let roles: Vec<ChatRole> = chats
-            .begin(id, &no_project(), &new("Once more"), |_, _| Ok(()))
+            .begin(
+                id,
+                &no_project(),
+                PROMPT_LIMIT,
+                &new("Once more"),
+                |_, _| Ok(()),
+            )
             .unwrap()
             .history
             .iter()
@@ -833,7 +879,7 @@ mod tests {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
         chats
-            .begin(id, &no_project(), &new("Hi"), |_, _| Ok(()))
+            .begin(id, &no_project(), PROMPT_LIMIT, &new("Hi"), |_, _| Ok(()))
             .unwrap();
         let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
         recorder.push(&Redacted::new("Late")).unwrap();

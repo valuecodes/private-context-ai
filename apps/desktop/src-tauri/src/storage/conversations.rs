@@ -141,20 +141,6 @@ pub(super) fn load_settings(conn: &Connection, id: &str) -> Result<ConversationS
     .ok_or_else(not_found)
 }
 
-/// The instructions of conversation `id`'s project, empty outside any
-/// project. Read on `conn` so a transaction sees its own snapshot.
-pub(super) fn load_project_instructions(conn: &Connection, id: &str) -> Result<Redacted, AppError> {
-    conn.query_row(
-        "SELECT coalesce(p.instructions, '') FROM conversations c
-         LEFT JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
-        [id],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()?
-    .map(Redacted::new)
-    .ok_or_else(not_found)
-}
-
 /// ISO 8601 UTC with milliseconds, computed by SQLite.
 pub(super) const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 

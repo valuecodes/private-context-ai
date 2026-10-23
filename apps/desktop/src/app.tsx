@@ -9,6 +9,7 @@ import { ChatView } from "~/features/chat/chat-view";
 import { useChatStream } from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
+import { MemoryPreview } from "~/features/projects/memory-preview";
 import { ProjectView } from "~/features/projects/project-view";
 import { useProjects } from "~/features/projects/use-projects";
 import { SettingsView } from "~/features/settings/settings-view";
@@ -42,6 +43,8 @@ const Workspace = () => {
   const [view, setView] = useState<View>("chat");
   // The project whose view is open, or was last.
   const [projectId, setProjectId] = useState<string | null>(null);
+  // The saved chat whose "What this chat sees" dialog is open.
+  const [previewing, setPreviewing] = useState<string | null>(null);
   const { status, retry } = useOllamaStatus();
   const conversations = useConversations();
   const projects = useProjects();
@@ -171,6 +174,11 @@ const Workspace = () => {
   const chatProject = projects.state.projects.find(
     (project) => project.id === chat.state.projectId
   );
+  // "What this chat sees" exists for a saved chat in a project only.
+  const previewChat =
+    chat.state.temporary || chat.state.conversationId === null
+      ? null
+      : chat.state.conversationId;
 
   const remove = (id: string) => {
     void conversations.remove(id).then((deleted) => {
@@ -257,10 +265,28 @@ const Workspace = () => {
                       onOpen: () => {
                         openProject(chatProject.id);
                       },
+                      onPreview:
+                        previewChat === null
+                          ? undefined
+                          : () => {
+                              setPreviewing(previewChat);
+                            },
                     }
               }
             />
           )}
+          {view === "chat" &&
+            chatProject !== undefined &&
+            previewing !== null &&
+            previewing === previewChat && (
+              <MemoryPreview
+                projectId={chatProject.id}
+                conversationId={previewing}
+                onClose={() => {
+                  setPreviewing(null);
+                }}
+              />
+            )}
           {view === "project" && shownProject !== null && (
             <ProjectView
               // A fresh view per project, so a pending delete never carries over.
@@ -275,6 +301,9 @@ const Workspace = () => {
               onRename={(name) => projects.rename(shownProject.id, name)}
               onInstructions={(instructions) => {
                 projects.saveInstructions(shownProject.id, instructions);
+              }}
+              onAutoMemory={(on) => {
+                projects.setAutoMemory(shownProject.id, on);
               }}
               onNewChat={() => {
                 newInProject(shownProject.id, false);

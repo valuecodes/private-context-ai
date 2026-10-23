@@ -17,6 +17,7 @@ use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
 use crate::ollama::{ChatCall, ChatThink, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
+use crate::storage::memory::ProjectContext;
 use crate::storage::messages::TurnInput;
 use crate::storage::{Storage, StorageState};
 use crate::temporary::{MemoryRecorder, TempChats};
@@ -67,16 +68,16 @@ pub(crate) fn confirm_project(
     Ok(id)
 }
 
-/// What the temporary chat's project currently instructs; empty outside a
-/// project, which needs no storage.
-fn session_instructions(
+/// What the temporary chat's project currently instructs and remembers;
+/// empty outside a project, which needs no storage.
+fn session_context(
     storage: &StorageState,
     chats: &TempChats,
     session_id: Uuid,
-) -> Result<Redacted, AppError> {
+) -> Result<ProjectContext, AppError> {
     match chats.project(session_id)? {
-        None => Ok(Redacted::default()),
-        Some(project) => storage.get()?.project_instructions(project),
+        None => Ok(ProjectContext::default()),
+        Some(project) => storage.get()?.project_context(project),
     }
 }
 
@@ -117,7 +118,7 @@ pub async fn temp_chat_send(
     send_temp_turn(
         &ollama,
         &chats,
-        session_instructions(&storage, &chats, session_id)?,
+        session_context(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -143,7 +144,7 @@ pub async fn temp_chat_regenerate(
     send_temp_turn(
         &ollama,
         &chats,
-        session_instructions(&storage, &chats, session_id)?,
+        session_context(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -175,7 +176,7 @@ pub async fn temp_chat_edit(
     send_temp_turn(
         &ollama,
         &chats,
-        session_instructions(&storage, &chats, session_id)?,
+        session_context(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -210,12 +211,12 @@ pub async fn discard(ollama: &Ollama, chats: &TempChats, session_id: Uuid) {
 /// is the session id. The slot is taken before the session is read, so a
 /// discard either lands first (`NotFound`) or finds the slot and cancels it.
 /// Nothing changes when the history is refused, and a request that does not
-/// start is taken back. `instructions` are the chat's project's, read just
-/// before.
+/// start is taken back. `context` is the chat's project's instructions and
+/// memory, read just before; the chat itself is never summarized.
 pub fn send_temp_turn<S>(
     ollama: &Arc<Ollama>,
     chats: &Arc<TempChats>,
-    instructions: Redacted,
+    context: ProjectContext,
     request: SendRequest,
     send: S,
 ) -> Result<SendStarted, AppError>
@@ -233,9 +234,13 @@ where
     validate_model(&model)?;
     let admission = ollama.admit(session_id)?;
     ollama.check_connection(think.connection)?;
-    let turn = chats.begin(session_id, &instructions, &input, |history, settings| {
-        check_turn(ollama, &model, &think_choice, history, settings)
-    })?;
+    let turn = chats.begin(
+        session_id,
+        &context,
+        ollama.max_prompt_bytes(),
+        &input,
+        |history, settings| check_turn(ollama, &model, &think_choice, history, settings),
+    )?;
 
     let assistant_id = Uuid::new_v4();
     let revision = !matches!(input, TurnInput::New(_));
@@ -294,7 +299,7 @@ mod tests {
         send_temp_turn(
             ollama,
             chats,
-            Redacted::default(),
+            ProjectContext::default(),
             SendRequest {
                 conversation_id: session,
                 model: "llama3.2".into(),

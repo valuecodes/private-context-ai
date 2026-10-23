@@ -39,4 +39,18 @@ const statusLabel = (event: AuditEvent): string => {
   return event.detail === null ? label : `${label} (${event.detail})`;
 };
 
-export { formatDuration, formatTime, formatTokens, hostsSummary, statusLabel };
+/** Kinds that read better as words; the rest are shown as they are. */
+const KIND_LABEL: Partial<Record<string, string>> = {
+  "ollama.memory": "Memory summary",
+};
+
+const kindLabel = (kind: string): string => KIND_LABEL[kind] ?? kind;
+
+export {
+  formatDuration,
+  formatTime,
+  formatTokens,
+  hostsSummary,
+  kindLabel,
+  statusLabel,
+};

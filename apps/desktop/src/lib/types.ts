@@ -142,6 +142,51 @@ type Project = {
   instructions: string;
   createdAt: string;
   updatedAt: string;
+  /** Whether its chats' memory is written without asking; on by default. */
+  autoMemory: boolean;
+};
+
+/**
+ * `pending`: newer messages are not in it yet. `stale`: the chat was edited,
+ * so it is not sent until it is rebuilt.
+ */
+type MemoryState = "current" | "pending" | "stale";
+
+/** One chat's model-written summary, sent to the project's other chats. */
+type MemoryEntry = {
+  conversationId: string;
+  /** The chat's title. */
+  title: string;
+  content: string;
+  model: string | null;
+  updatedAt: string;
+  userEdited: boolean;
+  /** The last refresh rebuilt it after the chat was edited. */
+  rebuilt: boolean;
+  /** A message too long for one summary request was shortened. */
+  truncated: boolean;
+  state: MemoryState;
+};
+
+/** How one chat of `project_memory_refresh` went. */
+type RefreshResult = {
+  conversationId: string;
+  outcome: "updated" | "current" | "cancelled" | "busy" | "failed";
+  error: AppError | null;
+};
+
+/** What `project_context_preview` returns: nothing is sent to get it. */
+type ContextPreview = {
+  /** The exact `system` message; empty when there is none. */
+  text: string;
+  /** Newest first: in the message, over the budget, or out of date. */
+  entries: {
+    conversationId: string;
+    title: string;
+    state: "included" | "dropped" | "stale";
+  }[];
+  memoryBytes: number;
+  budgetBytes: number;
 };
 
 /** `pending`: still streaming, or the app stopped while it was. */
@@ -230,8 +275,8 @@ type AuditEvent = {
   /** ISO-8601 UTC. */
   at: string;
   /**
-   * `ollama.chat`, `ollama.show`, `ollama.tags`, `ollama.version`,
-   * `app.start`, `db.open`.
+   * `ollama.chat`, `ollama.memory`, `ollama.show`, `ollama.tags`,
+   * `ollama.version`, `app.start`, `db.open`.
    */
   kind: string;
   /** `host:port`; null for lifecycle events. */
@@ -269,14 +314,17 @@ export type {
   ChatOptions,
   CompareEvent,
   CompareStarted,
+  ContextPreview,
   Conversation,
   ConversationSettings,
   ConversationWithMessages,
   LogLevel,
+  MemoryEntry,
   ModelCapabilities,
   ModelInfo,
   OllamaStatus,
   Project,
+  RefreshResult,
   RequestId,
   SendStarted,
   Settings,

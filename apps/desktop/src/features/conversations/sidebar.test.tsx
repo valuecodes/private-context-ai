@@ -33,6 +33,7 @@ const project = (id: string, name: string): Project => ({
   instructions: "",
   createdAt: "x",
   updatedAt: "x",
+  autoMemory: true,
 });
 
 const noop = () => undefined;

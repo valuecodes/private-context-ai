@@ -61,9 +61,19 @@ mod tests {
     use super::*;
     use crate::storage::key::new_key;
 
-    /// Undoes migration 0008. The index goes first: SQLite refuses to drop
-    /// an indexed column.
+    /// Undoes migration 0009.
+    fn undo_memory(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE project_memories;
+             ALTER TABLE projects DROP COLUMN auto_memory;",
+        )
+        .unwrap();
+    }
+
+    /// Undoes migrations 0009 and 0008. The index goes first: SQLite refuses
+    /// to drop an indexed column.
     fn undo_projects(conn: &Connection) {
+        undo_memory(conn);
         conn.execute_batch(
             "DROP INDEX conversations_project_idx;
              ALTER TABLE conversations DROP COLUMN project_id;
@@ -80,7 +90,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -95,6 +105,7 @@ mod tests {
                 "audit_events",
                 "conversations",
                 "messages",
+                "project_memories",
                 "projects",
                 "settings"
             ]
@@ -389,6 +400,39 @@ mod tests {
             .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
             .unwrap();
         assert_eq!(projects, 0);
+    }
+
+    #[test]
+    fn version_eight_db_gains_project_memories() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        undo_memory(&conn);
+        conn.execute_batch(
+            "PRAGMA user_version = 8;
+             INSERT INTO projects (id, name, created_at, updated_at)
+               VALUES ('p', 'n', 'x', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let auto_memory: i64 = conn
+            .query_row(
+                "SELECT auto_memory FROM projects WHERE id = 'p'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(auto_memory, 1);
+        let memories: i64 = conn
+            .query_row("SELECT count(*) FROM project_memories", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(memories, 0);
     }
 
     #[test]

@@ -306,9 +306,13 @@ where
     validate_model(&model)?;
     let admission = ollama.admit(conversation_id)?;
     ollama.check_connection(think.connection)?;
-    let turn = storage.begin_turn(conversation_id, &model, &input, |history, settings| {
-        check_turn(ollama, &model, &think_choice, history, settings)
-    })?;
+    let turn = storage.begin_turn(
+        conversation_id,
+        &model,
+        &input,
+        ollama.max_prompt_bytes(),
+        |history, settings| check_turn(ollama, &model, &think_choice, history, settings),
+    )?;
 
     let recorder: SharedRecorder = Arc::new(Mutex::new(TurnRecorder::new(
         storage,
@@ -462,7 +466,7 @@ mod tests {
     use crate::ollama::client::OllamaBaseUrl;
     use crate::ollama::types::Think;
     use crate::storage::messages::StoredMessage;
-    use crate::storage::testing::{break_writes, count_rows, temp_storage};
+    use crate::storage::testing::{PROMPT_LIMIT, break_writes, count_rows, temp_storage};
 
     type Events = Arc<Mutex<Vec<ChatEvent>>>;
 
@@ -486,6 +490,7 @@ mod tests {
                 conversation,
                 "m",
                 &TurnInput::New(Redacted::new("Hi")),
+                PROMPT_LIMIT,
                 |_, _| Ok(()),
             )
             .unwrap();
@@ -735,7 +740,13 @@ mod tests {
         let (storage, _dir) = temp_storage();
         let (conversation, before) = answered(&storage);
         let turn = storage
-            .begin_turn(conversation, "m", &TurnInput::Regenerate, |_, _| Ok(()))
+            .begin_turn(
+                conversation,
+                "m",
+                &TurnInput::Regenerate,
+                PROMPT_LIMIT,
+                |_, _| Ok(()),
+            )
             .unwrap();
         let recorder = Arc::new(Mutex::new(TurnRecorder::new(
             Arc::clone(&storage),

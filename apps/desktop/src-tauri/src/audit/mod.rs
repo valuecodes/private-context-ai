@@ -60,7 +60,8 @@ pub struct AuditEvent {
     pub id: i64,
     /// ISO-8601 UTC with milliseconds.
     pub at: String,
-    /// `ollama.chat`, `ollama.tags`, `ollama.version`, `app.start`, `db.open`.
+    /// `ollama.chat`, `ollama.memory`, `ollama.show`, `ollama.tags`,
+    /// `ollama.version`, `app.start`, `db.open`.
     pub kind: String,
     /// `host:port` for requests; absent for lifecycle events.
     pub host: Option<String>,

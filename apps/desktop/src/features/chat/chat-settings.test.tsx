@@ -30,20 +30,29 @@ const panel = (
     />
   );
 
+/** The panel of a chat in project Thesis; saved when `onPreview` is set. */
+const inProject = (onPreview?: () => void) =>
+  renderToString(
+    <ChatSettingsPanel
+      settings={DEFAULT_SETTINGS}
+      onChange={vi.fn()}
+      caps={undefined}
+      disabled={false}
+      project={{ name: "Thesis", onOpen: vi.fn(), onPreview }}
+    />
+  );
+
 describe("ChatSettingsPanel", () => {
   it("says project instructions apply only in a project chat", () => {
-    expect(panel(DEFAULT_SETTINGS)).not.toContain("Project instructions apply");
-    const html = renderToString(
-      <ChatSettingsPanel
-        settings={DEFAULT_SETTINGS}
-        onChange={vi.fn()}
-        caps={undefined}
-        disabled={false}
-        project={{ name: "Thesis", onOpen: vi.fn() }}
-      />
-    );
-    expect(html).toContain("Project instructions apply");
+    expect(panel(DEFAULT_SETTINGS)).not.toContain("Project instructions");
+    const html = inProject();
+    expect(html).toContain("Project instructions and memory apply");
     expect(html).toMatch(/<button type="button"[^>]*>Open Thesis</);
+    // Only a saved chat offers its preview.
+    expect(html).not.toContain("What this chat sees");
+    expect(inProject(vi.fn())).toMatch(
+      /<button type="button"[^>]*>What this chat sees</
+    );
   });
 
   it("shows the defaults when nothing is set", () => {

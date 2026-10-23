@@ -64,6 +64,15 @@ What the app guarantees, and what enforces it:
   Replies are rendered as Markdown into
   React elements with raw HTML disabled: links and images are inert (no `href`, nothing
   fetched), code highlighting is local JS, and nothing in a reply is executed.
+- **Project memory is written by the model, and read as notes.** A project chat's
+  summary is made by a separate `/api/chat` request with the chat's own model: no
+  `tools`, no `format`, thinking off. It is audited as `ollama.memory` (Memory summary
+  in Activity). Summaries are stored encrypted and sent to the project's other chats
+  inside one delimited, escaped block that says they are reference notes, not
+  instructions. That lowers the risk of a chat steering another through its summary,
+  but cannot rule it out with an LLM. Because the model has no tools, the worst case is
+  a worse answer. Every entry can be viewed, edited and deleted, and "View full memory"
+  shows the exact message sent. A change that gives the model tools must revisit this.
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random
   32-byte key lives in the OS keychain and never reaches the webview. Without a working
   keychain the app stores nothing. Temporary chats are kept only in process memory,

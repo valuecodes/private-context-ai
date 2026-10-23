@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { stopsReply } from "~/features/chat/chat-keys";
 import type { ChatState } from "~/features/chat/chat-reducer";
 import { ChatSettings } from "~/features/chat/chat-settings";
+import type { ChatSettingsProps } from "~/features/chat/chat-settings";
 import { CompareView } from "~/features/chat/compare-view";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
@@ -67,7 +68,7 @@ type ChatViewProps = {
   /** From Settings; used when `model` is empty or not installed. */
   defaultModel: string;
   /** The open chat's project, if it is in one. */
-  project?: { name: string; onOpen: () => void };
+  project?: ChatSettingsProps["project"];
 };
 
 const ChatView = ({

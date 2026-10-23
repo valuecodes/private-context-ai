@@ -23,8 +23,11 @@ type ChatSettingsProps = {
   caps: ModelCapabilities | undefined;
   /** While the chat loads, its saved settings are not known yet. */
   disabled: boolean;
-  /** The chat's project, whose instructions come before the system prompt. */
-  project?: { name: string; onOpen: () => void };
+  /**
+   * The chat's project, whose instructions and memory come before the system
+   * prompt. `onPreview`, for a saved chat, opens "What this chat sees".
+   */
+  project?: { name: string; onOpen: () => void; onPreview?: () => void };
 };
 
 /**
@@ -53,7 +56,8 @@ const ChatSettingsPanel = ({
     <fieldset disabled={disabled} className="flex flex-col gap-4 text-sm">
       {project !== undefined && (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          Project instructions apply, before this chat&apos;s system prompt.{" "}
+          Project instructions and memory apply, before this chat&apos;s system
+          prompt.{" "}
           <button
             type="button"
             onClick={project.onOpen}
@@ -61,6 +65,18 @@ const ChatSettingsPanel = ({
           >
             {`Open ${project.name}`}
           </button>
+          {project.onPreview !== undefined && (
+            <>
+              {" · "}
+              <button
+                type="button"
+                onClick={project.onPreview}
+                className="underline hover:text-zinc-900 dark:hover:text-zinc-100"
+              >
+                What this chat sees
+              </button>
+            </>
+          )}
         </p>
       )}
       <div className="flex flex-col gap-1">
@@ -196,4 +212,5 @@ const ChatSettings = (props: ChatSettingsProps) => (
   </details>
 );
 
+export type { ChatSettingsProps };
 export { ChatSettings, ChatSettingsPanel };

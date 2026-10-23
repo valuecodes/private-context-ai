@@ -6,8 +6,16 @@ import {
   formatDuration,
   formatTokens,
   hostsSummary,
+  kindLabel,
   statusLabel,
 } from "./activity";
+
+describe("kindLabel", () => {
+  it("names memory summaries and leaves other kinds as they are", () => {
+    expect(kindLabel("ollama.memory")).toBe("Memory summary");
+    expect(kindLabel("ollama.chat")).toBe("ollama.chat");
+  });
+});
 
 const event = (overrides: Partial<AuditEvent>): AuditEvent => ({
   id: 1,
