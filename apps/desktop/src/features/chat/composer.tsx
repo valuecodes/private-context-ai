@@ -1,5 +1,5 @@
 import { ArrowUp, GitCompare, Square } from "lucide-react";
-import type { KeyboardEvent, SubmitEvent } from "react";
+import type { KeyboardEvent, ReactNode, SubmitEvent } from "react";
 import { useLayoutEffect, useRef, useState } from "react";
 
 import { sendsMessage } from "~/features/chat/chat-keys";
@@ -25,6 +25,8 @@ type ComposerProps = {
   /** A temporary chat: drawn with a dashed border. */
   temporary?: boolean;
   compare?: CompareOption;
+  /** Controls for the next turn, left of Compare. */
+  toolbar?: ReactNode;
 };
 
 const button =
@@ -37,6 +39,7 @@ const Composer = ({
   onStop,
   temporary = false,
   compare,
+  toolbar,
 }: ComposerProps) => {
   const [draft, setDraft] = useState("");
   const [picking, setPicking] = useState(false);
@@ -105,7 +108,7 @@ const Composer = ({
       )}
       <form
         onSubmit={onSubmit}
-        className={`flex items-end gap-2 rounded-3xl border border-zinc-300 bg-white p-2 pl-4 has-[textarea:focus]:ring-2 has-[textarea:focus]:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 ${temporary ? "border-dashed" : ""}`}
+        className={`flex flex-col gap-1 rounded-2xl border border-zinc-300 bg-white p-2 shadow-sm has-[textarea:focus]:ring-2 has-[textarea:focus]:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 ${temporary ? "border-dashed" : ""}`}
       >
         <label htmlFor="composer" className="sr-only">
           Message
@@ -121,50 +124,53 @@ const Composer = ({
           rows={1}
           placeholder="Send a message (Enter to send, Shift+Enter for a new line, Esc to stop)"
           // No outline of its own: the form's ring shows the focus.
-          className="max-h-48 flex-1 resize-none overflow-y-auto bg-transparent py-2 text-sm outline-none"
+          className="max-h-48 resize-none overflow-y-auto bg-transparent px-2 py-2 text-sm outline-none"
         />
-        {compare !== undefined && (
-          <button
-            type="button"
-            onClick={() => {
-              if (comparable) {
-                setPicking((open) => !open);
-              }
-            }}
-            aria-label="Compare models"
-            title="Ask 2 or 3 models and keep the answer you prefer"
-            aria-expanded={picking}
-            aria-disabled={comparable ? undefined : true}
-            className="flex size-9 shrink-0 items-center justify-center rounded-full text-zinc-600 hover:bg-zinc-100 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            <GitCompare aria-hidden="true" className="size-5" />
-          </button>
-        )}
-        {/* One button for Send and Stop: swapping two would drop the focus to
+        <div className="flex items-center gap-1">
+          {toolbar}
+          {compare !== undefined && (
+            <button
+              type="button"
+              onClick={() => {
+                if (comparable) {
+                  setPicking((open) => !open);
+                }
+              }}
+              aria-label="Compare models"
+              title="Ask 2 or 3 models and keep the answer you prefer"
+              aria-expanded={picking}
+              aria-disabled={comparable ? undefined : true}
+              className="flex size-9 shrink-0 items-center justify-center rounded-full text-zinc-600 hover:bg-zinc-100 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              <GitCompare aria-hidden="true" className="size-5" />
+            </button>
+          )}
+          {/* One button for Send and Stop: swapping two would drop the focus to
           the page when a reply starts or ends. `aria-disabled` rather than
           `disabled` for the same reason; `submit` refuses on its own. */}
-        <button
-          type={streaming ? "button" : "submit"}
-          onClick={(event) => {
-            if (streaming) {
-              // Stopping re-renders this as a submit button before the click's
-              // default action runs, which would send the draft.
-              event.preventDefault();
-              onStop();
-            }
-          }}
-          aria-label={streaming ? "Stop reply" : "Send message"}
-          title={streaming ? "Stop reply (Esc)" : "Send message (Enter)"}
-          aria-keyshortcuts={streaming ? "Escape" : undefined}
-          aria-disabled={streaming || sendable ? undefined : true}
-          className={`${button} ${streaming ? "bg-red-600 hover:bg-red-700" : "bg-zinc-900 hover:bg-zinc-700 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"}`}
-        >
-          {streaming ? (
-            <Square aria-hidden="true" className="size-3.5 fill-current" />
-          ) : (
-            <ArrowUp aria-hidden="true" className="size-5" />
-          )}
-        </button>
+          <button
+            type={streaming ? "button" : "submit"}
+            onClick={(event) => {
+              if (streaming) {
+                // Stopping re-renders this as a submit button before the click's
+                // default action runs, which would send the draft.
+                event.preventDefault();
+                onStop();
+              }
+            }}
+            aria-label={streaming ? "Stop reply" : "Send message"}
+            title={streaming ? "Stop reply (Esc)" : "Send message (Enter)"}
+            aria-keyshortcuts={streaming ? "Escape" : undefined}
+            aria-disabled={streaming || sendable ? undefined : true}
+            className={`${button} ml-auto ${streaming ? "bg-red-600 hover:bg-red-700" : "bg-zinc-900 hover:bg-zinc-700 aria-disabled:cursor-not-allowed aria-disabled:opacity-40 dark:bg-zinc-100 dark:text-zinc-900"}`}
+          >
+            {streaming ? (
+              <Square aria-hidden="true" className="size-3.5 fill-current" />
+            ) : (
+              <ArrowUp aria-hidden="true" className="size-5" />
+            )}
+          </button>
+        </div>
       </form>
     </div>
   );

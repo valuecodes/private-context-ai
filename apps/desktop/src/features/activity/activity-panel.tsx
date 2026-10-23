@@ -32,7 +32,8 @@ const ActivityTable = ({ events, hosts }: ActivityTableProps) => (
         No requests recorded yet.
       </p>
     ) : (
-      <div className="min-h-0 flex-1 overflow-auto">
+      // `relative` contains the sr-only caption.
+      <div className="relative min-h-0 flex-1 overflow-auto">
         <table className="w-full text-xs">
           <caption className="sr-only">
             Requests and app events, newest first

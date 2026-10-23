@@ -15,12 +15,15 @@ type StopContext = {
   /** Focus is in an `<input>`, such as the sidebar rename field, where Esc
    * already means "cancel". */
   inTextField: boolean;
+  /** An open menu already used this Esc to close itself. */
+  handled: boolean;
 };
 
 /** Esc stops a streaming reply, wherever focus is in the chat. */
 const stopsReply = (
   { key, isComposing }: ChatKey,
-  { streaming, inTextField }: StopContext
-): boolean => key === "Escape" && streaming && !isComposing && !inTextField;
+  { streaming, inTextField, handled }: StopContext
+): boolean =>
+  key === "Escape" && streaming && !isComposing && !inTextField && !handled;
 
 export { sendsMessage, stopsReply };

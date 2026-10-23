@@ -16,4 +16,9 @@ export default defineConfig({
     // Cargo writes thousands of files under `src-tauri/target`.
     watch: { ignored: ["**/src-tauri/**"] },
   },
+  build: {
+    // The CSP's `font-src 'self'` refuses `data:` fonts, and some bundled
+    // font subsets are under the 4 KB default, so fonts are always files.
+    assetsInlineLimit: (file) => (file.endsWith(".woff2") ? false : undefined),
+  },
 });

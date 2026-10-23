@@ -8,18 +8,15 @@ import { ChatSettings } from "~/features/chat/chat-settings";
 import type { ChatSettingsProps } from "~/features/chat/chat-settings";
 import { CompareView } from "~/features/chat/compare-view";
 import { Composer } from "~/features/chat/composer";
+import { ComposerControls } from "~/features/chat/composer-controls";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
+import { useModelCapabilities } from "~/features/chat/use-model-capabilities";
 import { MemoryIndicator } from "~/features/projects/memory-indicator";
 import type { ProjectMemoryStatus } from "~/features/projects/use-memory-status";
 import { toAppError } from "~/lib/app-error";
-import { ollamaListModels, ollamaModelCapabilities } from "~/lib/ipc";
-import type {
-  AppError,
-  ConversationSettings,
-  ModelCapabilities,
-  ModelInfo,
-} from "~/lib/types";
+import { ollamaListModels } from "~/lib/ipc";
+import type { AppError, ConversationSettings, ModelInfo } from "~/lib/types";
 
 const NOTICE_TEXT: Record<NonNullable<ChatState["notice"]>, string> = {
   busy: "Still answering. Stop it or wait for it to finish.",
@@ -31,22 +28,6 @@ type Models =
   | { phase: "idle" }
   | { phase: "ready"; models: ModelInfo[] }
   | { phase: "failed"; error: AppError };
-
-/** Capabilities are only known for models looked up so far. */
-const modelLabel = (
-  model: ModelInfo,
-  caps: ModelCapabilities | undefined
-): string => {
-  const name =
-    model.parameterSize === null
-      ? model.name
-      : `${model.name} (${model.parameterSize})`;
-  const tags = [
-    caps?.thinking === true ? " · thinking" : "",
-    caps?.vision === true ? " · vision" : "",
-  ];
-  return name + tags.join("");
-};
 
 type ChatViewProps = {
   reachable: boolean;
@@ -98,10 +79,14 @@ const ChatView = ({
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
+  // Bumped on every list load: the base URL may have changed, so another
+  // Ollama with other models.
+  const [listVersion, setListVersion] = useState(0);
   // Looked up lazily, one audited `/api/show` per model.
-  const [capabilities, setCapabilities] = useState<
-    Record<string, ModelCapabilities>
-  >({});
+  const { capabilities, lookUp, loadAll } = useModelCapabilities({
+    reachable,
+    listVersion,
+  });
   const scroller = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLDivElement>(null);
   // Follow new tokens unless the user has scrolled up to read.
@@ -142,8 +127,7 @@ const ChatView = ({
         (list) => {
           if (!cancelled) {
             setModels({ phase: "ready", models: list });
-            // The base URL may have changed: another Ollama, other models.
-            setCapabilities({});
+            setListVersion((version) => version + 1);
           }
         },
         (error: unknown) => {
@@ -175,27 +159,11 @@ const ChatView = ({
     state.messages.length === 0 &&
     !streaming &&
     !state.loading;
-  const selectedCaps: ModelCapabilities | undefined = capabilities[selected];
-  const known = selectedCaps !== undefined;
-
+  // A failed lookup just shows no Think control; Rust checks again on send.
+  // `listVersion` looks the selected model up again after a reload.
   useEffect(() => {
-    let cancelled = false;
-    if (reachable && selected !== "" && !known) {
-      // A failed lookup just shows no Think control; Rust checks again on
-      // send.
-      void ollamaModelCapabilities(selected).then(
-        (caps) => {
-          if (!cancelled) {
-            setCapabilities((current) => ({ ...current, [selected]: caps }));
-          }
-        },
-        () => undefined
-      );
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [reachable, selected, known]);
+    lookUp(selected);
+  }, [selected, listVersion, lookUp]);
 
   // Esc stops the reply wherever focus is, not only in the composer.
   useEffect(() => {
@@ -204,6 +172,8 @@ const ChatView = ({
         stopsReply(event, {
           streaming,
           inTextField: event.target instanceof HTMLInputElement,
+          // An open menu closed on this Esc instead.
+          handled: event.defaultPrevented,
         })
       ) {
         event.preventDefault();
@@ -219,29 +189,9 @@ const ChatView = ({
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3 p-4">
       <div className="flex items-center gap-2">
-        <label htmlFor="model" className="text-sm font-medium">
-          Model
-        </label>
-        <select
-          id="model"
-          value={selected}
-          onChange={(event) => {
-            setModel(event.target.value);
-          }}
-          disabled={modelList.length === 0}
-          className="rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900"
-        >
-          {modelList.length === 0 && <option value="">No models</option>}
-          {modelList.map((info) => (
-            <option key={info.name} value={info.name}>
-              {modelLabel(info, capabilities[info.name])}
-            </option>
-          ))}
-        </select>
         <ChatSettings
           settings={state.settings}
           onChange={onSettings}
-          caps={selectedCaps}
           disabled={state.loading}
           project={project}
         />
@@ -291,18 +241,15 @@ const ChatView = ({
           so the composer below stays mounted and keeps its focus on the
           first send. WebView2 makes an overflowing scroller
           keyboard-focusable on its own; the label names it when it gets
-          focus. */}
+          focus. `relative` makes it the containing block of the messages'
+          sr-only text, which would otherwise sit below the scrolled-off part
+          and stretch the page. */}
       {empty ? (
         <div className="flex flex-1 flex-col items-center justify-end gap-2 pb-4 text-center">
           <h2 className="text-2xl font-semibold">How can I help?</h2>
           {project !== undefined && (
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
               {`In project ${project.name}`}
-            </p>
-          )}
-          {selected === "" && (
-            <p className="text-sm text-zinc-500 dark:text-zinc-400">
-              Pick a model and send a message to start.
             </p>
           )}
         </div>
@@ -312,7 +259,7 @@ const ChatView = ({
           onScroll={onScroll}
           role="region"
           aria-label="Conversation"
-          className="flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
+          className="relative flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
         >
           <div ref={content} className="mx-auto w-full max-w-3xl">
             <MessageList
@@ -367,6 +314,20 @@ const ChatView = ({
           onSend={(text) => send(selected, text)}
           onStop={stop}
           temporary={state.temporary}
+          toolbar={
+            <ComposerControls
+              models={modelList}
+              capabilities={capabilities}
+              selected={selected}
+              onSelect={setModel}
+              onOpenPicker={() => {
+                loadAll(modelList.map(({ name }) => name));
+              }}
+              settings={state.settings}
+              onSettings={onSettings}
+              disabled={state.loading}
+            />
+          }
           compare={
             canCompare
               ? {

@@ -32,7 +32,10 @@ describe("Workspace", () => {
   });
 
   it("renders the model picker and the composer", () => {
-    expect(html).toMatch(/<select[^>]*id="model"/);
+    // No models listed yet: the pill says so.
+    expect(html).toMatch(
+      /<button[^>]*aria-label="No models"[^>]*aria-haspopup="listbox"/
+    );
     expect(html).toMatch(/<textarea[^>]*id="composer"/);
     expect(html).toMatch(/<button[^>]*type="submit"[^>]*aria-disabled="true"/);
   });

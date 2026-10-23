@@ -83,7 +83,8 @@ const ProjectView = ({
   };
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
+    // `relative` contains the sr-only labels, so they scroll with the view.
+    <div className="relative flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-4">
       <div className="mx-auto flex w-full max-w-3xl flex-col gap-4">
         {mode === "rename" ? (
           <form onSubmit={onSubmitName} className="flex items-center gap-2">

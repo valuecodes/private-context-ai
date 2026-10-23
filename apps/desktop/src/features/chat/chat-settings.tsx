@@ -1,11 +1,6 @@
 import { RotateCcw, SlidersHorizontal } from "lucide-react";
 
-import { ThinkControl } from "~/features/chat/think-control";
-import type {
-  ChatOptions,
-  ConversationSettings,
-  ModelCapabilities,
-} from "~/lib/types";
+import type { ChatOptions, ConversationSettings } from "~/lib/types";
 
 /** Where the slider sits while the model's own temperature applies. */
 const DEFAULT_TEMPERATURE = 0.8;
@@ -19,8 +14,6 @@ const contextLabel = (tokens: number): string =>
 type ChatSettingsProps = {
   settings: ConversationSettings;
   onChange: (settings: ConversationSettings) => void;
-  /** The selected model's; the Think control shows once they are known. */
-  caps: ModelCapabilities | undefined;
   /** While the chat loads, its saved settings are not known yet. */
   disabled: boolean;
   /**
@@ -31,13 +24,13 @@ type ChatSettingsProps = {
 };
 
 /**
- * The open chat's settings: system prompt, temperature, context size, Think
- * and Charts. Each change applies from the next send.
+ * The open chat's settings: system prompt, temperature and context size.
+ * Think and Charts are in the composer. Each change applies from the next
+ * send.
  */
 const ChatSettingsPanel = ({
   settings,
   onChange,
-  caps,
   disabled,
   project,
 }: ChatSettingsProps) => {
@@ -155,41 +148,6 @@ const ChatSettingsPanel = ({
         </select>
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
           Larger contexts use more memory and make the model slower to load.
-        </p>
-      </div>
-      {caps?.thinking === true && (
-        <div className="flex flex-col gap-1">
-          <span className="font-medium">Thinking</span>
-          <ThinkControl
-            caps={caps}
-            choice={settings.think}
-            onChange={(think) => {
-              onChange({ ...settings, think });
-            }}
-          />
-        </div>
-      )}
-      <div className="flex flex-col gap-1">
-        <label className="flex items-center gap-2 font-medium">
-          <input
-            id="charts"
-            type="checkbox"
-            checked={settings.charts}
-            disabled={caps?.tools !== true}
-            aria-describedby="charts-hint"
-            onChange={(event) => {
-              onChange({ ...settings, charts: event.currentTarget.checked });
-            }}
-          />
-          Charts
-        </label>
-        <p
-          id="charts-hint"
-          className="text-xs text-zinc-500 dark:text-zinc-400"
-        >
-          {caps?.tools === true
-            ? "Lets the model draw bar, line and pie charts. Nothing is run or fetched."
-            : "This model can't draw charts: it doesn't support tools."}
         </p>
       </div>
     </fieldset>
