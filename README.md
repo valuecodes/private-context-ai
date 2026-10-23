@@ -114,11 +114,11 @@ What this does **not** protect against:
 - **Memory on disk.** Chat text and key material in the app's process memory can end up
   in the page file, the hibernation file or a crash dump (Windows Error Reporting local
   dumps, when an administrator has turned them on). Full-disk encryption covers them.
-- **The browser engine's own traffic.** The WebView2 runtime (Edge) and WebKitGTK may
-  fetch components and report diagnostics on their own, outside the page and its CSP.
-  That traffic carries no chat text in normal operation, but a renderer crash report
-  would include page memory. The Windows switches above reduce it; Windows diagnostic
-  data settings and Microsoft's own policy decide the rest.
+- **The browser engine's own traffic.** On Windows the WebView2 runtime (Edge) fetches
+  components and reports diagnostics on its own, outside the page and its CSP. That
+  traffic carries no chat text in normal operation, but a renderer crash report would
+  include page memory. The switches above reduce it; Windows diagnostic data settings
+  and Microsoft's own policy decide the rest.
 - **The screen.** Screenshots, screen recording, remote desktop and Windows Recall see
   whatever the window shows.
 - **Project memory, on purpose.** With Auto memory on, a summary of each chat in a
