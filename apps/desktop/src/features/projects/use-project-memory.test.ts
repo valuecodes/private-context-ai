@@ -16,6 +16,7 @@ const entry = (conversationId: string, content = "Notes"): MemoryEntry => ({
   rebuilt: false,
   truncated: false,
   state: "current",
+  skipReason: null,
 });
 
 const ids = (entries: MemoryEntry[]): string[] =>
@@ -29,18 +30,20 @@ describe("memoryReducer", () => {
   });
 
   it("keeps Rust's order when loaded", () => {
+    const unsaved = { conversationId: "c", title: "C", skipReason: null };
     const state = memoryReducer(initialMemory, {
       type: "loaded",
-      entries: [entry("b"), entry("a")],
+      list: { entries: [entry("b"), entry("a")], unsaved: [unsaved] },
     });
     expect(state.phase).toBe("ready");
     expect(ids(state.entries)).toEqual(["b", "a"]);
+    expect(state.unsaved).toEqual([unsaved]);
   });
 
   it("puts an edited entry first and drops a deleted one", () => {
     const loaded = memoryReducer(initialMemory, {
       type: "loaded",
-      entries: [entry("b"), entry("a")],
+      list: { entries: [entry("b"), entry("a")], unsaved: [] },
     });
     const edited = memoryReducer(loaded, {
       type: "saved",

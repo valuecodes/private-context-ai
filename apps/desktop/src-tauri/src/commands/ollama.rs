@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::memory::MemoryScheduler;
 use crate::ollama::chart_tool::{ChartEntry, follow_up_history, without_tools};
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{
@@ -21,9 +22,26 @@ use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnInput, TurnRecorder};
 use crate::storage::{Storage, StorageState};
 
+/// A reachable Ollama also resumes background memory.
 #[tauri::command]
-pub async fn ollama_status(ollama: State<'_, Arc<Ollama>>) -> Result<OllamaStatus, AppError> {
-    ollama.status().await
+pub async fn ollama_status(
+    ollama: State<'_, Arc<Ollama>>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
+) -> Result<OllamaStatus, AppError> {
+    let status = ollama.status().await?;
+    if status.reachable {
+        scheduler.ollama_reachable();
+    }
+    Ok(status)
+}
+
+/// What a saved chat's completed reply tells the memory scheduler.
+fn reply_hook(
+    scheduler: &Arc<MemoryScheduler>,
+    conversation_id: Uuid,
+) -> impl FnOnce() + Send + 'static {
+    let scheduler = Arc::clone(scheduler);
+    move || scheduler.reply_completed(conversation_id)
 }
 
 #[tauri::command]
@@ -123,6 +141,7 @@ pub(crate) fn check_prompt(input: &TurnInput) -> Result<(), AppError> {
 pub async fn chat_send(
     ollama: State<'_, Arc<Ollama>>,
     storage: State<'_, StorageState>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     conversation_id: Uuid,
     model: String,
     prompt: Redacted,
@@ -130,7 +149,7 @@ pub async fn chat_send(
 ) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
     let (think_choice, think) = saved_think(&ollama, &storage, conversation_id, &model).await?;
-    send_turn(
+    send_turn_then(
         &ollama,
         storage,
         SendRequest {
@@ -142,6 +161,7 @@ pub async fn chat_send(
         },
         FlushPolicy::default(),
         channel_sink(on_event),
+        reply_hook(&scheduler, conversation_id),
     )
 }
 
@@ -151,13 +171,14 @@ pub async fn chat_send(
 pub async fn chat_regenerate(
     ollama: State<'_, Arc<Ollama>>,
     storage: State<'_, StorageState>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     conversation_id: Uuid,
     model: String,
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
     let (think_choice, think) = saved_think(&ollama, &storage, conversation_id, &model).await?;
-    send_turn(
+    send_turn_then(
         &ollama,
         storage,
         SendRequest {
@@ -169,6 +190,7 @@ pub async fn chat_regenerate(
         },
         FlushPolicy::default(),
         channel_sink(on_event),
+        reply_hook(&scheduler, conversation_id),
     )
 }
 
@@ -176,9 +198,14 @@ pub async fn chat_regenerate(
 /// everything after it with `prompt` and its reply. Nothing is deleted
 /// until that reply completes.
 #[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri injects the three states; the rest is the IPC payload"
+)]
 pub async fn chat_edit(
     ollama: State<'_, Arc<Ollama>>,
     storage: State<'_, StorageState>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     conversation_id: Uuid,
     message_id: Uuid,
     model: String,
@@ -187,7 +214,7 @@ pub async fn chat_edit(
 ) -> Result<SendStarted, AppError> {
     let storage = Arc::clone(storage.get()?);
     let (think_choice, think) = saved_think(&ollama, &storage, conversation_id, &model).await?;
-    send_turn(
+    send_turn_then(
         &ollama,
         storage,
         SendRequest {
@@ -199,6 +226,7 @@ pub async fn chat_edit(
         },
         FlushPolicy::default(),
         channel_sink(on_event),
+        reply_hook(&scheduler, conversation_id),
     )
 }
 
@@ -295,6 +323,22 @@ pub fn send_turn<S>(
 where
     S: Fn(ChatEvent) -> bool + Send + Sync + 'static,
 {
+    send_turn_then(ollama, storage, request, policy, send, || {})
+}
+
+/// [`send_turn`], calling `on_complete` once the reply is saved complete.
+pub fn send_turn_then<S, C>(
+    ollama: &Arc<Ollama>,
+    storage: Arc<Storage>,
+    request: SendRequest,
+    policy: FlushPolicy,
+    send: S,
+    on_complete: C,
+) -> Result<SendStarted, AppError>
+where
+    S: Fn(ChatEvent) -> bool + Send + Sync + 'static,
+    C: FnOnce() + Send + 'static,
+{
     let SendRequest {
         conversation_id,
         model,
@@ -340,7 +384,9 @@ where
         follow_up,
         move |end| {
             stop_ticker.cancel();
-            finish_turn(&recorder, end);
+            if finish_turn(&recorder, end) {
+                on_complete();
+            }
         },
     )?;
     Ok(SendStarted {
@@ -408,7 +454,8 @@ where
 
 /// Writes the final status. The sink has already saved a delivered `Done`,
 /// so this matters for cancel, failure, and a `Done` nobody received.
-pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd) {
+/// `true` when the reply was saved complete.
+pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd) -> bool {
     let mut recorder = lock(recorder);
     let result = match end {
         ChatEnd::Done {
@@ -428,9 +475,13 @@ pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd)
         ChatEnd::Cancelled => recorder.finish(MessageStatus::Cancelled),
         ChatEnd::Failed(_) => recorder.finish(MessageStatus::Error),
     };
-    if let Err(error) = result {
-        // The row stays `pending` and becomes `error` at the next start.
-        tracing::warn!(kind = error.kind(), "could not save the end of the reply");
+    match result {
+        Ok(()) => matches!(end, ChatEnd::Done { .. }),
+        Err(error) => {
+            // The row stays `pending` and becomes `error` at the next start.
+            tracing::warn!(kind = error.kind(), "could not save the end of the reply");
+            false
+        }
     }
 }
 

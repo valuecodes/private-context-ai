@@ -6,16 +6,25 @@
 //! A long history is summarized in chunks that fit the chat's context, one
 //! request each; every chunk extends the previous summary and moves the
 //! checkpoint only to its last message, so a failure keeps what was done.
+//!
+//! [`MemoryScheduler`] writes them on its own: after a project chat has
+//! been quiet for a while, and at startup for chats whose replies are not
+//! in memory yet, one at a time and only while nothing else runs.
 
-use std::sync::{Mutex, PoisonError};
+use std::collections::{HashMap, VecDeque};
+use std::future::pending;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use serde::Serialize;
+use tokio::sync::Notify;
+use tokio::time::{Instant, sleep, sleep_until};
 use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{ChatEvent, ChatMessage, ChatOptions, ChatRole, Think, resolve_think};
-use crate::ollama::{ChatCall, Ollama};
+use crate::ollama::{Admission, ChatCall, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::Storage;
 use crate::storage::memory::{
@@ -143,6 +152,18 @@ pub async fn summarize(
     conversation_id: Uuid,
 ) -> Result<SummaryOutcome, AppError> {
     let admission = ollama.admit_summary(project_id, conversation_id)?;
+    summarize_on(ollama, storage, conversation_id, &admission, false).await
+}
+
+/// [`summarize`] on a slot already taken. A `background` summary is
+/// discarded once its project's automatic memory is off.
+async fn summarize_on(
+    ollama: &Ollama,
+    storage: &Storage,
+    conversation_id: Uuid,
+    admission: &Admission,
+    background: bool,
+) -> Result<SummaryOutcome, AppError> {
     let mut outcome = SummaryOutcome::Current;
     let mut rebuilding = false;
     loop {
@@ -186,7 +207,7 @@ pub async fn summarize(
         let mut end = ChatEnd::Cancelled;
         ollama
             .run_memory(
-                &admission,
+                admission,
                 ChatCall {
                     model,
                     messages: &messages,
@@ -230,6 +251,7 @@ pub async fn summarize(
             model,
             rebuilt: rebuilding,
             truncated,
+            background,
         })?;
         if !written {
             return Ok(SummaryOutcome::Cancelled);
@@ -276,6 +298,522 @@ fn result(conversation_id: Uuid, outcome: Result<SummaryOutcome, AppError>) -> R
         conversation_id,
         outcome,
         error,
+    }
+}
+
+/// How many failed summaries, with Ollama reachable, a chat gets per session.
+const MAX_ATTEMPTS: u8 = 3;
+const MISSING_MODEL: &str = "model not installed";
+const GAVE_UP: &str = "couldn't update memory 3 times; use Refresh memory";
+
+/// Ollama answers `404` to `/api/show` and `/api/chat` for a model it does
+/// not have.
+fn missing_model(error: &AppError) -> bool {
+    matches!(error, AppError::Ollama(message) if message.starts_with("HTTP 404"))
+}
+
+/// When [`MemoryScheduler`] acts.
+#[derive(Debug, Clone, Copy)]
+pub struct Timings {
+    /// How long a project chat stays quiet before its summary.
+    pub idle: Duration,
+    /// From the first reachable Ollama to the startup catch-up.
+    pub startup: Duration,
+    /// Before a failed summary is tried again.
+    pub retry: Duration,
+    /// The first status check while paused, doubled up to `max_probe`.
+    pub probe: Duration,
+    pub max_probe: Duration,
+}
+
+impl Default for Timings {
+    fn default() -> Self {
+        Self {
+            idle: Duration::from_secs(60),
+            startup: Duration::from_secs(30),
+            retry: Duration::from_secs(60),
+            probe: Duration::from_secs(30),
+            max_probe: Duration::from_secs(300),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MemoryStatusState {
+    Queued,
+    Running,
+    Saved,
+    Failed,
+    Cancelled,
+}
+
+/// The `memory-status` event: ids, a state and the project's pending count,
+/// never text; mirrored by `MemoryStatus` in `src/lib/types.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryStatus {
+    pub project_id: Uuid,
+    pub conversation_id: Uuid,
+    pub state: MemoryStatusState,
+    pub pending: usize,
+}
+
+/// Delivers a [`MemoryStatus`]; the app emits it to the webview.
+pub type Emit = Arc<dyn Fn(MemoryStatus) + Send + Sync>;
+
+#[derive(Debug, Clone, Copy)]
+struct Job {
+    project_id: Uuid,
+    conversation_id: Uuid,
+    due: Instant,
+}
+
+#[derive(Debug, Default)]
+struct Queue {
+    /// At most one job per chat.
+    jobs: VecDeque<Job>,
+    running: Option<Job>,
+    /// Ollama was unreachable, or has not been seen reachable yet.
+    paused: bool,
+    reachable_seen: bool,
+    catch_up_at: Option<Instant>,
+    attempts: HashMap<Uuid, u8>,
+    reasons: HashMap<Uuid, String>,
+}
+
+impl Queue {
+    fn position(&self, conversation_id: Uuid) -> Option<usize> {
+        self.jobs
+            .iter()
+            .position(|job| job.conversation_id == conversation_id)
+    }
+
+    /// Queues `job` at the back, or moves a queued one's `due` to `job`'s,
+    /// keeping its place.
+    fn upsert(&mut self, job: Job) {
+        match self.position(job.conversation_id) {
+            Some(index) => self.jobs[index].due = job.due,
+            None => self.jobs.push_back(job),
+        }
+    }
+
+    /// Queues `job` first unless its chat is queued already, as after a
+    /// reply that completed while it ran: that job keeps its later `due`.
+    fn push_front_if_absent(&mut self, job: Job) {
+        if self.position(job.conversation_id).is_none() {
+            self.jobs.push_front(job);
+        }
+    }
+
+    fn capped(&self, conversation_id: Uuid) -> bool {
+        self.attempts
+            .get(&conversation_id)
+            .is_some_and(|attempts| *attempts >= MAX_ATTEMPTS)
+    }
+
+    fn is_running(&self, conversation_id: Uuid) -> bool {
+        self.running
+            .is_some_and(|job| job.conversation_id == conversation_id)
+    }
+}
+
+/// What the worker does next.
+enum Next {
+    Run(Job),
+    CatchUp,
+    /// Paused with jobs queued: check whether Ollama is back.
+    Probe,
+    Wait {
+        until: Option<Instant>,
+        /// A job is due once nothing else runs.
+        idle: bool,
+    },
+}
+
+/// Writes project memory on its own: a chat's summary once it has been
+/// quiet for [`Timings::idle`], and every pending chat once Ollama is first
+/// reachable. One summary at a time, only while nothing else is in flight;
+/// any other request cancels it, and it goes back to the front.
+pub struct MemoryScheduler {
+    ollama: Arc<Ollama>,
+    /// `None` when storage did not open: every call is a no-op.
+    storage: Option<Arc<Storage>>,
+    emit: Emit,
+    timings: Timings,
+    queue: Mutex<Queue>,
+    /// One worker waits on it; `notify_one` keeps a permit for it.
+    wake: Notify,
+}
+
+impl MemoryScheduler {
+    pub fn new(
+        ollama: Arc<Ollama>,
+        storage: Option<Arc<Storage>>,
+        emit: Emit,
+        timings: Timings,
+    ) -> Self {
+        Self {
+            ollama,
+            storage,
+            emit,
+            timings,
+            queue: Mutex::new(Queue {
+                paused: true,
+                ..Queue::default()
+            }),
+            wake: Notify::new(),
+        }
+    }
+
+    fn queue(&self) -> MutexGuard<'_, Queue> {
+        // Every critical section leaves the queue consistent.
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn send(&self, project_id: Uuid, conversation_id: Uuid, state: MemoryStatusState) {
+        let pending = self
+            .storage
+            .as_ref()
+            .map_or(Ok(0), |storage| {
+                storage
+                    .pending_chats(Some(project_id))
+                    .map(|chats| chats.len())
+            })
+            .unwrap_or_else(|error| {
+                tracing::warn!(kind = error.kind(), "could not count pending memories");
+                0
+            });
+        (self.emit)(MemoryStatus {
+            project_id,
+            conversation_id,
+            state,
+            pending,
+        });
+    }
+
+    /// A reply of conversation `conversation_id` was saved complete: in a
+    /// project with automatic memory on, its summary is due after
+    /// [`Timings::idle`], counted again from every later reply. Also proves
+    /// Ollama reachable.
+    pub fn reply_completed(&self, conversation_id: Uuid) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        self.ollama_reachable();
+        let project_id = match storage.chat_project(conversation_id) {
+            Ok(Some((project_id, true))) => project_id,
+            Ok(_) => return,
+            Err(error) => {
+                tracing::warn!(kind = error.kind(), "could not read the chat's project");
+                return;
+            }
+        };
+        self.queue().upsert(Job {
+            project_id,
+            conversation_id,
+            due: Instant::now() + self.timings.idle,
+        });
+        self.wake.notify_one();
+        self.send(project_id, conversation_id, MemoryStatusState::Queued);
+    }
+
+    /// A status check found Ollama: the queue resumes, and the first time
+    /// the startup catch-up is scheduled.
+    pub fn ollama_reachable(&self) {
+        {
+            let mut queue = self.queue();
+            queue.paused = false;
+            if !queue.reachable_seen {
+                queue.reachable_seen = true;
+                queue.catch_up_at = Some(Instant::now() + self.timings.startup);
+            }
+        }
+        self.wake.notify_one();
+    }
+
+    /// Moves project `project_id`'s pending chats to the front, oldest
+    /// first, and gives skipped ones another try. Chats that failed
+    /// [`MAX_ATTEMPTS`] times stay out for this session.
+    pub fn catch_up(&self, project_id: Uuid) {
+        let queued = self.enqueue(Some(project_id), true);
+        for (project_id, conversation_id) in queued {
+            self.send(project_id, conversation_id, MemoryStatusState::Queued);
+        }
+    }
+
+    /// Queues the pending chats of `project_id`, or of every project, due
+    /// at once; `front` moves them before everything else. Returns what was
+    /// queued.
+    fn enqueue(&self, project_id: Option<Uuid>, front: bool) -> Vec<(Uuid, Uuid)> {
+        let Some(storage) = &self.storage else {
+            return Vec::new();
+        };
+        let chats = match storage.pending_chats(project_id) {
+            Ok(chats) => chats,
+            Err(error) => {
+                tracing::warn!(kind = error.kind(), "could not list pending memories");
+                return Vec::new();
+            }
+        };
+        let now = Instant::now();
+        let mut queued = Vec::new();
+        {
+            let mut queue = self.queue();
+            let mut at = 0;
+            for chat in chats {
+                let id = chat.conversation_id;
+                if queue.capped(id) || queue.is_running(id) {
+                    continue;
+                }
+                let job = Job {
+                    project_id: chat.project_id,
+                    conversation_id: id,
+                    due: now,
+                };
+                if front {
+                    queue.reasons.remove(&id);
+                    if let Some(index) = queue.position(id) {
+                        queue.jobs.remove(index);
+                    }
+                    queue.jobs.insert(at, job);
+                    at += 1;
+                } else if queue.position(id).is_none() && !queue.reasons.contains_key(&id) {
+                    queue.jobs.push_back(job);
+                } else {
+                    continue;
+                }
+                queued.push((chat.project_id, id));
+            }
+        }
+        self.wake.notify_one();
+        queued
+    }
+
+    /// Automatic memory went off, or the project went: its jobs are dropped
+    /// and a running summary of it is cancelled.
+    pub async fn forget_project(&self, project_id: Uuid) {
+        let running = {
+            let mut queue = self.queue();
+            queue.jobs.retain(|job| job.project_id != project_id);
+            queue.running.filter(|job| job.project_id == project_id)
+        };
+        if let Some(job) = running {
+            self.ollama.cancel_conversation(job.conversation_id).await;
+        }
+    }
+
+    /// The chat was deleted; a running summary of it is cancelled by the
+    /// delete itself.
+    pub fn forget_chat(&self, conversation_id: Uuid) {
+        let mut queue = self.queue();
+        queue
+            .jobs
+            .retain(|job| job.conversation_id != conversation_id);
+        queue.attempts.remove(&conversation_id);
+        queue.reasons.remove(&conversation_id);
+    }
+
+    /// Why the chat's memory is not being written on its own, if it is not.
+    pub fn skip_reason(&self, conversation_id: Uuid) -> Option<String> {
+        self.queue().reasons.get(&conversation_id).cloned()
+    }
+
+    #[cfg(test)]
+    fn queued(&self) -> Vec<Uuid> {
+        self.queue()
+            .jobs
+            .iter()
+            .map(|job| job.conversation_id)
+            .collect()
+    }
+
+    /// The worker: runs due jobs one after another, forever.
+    pub async fn run(self: Arc<Self>) {
+        if self.storage.is_none() {
+            return;
+        }
+        loop {
+            let job = self.next_job().await;
+            self.run_job(job).await;
+        }
+    }
+
+    fn decide(&self, now: Instant) -> Next {
+        let mut queue = self.queue();
+        if queue.catch_up_at.is_some_and(|at| at <= now) {
+            queue.catch_up_at = None;
+            return Next::CatchUp;
+        }
+        if queue.paused {
+            return if queue.jobs.is_empty() {
+                Next::Wait {
+                    until: queue.catch_up_at,
+                    idle: false,
+                }
+            } else {
+                Next::Probe
+            };
+        }
+        if let Some(index) = queue.jobs.iter().position(|job| job.due <= now) {
+            if self.ollama.is_idle()
+                && let Some(job) = queue.jobs.remove(index)
+            {
+                queue.running = Some(job);
+                return Next::Run(job);
+            }
+            return Next::Wait {
+                until: queue.catch_up_at,
+                idle: true,
+            };
+        }
+        Next::Wait {
+            until: queue
+                .jobs
+                .iter()
+                .map(|job| job.due)
+                .chain(queue.catch_up_at)
+                .min(),
+            idle: false,
+        }
+    }
+
+    async fn next_job(&self) -> Job {
+        let mut probe = self.timings.probe;
+        loop {
+            let woken = self.wake.notified();
+            match self.decide(Instant::now()) {
+                Next::Run(job) => return job,
+                Next::CatchUp => {
+                    let queued = self.enqueue(None, false);
+                    for (project_id, conversation_id) in queued {
+                        self.send(project_id, conversation_id, MemoryStatusState::Queued);
+                    }
+                }
+                Next::Probe => {
+                    tokio::select! {
+                        () = woken => {}
+                        () = sleep(probe) => {
+                            probe = (probe * 2).min(self.timings.max_probe);
+                            if self.ollama.status().await.is_ok_and(|status| status.reachable) {
+                                self.ollama_reachable();
+                            }
+                        }
+                    }
+                }
+                Next::Wait { until, idle } => {
+                    let timer = async {
+                        match until {
+                            Some(at) => sleep_until(at).await,
+                            None => pending().await,
+                        }
+                    };
+                    let emptied = async {
+                        if idle {
+                            self.ollama.wait_idle().await;
+                        } else {
+                            pending::<()>().await;
+                        }
+                    };
+                    tokio::select! {
+                        () = woken => {}
+                        () = timer => {}
+                        () = emptied => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn run_job(&self, job: Job) {
+        let Some(storage) = &self.storage else {
+            return;
+        };
+        let chat = job.conversation_id;
+        if !storage.is_pending(chat).unwrap_or(false) {
+            self.queue().running = None;
+            return;
+        }
+        let result = match self.ollama.admit_background(job.project_id, chat) {
+            Ok(admission) => {
+                self.send(job.project_id, chat, MemoryStatusState::Running);
+                summarize_on(&self.ollama, storage, chat, &admission, true).await
+            }
+            Err(AppError::Busy(_)) => {
+                // A request was admitted since the idle check: wait for it.
+                let mut queue = self.queue();
+                queue.running = None;
+                queue.push_front_if_absent(Job {
+                    due: Instant::now(),
+                    ..job
+                });
+                return;
+            }
+            Err(error) => Err(error),
+        };
+        let still_pending = storage.is_pending(chat).unwrap_or(false);
+        let state = self.settle(job, result, still_pending);
+        self.wake.notify_one();
+        if let Some(state) = state {
+            self.send(job.project_id, chat, state);
+        }
+    }
+
+    /// Updates the queue after a run of `job` and returns the event to send.
+    fn settle(
+        &self,
+        job: Job,
+        result: Result<SummaryOutcome, AppError>,
+        still_pending: bool,
+    ) -> Option<MemoryStatusState> {
+        let chat = job.conversation_id;
+        let now = Instant::now();
+        let mut queue = self.queue();
+        queue.running = None;
+        let again = Job { due: now, ..job };
+        match result {
+            Ok(SummaryOutcome::Updated | SummaryOutcome::Current) => {
+                queue.attempts.remove(&chat);
+                queue.reasons.remove(&chat);
+                Some(MemoryStatusState::Saved)
+            }
+            Ok(SummaryOutcome::Cancelled) | Err(AppError::Busy(_)) => {
+                if still_pending {
+                    queue.push_front_if_absent(again);
+                }
+                Some(MemoryStatusState::Cancelled)
+            }
+            Err(AppError::Unreachable(_) | AppError::Timeout(_)) => {
+                queue.paused = true;
+                if still_pending {
+                    queue.push_front_if_absent(again);
+                }
+                Some(MemoryStatusState::Cancelled)
+            }
+            Err(AppError::NotFound(_)) => None,
+            Err(error) if missing_model(&error) => {
+                queue.reasons.insert(chat, MISSING_MODEL.to_owned());
+                Some(MemoryStatusState::Failed)
+            }
+            Err(AppError::InvalidInput(reason)) => {
+                queue.reasons.insert(chat, reason);
+                Some(MemoryStatusState::Failed)
+            }
+            Err(error) => {
+                tracing::warn!(kind = error.kind(), "background memory summary failed");
+                let attempts = queue.attempts.entry(chat).or_default();
+                *attempts += 1;
+                if *attempts >= MAX_ATTEMPTS {
+                    queue.reasons.insert(chat, GAVE_UP.to_owned());
+                } else {
+                    queue.upsert(Job {
+                        due: now + self.timings.retry,
+                        ..job
+                    });
+                }
+                Some(MemoryStatusState::Failed)
+            }
+        }
     }
 }
 
@@ -332,6 +870,8 @@ mod tests {
         let route = move |path: &str, body: &serde_json::Value| {
             if path == "/api/show" {
                 Reply::Json(show)
+            } else if path == "/api/version" {
+                Reply::Json(r#"{"version":"0.12.0"}"#)
             } else if is_summary(body) {
                 summary(summaries.fetch_add(1, Ordering::SeqCst))
             } else {
@@ -979,6 +1519,537 @@ mod tests {
         assert_eq!(results[0].outcome, RefreshOutcome::Updated);
         // Released once the refresh ended.
         assert!(setup.ollama.reserve_refresh(setup.project).is_ok());
+    }
+
+    type Statuses = Arc<Mutex<Vec<MemoryStatus>>>;
+
+    /// Short enough for tests; the startup catch-up only when a test asks.
+    fn fast() -> Timings {
+        Timings {
+            idle: Duration::from_millis(150),
+            startup: Duration::from_secs(3600),
+            retry: Duration::from_millis(100),
+            probe: Duration::from_millis(50),
+            max_probe: Duration::from_millis(100),
+        }
+    }
+
+    /// A running scheduler over `setup`, and the statuses it emits.
+    fn scheduler(setup: &Setup, timings: Timings) -> (Arc<MemoryScheduler>, Statuses) {
+        let statuses = Statuses::default();
+        let store = Arc::clone(&statuses);
+        let scheduler = Arc::new(MemoryScheduler::new(
+            Arc::clone(&setup.ollama),
+            Some(Arc::clone(&setup.storage)),
+            Arc::new(move |status| store.lock().unwrap().push(status)),
+            timings,
+        ));
+        tokio::spawn(Arc::clone(&scheduler).run());
+        (scheduler, statuses)
+    }
+
+    fn states(statuses: &Statuses, id: Uuid) -> Vec<MemoryStatusState> {
+        statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|status| status.conversation_id == id)
+            .map(|status| status.state)
+            .collect()
+    }
+
+    async fn wait_state(statuses: &Statuses, id: Uuid, state: MemoryStatusState) {
+        wait_until(|| states(statuses, id).contains(&state)).await;
+    }
+
+    fn silent_first() -> impl Fn(usize) -> Reply + Send + Sync + 'static {
+        |n| {
+            if n == 0 {
+                Reply::Silent
+            } else {
+                Reply::Lines(vec![SUMMARY, DONE], Duration::ZERO)
+            }
+        }
+    }
+
+    async fn pause(ms: u64) {
+        tokio::time::sleep(Duration::from_millis(ms)).await;
+    }
+
+    #[tokio::test]
+    async fn summary_runs_after_idle() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+
+        scheduler.reply_completed(a);
+        pause(50).await;
+        assert!(summary_bodies(&setup.fake).is_empty());
+
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+        assert_eq!(
+            states(&statuses, a),
+            [
+                MemoryStatusState::Queued,
+                MemoryStatusState::Running,
+                MemoryStatusState::Saved
+            ]
+        );
+        let pending: Vec<usize> = statuses.lock().unwrap().iter().map(|s| s.pending).collect();
+        assert_eq!(pending, [1, 1, 0]);
+        assert_eq!(entry(&setup, a).unwrap().state, MemoryState::Current);
+        assert!(audit_kinds(&setup).contains(&("ollama.memory".into(), AuditStatus::Ok, None)));
+    }
+
+    #[tokio::test]
+    async fn completion_resets_idle_timer() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let timings = Timings {
+            idle: Duration::from_millis(300),
+            ..fast()
+        };
+        let (scheduler, statuses) = scheduler(&setup, timings);
+
+        scheduler.reply_completed(a);
+        pause(150).await;
+        scheduler.reply_completed(a);
+        // Past the first deadline, before the second.
+        pause(200).await;
+        assert!(summary_bodies(&setup.fake).is_empty());
+
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+        assert_eq!(summary_bodies(&setup.fake).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn new_turn_cancels_summary() {
+        let setup = setup_with(SHOW, silent_first()).await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+        scheduler.reply_completed(a);
+        wait_until(|| summary_bodies(&setup.fake).len() == 1).await;
+
+        send(&setup, a, "Two").unwrap();
+
+        // The reply starts at once and the summary is cancelled.
+        chat_body(&setup.fake, 0).await;
+        wait_state(&statuses, a, MemoryStatusState::Cancelled).await;
+        // It runs again once the reply is done, and covers it.
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+        assert!(summary_input(&summary_bodies(&setup.fake)[1]).contains("User: Two"));
+    }
+
+    #[tokio::test]
+    async fn summary_waits_while_request_inflight() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+        let held = setup.ollama.admit(Uuid::new_v4()).unwrap();
+
+        scheduler.reply_completed(a);
+        pause(300).await;
+        assert!(summary_bodies(&setup.fake).is_empty());
+        assert_eq!(scheduler.queued(), [a]);
+
+        drop(held);
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+    }
+
+    #[tokio::test]
+    async fn auto_memory_off_never_summarizes() {
+        let setup = setup().await;
+        setup.storage.set_auto_memory(setup.project, false).unwrap();
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let timings = Timings {
+            startup: Duration::from_millis(50),
+            ..fast()
+        };
+        let (scheduler, statuses) = scheduler(&setup, timings);
+
+        scheduler.ollama_reachable();
+        scheduler.reply_completed(a);
+        pause(400).await;
+
+        assert!(summary_bodies(&setup.fake).is_empty());
+        assert!(statuses.lock().unwrap().is_empty());
+        assert!(scheduler.queued().is_empty());
+        // "Refresh memory" still works.
+        let results = refresh(&setup.ollama, &setup.storage, setup.project, Some(a))
+            .await
+            .unwrap();
+        assert_eq!(results[0].outcome, RefreshOutcome::Updated);
+    }
+
+    #[tokio::test]
+    async fn auto_memory_on_catches_up() {
+        let setup = setup().await;
+        setup.storage.set_auto_memory(setup.project, false).unwrap();
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+        scheduler.reply_completed(a);
+        assert!(scheduler.queued().is_empty());
+
+        crate::commands::projects::set_auto_memory(&setup.storage, &scheduler, setup.project, true)
+            .await
+            .unwrap();
+
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+    }
+
+    #[tokio::test]
+    async fn temp_chat_never_summarized() {
+        let setup = setup().await;
+        let chats = Arc::new(TempChats::default());
+        let session = start_temp(
+            &setup.state,
+            &chats,
+            ConversationSettings::default(),
+            Some(setup.project),
+        )
+        .unwrap();
+        send_temp_turn(
+            &setup.ollama,
+            &chats,
+            setup.storage.project_context(setup.project).unwrap(),
+            SendRequest {
+                conversation_id: session,
+                model: "qwen3".into(),
+                input: TurnInput::New(Redacted::new("Hi")),
+                think_choice: ThinkChoice::Off,
+                think: no_think(&setup.ollama),
+            },
+            |_| true,
+        )
+        .unwrap();
+        wait_until(|| setup.ollama.inflight_len() == 0).await;
+        let timings = Timings {
+            startup: Duration::from_millis(50),
+            ..fast()
+        };
+        let (scheduler, statuses) = scheduler(&setup, timings);
+
+        scheduler.reply_completed(session);
+        pause(400).await;
+
+        assert!(summary_bodies(&setup.fake).is_empty());
+        assert!(statuses.lock().unwrap().is_empty());
+        assert!(scheduler.queued().is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_events_carry_no_text() {
+        let setup = setup().await;
+        let a = chat(&setup, "Secret title");
+        say(&setup, a, "Secret prompt");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+
+        scheduler.reply_completed(a);
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+
+        for status in statuses.lock().unwrap().iter() {
+            let json = serde_json::to_value(status).unwrap();
+            let mut keys: Vec<&str> = json
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["conversationId", "pending", "projectId", "state"]);
+            assert!(!json.to_string().contains("Secret"));
+            assert!(!json.to_string().contains("Summary"));
+        }
+    }
+
+    /// Two pending chats, `b` older than `a`.
+    fn two_pending(setup: &Setup) -> (Uuid, Uuid) {
+        let b = chat(setup, "Beta");
+        let a = chat(setup, "Alpha");
+        say(setup, b, "Two");
+        std::thread::sleep(Duration::from_millis(5));
+        say(setup, a, "One");
+        (a, b)
+    }
+
+    fn startup_soon() -> Timings {
+        Timings {
+            startup: Duration::from_millis(100),
+            ..fast()
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_up_waits_for_reachable_true() {
+        let setup = setup().await;
+        two_pending(&setup);
+        let (scheduler, _) = scheduler(&setup, startup_soon());
+
+        pause(300).await;
+        assert!(summary_bodies(&setup.fake).is_empty());
+        assert!(scheduler.queued().is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_catch_up_queues_pending_oldest_first() {
+        let setup = setup().await;
+        let (a, b) = two_pending(&setup);
+        let (scheduler, statuses) = scheduler(&setup, startup_soon());
+
+        scheduler.ollama_reachable();
+        pause(30).await;
+        assert!(scheduler.queued().is_empty());
+
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+        let inputs: Vec<String> = summary_bodies(&setup.fake)
+            .iter()
+            .map(summary_input)
+            .collect();
+        assert_eq!(inputs.len(), 2);
+        assert!(inputs[0].contains("User: Two"));
+        assert!(inputs[1].contains("User: One"));
+        assert!(states(&statuses, b).contains(&MemoryStatusState::Saved));
+    }
+
+    #[tokio::test]
+    async fn catch_up_waits_for_ollama_and_idle() {
+        let setup = setup().await;
+        let (a, _) = two_pending(&setup);
+        let (scheduler, statuses) = scheduler(&setup, startup_soon());
+        let held = setup.ollama.admit(Uuid::new_v4()).unwrap();
+
+        scheduler.ollama_reachable();
+        pause(300).await;
+        assert!(summary_bodies(&setup.fake).is_empty());
+        assert_eq!(scheduler.queued().len(), 2);
+
+        drop(held);
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+    }
+
+    #[tokio::test]
+    async fn missing_model_stays_pending_with_reason() {
+        let setup = setup_with(SHOW, |n| {
+            if n == 0 {
+                Reply::Status(404, r#"{"error":"model 'qwen3' not found"}"#)
+            } else {
+                Reply::Lines(vec![SUMMARY, DONE], Duration::ZERO)
+            }
+        })
+        .await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+
+        scheduler.reply_completed(a);
+        wait_state(&statuses, a, MemoryStatusState::Failed).await;
+        assert_eq!(scheduler.skip_reason(a).as_deref(), Some(MISSING_MODEL));
+        assert!(setup.storage.is_pending(a).unwrap());
+        let list =
+            crate::commands::projects::memory_list(&setup.storage, &scheduler, setup.project)
+                .unwrap();
+        assert_eq!(list.unsaved[0].skip_reason.as_deref(), Some(MISSING_MODEL));
+        pause(300).await;
+        assert_eq!(summary_bodies(&setup.fake).len(), 1);
+
+        // Retried at the next catch-up.
+        scheduler.catch_up(setup.project);
+        assert_eq!(scheduler.skip_reason(a), None);
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+    }
+
+    #[tokio::test]
+    async fn catch_up_attempts_capped() {
+        let setup = setup_with(SHOW, |_| Reply::Status(500, r#"{"error":"boom"}"#)).await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+
+        scheduler.reply_completed(a);
+        wait_until(|| summary_bodies(&setup.fake).len() == 3).await;
+        pause(400).await;
+
+        assert_eq!(summary_bodies(&setup.fake).len(), 3);
+        let failed = states(&statuses, a)
+            .into_iter()
+            .filter(|state| *state == MemoryStatusState::Failed)
+            .count();
+        assert_eq!(failed, 3);
+        assert_eq!(scheduler.skip_reason(a).as_deref(), Some(GAVE_UP));
+        scheduler.catch_up(setup.project);
+        pause(300).await;
+        assert_eq!(summary_bodies(&setup.fake).len(), 3);
+        assert!(setup.storage.is_pending(a).unwrap());
+    }
+
+    #[tokio::test]
+    async fn project_open_prioritizes_its_chats() {
+        let setup = setup().await;
+        let other = setup.storage.create_project("q").unwrap().id;
+        let p1 = chat(&setup, "P1");
+        let q1 = setup
+            .storage
+            .create_conversation_with(
+                Some("Q1"),
+                "qwen3",
+                &ConversationSettings::default(),
+                Some(other),
+            )
+            .unwrap()
+            .id;
+        say(&setup, p1, "One");
+        say(&setup, q1, "Two");
+        let timings = Timings {
+            idle: Duration::from_secs(10),
+            ..fast()
+        };
+        let (scheduler, statuses) = scheduler(&setup, timings);
+        scheduler.reply_completed(p1);
+        scheduler.reply_completed(q1);
+        assert_eq!(scheduler.queued(), [p1, q1]);
+
+        scheduler.catch_up(other);
+
+        wait_state(&statuses, q1, MemoryStatusState::Saved).await;
+        assert_eq!(summary_bodies(&setup.fake).len(), 1);
+        assert_eq!(scheduler.queued(), [p1]);
+    }
+
+    #[tokio::test]
+    async fn chat_never_queued_twice() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, _) = scheduler(&setup, fast());
+        let _held = setup.ollama.admit(Uuid::new_v4()).unwrap();
+
+        scheduler.reply_completed(a);
+        scheduler.reply_completed(a);
+        scheduler.catch_up(setup.project);
+        scheduler.reply_completed(a);
+        scheduler.ollama_reachable();
+
+        assert_eq!(scheduler.queued(), [a]);
+    }
+
+    #[tokio::test]
+    async fn completion_during_cancel_keeps_idle_deadline() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        // Not running, so only `settle` moves the queue.
+        let scheduler = MemoryScheduler::new(
+            Arc::clone(&setup.ollama),
+            Some(Arc::clone(&setup.storage)),
+            Arc::new(|_| {}),
+            fast(),
+        );
+        let job = Job {
+            project_id: setup.project,
+            conversation_id: a,
+            due: Instant::now(),
+        };
+        scheduler.queue().running = Some(job);
+
+        // The chat's reply completed while its summary wound down.
+        scheduler.reply_completed(a);
+        let deadline = scheduler.queue().jobs[0].due;
+        scheduler.settle(job, Ok(SummaryOutcome::Cancelled), true);
+
+        let queue = scheduler.queue();
+        assert_eq!(queue.jobs.len(), 1);
+        assert_eq!(queue.jobs[0].due, deadline);
+        assert!(queue.running.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_request_in_other_chat_preempts_background_job() {
+        let setup = setup_with(SHOW, silent_first()).await;
+        let a = chat(&setup, "Alpha");
+        let b = chat(&setup, "Beta");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+        scheduler.reply_completed(a);
+        wait_until(|| summary_bodies(&setup.fake).len() == 1).await;
+
+        send(&setup, b, "Hi").unwrap();
+
+        chat_body(&setup.fake, 0).await;
+        wait_state(&statuses, a, MemoryStatusState::Cancelled).await;
+        // Back at the front, it runs once the reply is done.
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+    }
+
+    #[tokio::test]
+    async fn unreachable_pauses_queue_without_spending_attempts() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        setup
+            .ollama
+            .set_base_url(OllamaBaseUrl::parse(&format!("http://{dead}")));
+
+        scheduler.reply_completed(a);
+        wait_state(&statuses, a, MemoryStatusState::Cancelled).await;
+        {
+            let queue = scheduler.queue();
+            assert!(queue.paused);
+            assert!(queue.attempts.is_empty());
+        }
+        assert_eq!(scheduler.queued(), [a]);
+
+        // The paused queue checks the status itself and resumes.
+        setup
+            .ollama
+            .set_base_url(OllamaBaseUrl::parse(&format!("http://{}", setup.fake.addr)));
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+        assert!(
+            audit_kinds(&setup)
+                .iter()
+                .any(|(kind, status, _)| kind == "ollama.version" && *status == AuditStatus::Ok)
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_entry_queued_for_rebuild() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        run(&setup, a).await.unwrap();
+        let turn = setup
+            .storage
+            .begin_turn(a, "qwen3", &TurnInput::Regenerate, PROMPT_LIMIT, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        let mut recorder = TurnRecorder::new(
+            Arc::clone(&setup.storage),
+            turn.assistant_id,
+            FlushPolicy::default(),
+        );
+        recorder.push(&Redacted::new("Again")).unwrap();
+        recorder.complete(ReplyStats::default()).unwrap();
+        assert_eq!(entry(&setup, a).unwrap().state, MemoryState::Stale);
+        let (scheduler, statuses) = scheduler(&setup, fast());
+
+        scheduler.reply_completed(a);
+
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
+        let rebuilt = entry(&setup, a).unwrap();
+        assert!(rebuilt.rebuilt);
+        assert_eq!(rebuilt.state, MemoryState::Current);
     }
 
     #[test]

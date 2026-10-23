@@ -2,6 +2,8 @@ import { ChevronDown, ChevronRight, Folder, FolderPlus } from "lucide-react";
 import type { ReactNode, SubmitEvent } from "react";
 import { useState } from "react";
 
+import { MemoryIndicator } from "~/features/projects/memory-indicator";
+import type { MemoryStatuses } from "~/features/projects/use-memory-status";
 import type { Conversation, Project } from "~/lib/types";
 
 const smallButton =
@@ -91,7 +93,10 @@ type ProjectGroupsProps = {
   /** The project whose view is open, if any. */
   selectedProjectId: string | null;
   disabled: boolean;
+  /** Each project's background memory, for its indicator. */
+  memory: MemoryStatuses;
   onOpenProject: (id: string) => void;
+  onOpenActivity: () => void;
   /** One chat's sidebar item. */
   renderChat: (conversation: Conversation) => ReactNode;
 };
@@ -103,7 +108,9 @@ const ProjectGroups = ({
   selectedId,
   selectedProjectId,
   disabled,
+  memory,
   onOpenProject,
+  onOpenActivity,
   renderChat,
 }: ProjectGroupsProps) => {
   // Projects whose chats are listed.
@@ -162,6 +169,13 @@ const ProjectGroups = ({
                 <Folder aria-hidden="true" className="size-3.5 shrink-0" />
                 <span className="truncate">{project.name}</span>
               </button>
+              <span className="pr-1">
+                <MemoryIndicator
+                  state={memory[project.id]?.state ?? null}
+                  pending={memory[project.id]?.pending ?? 0}
+                  onOpenActivity={onOpenActivity}
+                />
+              </span>
             </div>
             {open && (
               <ul

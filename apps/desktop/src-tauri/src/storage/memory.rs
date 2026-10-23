@@ -66,6 +66,9 @@ pub struct MemoryEntry {
     /// A message too long for one summary request was shortened.
     pub truncated: bool,
     pub state: MemoryState,
+    /// Why automatic memory skips the chat; filled in by
+    /// `project_memory_list`.
+    pub skip_reason: Option<String>,
 }
 
 /// One entry as a chat is sent it.
@@ -161,6 +164,19 @@ pub struct MemoryWrite<'a> {
     pub model: &'a str,
     pub rebuilt: bool,
     pub truncated: bool,
+    /// Written by the scheduler, so discarded once the project's automatic
+    /// memory is off.
+    pub background: bool,
+}
+
+/// A chat whose newest replies are not in its project's memory yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingChat {
+    pub project_id: Uuid,
+    pub conversation_id: Uuid,
+    pub title: Redacted,
+    /// It has an entry, pending or stale; otherwise it has none yet.
+    pub has_entry: bool,
 }
 
 /// An entry row with its chat's title.
@@ -795,6 +811,9 @@ impl Storage {
             Ok(None) | Err(AppError::NotFound(_)) => return Ok(false),
             Err(error) => return Err(error),
         };
+        if write.background && !auto_memory(&tx, &project)? {
+            return Ok(false);
+        }
         let Some(position) = history_position(&tx, &id, &write.checkpoint.to_string())? else {
             return Ok(false);
         };
@@ -830,6 +849,126 @@ impl Storage {
         tx.commit()?;
         Ok(true)
     }
+
+    /// The pending chats of projects with automatic memory on, or of
+    /// project `project_id` only, the one whose newest row is oldest first.
+    pub fn pending_chats(&self, project_id: Option<Uuid>) -> Result<Vec<PendingChat>, AppError> {
+        Ok(pending_rows(&self.conn(), project_id, true)?)
+    }
+
+    /// The pending chats of project `project_id` that have no entry yet,
+    /// whether its automatic memory is on or not.
+    pub fn unsaved_chats(&self, project_id: Uuid) -> Result<Vec<PendingChat>, AppError> {
+        Ok(pending_rows(&self.conn(), Some(project_id), false)?
+            .into_iter()
+            .filter(|chat| !chat.has_entry)
+            .collect())
+    }
+
+    /// Whether conversation `conversation_id` is pending in a project with
+    /// automatic memory on.
+    pub fn is_pending(&self, conversation_id: Uuid) -> Result<bool, AppError> {
+        let conn = self.conn();
+        let Some((project, true)) = chat_project(&conn, conversation_id)? else {
+            return Ok(false);
+        };
+        Ok(pending_rows(&conn, Some(project), true)?
+            .iter()
+            .any(|chat| chat.conversation_id == conversation_id))
+    }
+
+    /// The project of conversation `conversation_id` and whether its
+    /// automatic memory is on; `None` outside a project or when it is gone.
+    pub fn chat_project(&self, conversation_id: Uuid) -> Result<Option<(Uuid, bool)>, AppError> {
+        Ok(chat_project(&self.conn(), conversation_id)?)
+    }
+}
+
+fn auto_memory(conn: &Connection, project_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT auto_memory FROM projects WHERE id = ?1",
+        [project_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .map(|on| on == Some(1))
+}
+
+fn chat_project(
+    conn: &Connection,
+    conversation_id: Uuid,
+) -> rusqlite::Result<Option<(Uuid, bool)>> {
+    conn.query_row(
+        "SELECT p.id, p.auto_memory FROM conversations c JOIN projects p ON p.id = c.project_id
+         WHERE c.id = ?1",
+        [conversation_id.to_string()],
+        |row| Ok((uuid_column(row, 0)?, row.get::<_, i64>(1)? != 0)),
+    )
+    .optional()
+}
+
+/// Pending chats: an entry that is pending or stale, or no entry and at
+/// least one complete reply. With `auto_only`, only in projects with
+/// automatic memory on.
+fn pending_rows(
+    conn: &Connection,
+    project_id: Option<Uuid>,
+    auto_only: bool,
+) -> rusqlite::Result<Vec<PendingChat>> {
+    struct Candidate {
+        chat: PendingChat,
+        entry: Option<(String, i64)>,
+    }
+    let candidates: Vec<Candidate> = conn
+        .prepare(
+            "SELECT c.id, c.project_id, c.title, m.through_message_id, m.covered_count
+             FROM conversations c
+             JOIN projects p ON p.id = c.project_id
+             LEFT JOIN project_memories m ON m.conversation_id = c.id
+             WHERE (?1 IS NULL OR c.project_id = ?1) AND (?2 = 0 OR p.auto_memory = 1)
+             ORDER BY (SELECT max(created_at) FROM messages WHERE conversation_id = c.id),
+                      c.created_at, c.rowid",
+        )?
+        .query_map(
+            params![project_id.map(|id| id.to_string()), auto_only],
+            |row| {
+                let entry = match row.get::<_, Option<String>>(3)? {
+                    Some(through) => Some((through, row.get(4)?)),
+                    None => None,
+                };
+                Ok(Candidate {
+                    chat: PendingChat {
+                        conversation_id: uuid_column(row, 0)?,
+                        project_id: uuid_column(row, 1)?,
+                        title: Redacted::new(row.get::<_, String>(2)?),
+                        has_entry: entry.is_some(),
+                    },
+                    entry,
+                })
+            },
+        )?
+        .collect::<Result<_, _>>()?;
+    let mut pending = Vec::new();
+    for Candidate { chat, entry } in candidates {
+        let id = chat.conversation_id.to_string();
+        let is_pending = match entry {
+            Some((through, covered)) => {
+                entry_state(conn, &id, &through, covered)? != MemoryState::Current
+            }
+            None => conn.query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM messages WHERE {HISTORY_ROWS}
+                                    AND role = 'assistant' AND status = 'complete')"
+                ),
+                [&id],
+                |row| row.get::<_, bool>(0),
+            )?,
+        };
+        if is_pending {
+            pending.push(chat);
+        }
+    }
+    Ok(pending)
 }
 
 fn check_in_project(
@@ -856,6 +995,7 @@ fn memory_entry(row: EntryRow, state: MemoryState) -> MemoryEntry {
         rebuilt: row.rebuilt,
         truncated: row.truncated,
         state,
+        skip_reason: None,
     }
 }
 
@@ -878,6 +1018,7 @@ pub(crate) mod testing {
                 model: "m",
                 rebuilt: snapshot.rebuild,
                 truncated: snapshot.cut,
+                background: false,
             })
             .unwrap()
     }
@@ -1252,6 +1393,132 @@ mod tests {
         );
     }
 
+    fn pending(storage: &Storage, project: Option<Uuid>) -> Vec<Uuid> {
+        storage
+            .pending_chats(project)
+            .unwrap()
+            .into_iter()
+            .map(|chat| chat.conversation_id)
+            .collect()
+    }
+
+    #[test]
+    fn pending_when_reply_newer_than_entry() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        let a = chat(&storage, project, "a");
+        let empty = chat(&storage, project, "empty");
+        assert!(pending(&storage, None).is_empty());
+
+        say(&storage, a, "One");
+        assert_eq!(pending(&storage, Some(project)), [a]);
+        assert!(storage.is_pending(a).unwrap());
+        assert!(!storage.is_pending(empty).unwrap());
+        assert_eq!(
+            storage.unsaved_chats(project).unwrap()[0].conversation_id,
+            a
+        );
+
+        remember(&storage, a, "Notes");
+        assert!(pending(&storage, None).is_empty());
+        assert!(storage.unsaved_chats(project).unwrap().is_empty());
+
+        say(&storage, a, "Two");
+        assert_eq!(pending(&storage, None), [a]);
+        assert!(storage.pending_chats(None).unwrap()[0].has_entry);
+        // A reply that failed adds nothing to summarize.
+        let b = chat(&storage, project, "b");
+        let turn = begin(&storage, b, TurnInput::New(Redacted::new("Hi")));
+        end(&storage, &turn, "", MessageStatus::Error);
+        assert_eq!(pending(&storage, None), [a]);
+    }
+
+    #[test]
+    fn pending_oldest_first_and_stale_counts() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        let a = chat(&storage, project, "a");
+        let b = chat(&storage, project, "b");
+        say(&storage, b, "First");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        say(&storage, a, "One");
+        assert_eq!(pending(&storage, None), [b, a]);
+
+        remember(&storage, a, "Notes");
+        let turn = begin(&storage, a, TurnInput::Regenerate);
+        end(&storage, &turn, "Again", MessageStatus::Complete);
+        assert_eq!(state(&storage, project, a), MemoryState::Stale);
+        assert_eq!(pending(&storage, None), [b, a]);
+    }
+
+    #[test]
+    fn killed_summary_stays_pending() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        let a = chat(&storage, project, "a");
+        say(&storage, a, "One");
+
+        // A summary that read its snapshot but never wrote, as when the app
+        // quits mid-request.
+        storage
+            .memory_snapshot(a, |_, _| Ok(1 << 20))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(pending(&storage, None), [a]);
+    }
+
+    #[test]
+    fn pending_ignores_auto_memory_off() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        let a = chat(&storage, project, "a");
+        say(&storage, a, "One");
+        storage.set_auto_memory(project, false).unwrap();
+
+        assert!(pending(&storage, None).is_empty());
+        assert!(!storage.is_pending(a).unwrap());
+        assert_eq!(storage.chat_project(a).unwrap(), Some((project, false)));
+        // The panel still lists it as not saved.
+        assert_eq!(storage.unsaved_chats(project).unwrap().len(), 1);
+        let loose = storage.create_conversation(None, "m").unwrap().id;
+        assert_eq!(storage.chat_project(loose).unwrap(), None);
+    }
+
+    #[test]
+    fn background_write_refused_when_auto_memory_off() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        let a = chat(&storage, project, "a");
+        say(&storage, a, "One");
+        let snapshot = storage
+            .memory_snapshot(a, |_, _| Ok(1 << 20))
+            .unwrap()
+            .unwrap();
+        let write = |background: bool| {
+            storage
+                .write_memory(&MemoryWrite {
+                    conversation_id: a,
+                    expected_revision: snapshot.expected_revision,
+                    checkpoint: snapshot.checkpoint,
+                    content: &Redacted::new("Model text"),
+                    model: "m",
+                    rebuilt: false,
+                    truncated: false,
+                    background,
+                })
+                .unwrap()
+        };
+
+        // Switched off while the summary ran.
+        storage.set_auto_memory(project, false).unwrap();
+
+        assert!(!write(true));
+        assert_eq!(count_rows(&storage, "project_memories"), 0);
+        // A manual refresh still writes.
+        assert!(write(false));
+    }
+
     #[test]
     fn conditional_write_rejects_entry_edited_mid_summary() {
         let (storage, _dir) = temp_storage();
@@ -1270,6 +1537,7 @@ mod tests {
                     model: "m",
                     rebuilt: false,
                     truncated: false,
+                    background: false,
                 })
                 .unwrap()
         };

@@ -1,19 +1,49 @@
 //! Project CRUD. Each database call is one short statement or transaction,
 //! run inline in an async command (never on the main thread).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
+use serde::Serialize;
 use tauri::State;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::memory::{RefreshResult, refresh};
+use crate::memory::{MemoryScheduler, RefreshResult, refresh};
 use crate::ollama::Ollama;
 use crate::redacted::Redacted;
 use crate::storage::memory::{ContextPreview, MemoryEntry};
 use crate::storage::projects::Project;
 use crate::storage::{Storage, StorageState};
 use crate::temporary::TempChats;
+
+/// What `project_memory_list` returns; mirrored by `MemoryList` in
+/// `src/lib/types.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryList {
+    /// Newest first.
+    pub entries: Vec<MemoryEntry>,
+    /// Chats with replies and no entry yet, the oldest first.
+    pub unsaved: Vec<UnsavedChat>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnsavedChat {
+    pub conversation_id: Uuid,
+    pub title: Redacted,
+    pub skip_reason: Option<String>,
+}
+
+/// One project's pending count; mirrored by `PendingCount` in
+/// `src/lib/types.ts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingCount {
+    pub project_id: Uuid,
+    pub pending: usize,
+}
 
 #[tauri::command]
 pub async fn project_create(
@@ -55,23 +85,104 @@ pub async fn project_update_instructions(
         .update_project_instructions(id, &instructions)
 }
 
-/// Only saved in this version: nothing writes memory on its own yet.
+/// Off drops the project's queued summaries and cancels a running one; on
+/// queues its pending chats at once.
 #[tauri::command]
 pub async fn project_set_auto_memory(
     storage: State<'_, StorageState>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     id: Uuid,
     on: bool,
 ) -> Result<Project, AppError> {
-    storage.get()?.set_auto_memory(id, on)
+    set_auto_memory(storage.get()?, &scheduler, id, on).await
 }
 
-/// The project's memory entries, newest first.
+/// The body of `project_set_auto_memory`, without Tauri.
+pub async fn set_auto_memory(
+    storage: &Storage,
+    scheduler: &MemoryScheduler,
+    id: Uuid,
+    on: bool,
+) -> Result<Project, AppError> {
+    let project = storage.set_auto_memory(id, on)?;
+    if on {
+        scheduler.catch_up(id);
+    } else {
+        scheduler.forget_project(id).await;
+    }
+    Ok(project)
+}
+
+/// The project's memory entries, newest first, and its chats that have
+/// none yet, each with why automatic memory skips it, if it does.
 #[tauri::command]
 pub async fn project_memory_list(
     storage: State<'_, StorageState>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     project_id: Uuid,
-) -> Result<Vec<MemoryEntry>, AppError> {
-    storage.get()?.list_memories(project_id)
+) -> Result<MemoryList, AppError> {
+    memory_list(storage.get()?, &scheduler, project_id)
+}
+
+/// The body of `project_memory_list`, without Tauri.
+pub fn memory_list(
+    storage: &Storage,
+    scheduler: &MemoryScheduler,
+    project_id: Uuid,
+) -> Result<MemoryList, AppError> {
+    let entries = storage
+        .list_memories(project_id)?
+        .into_iter()
+        .map(|entry| MemoryEntry {
+            skip_reason: scheduler.skip_reason(entry.conversation_id),
+            ..entry
+        })
+        .collect();
+    let unsaved = storage
+        .unsaved_chats(project_id)?
+        .into_iter()
+        .map(|chat| UnsavedChat {
+            skip_reason: scheduler.skip_reason(chat.conversation_id),
+            conversation_id: chat.conversation_id,
+            title: chat.title,
+        })
+        .collect();
+    Ok(MemoryList { entries, unsaved })
+}
+
+/// Moves the project's pending chats to the front of the background
+/// queue; the project view calls it when it opens.
+#[tauri::command]
+pub async fn project_memory_catch_up(
+    scheduler: State<'_, Arc<MemoryScheduler>>,
+    project_id: Uuid,
+) -> Result<(), AppError> {
+    scheduler.catch_up(project_id);
+    Ok(())
+}
+
+/// How many chats of each project with automatic memory on are pending;
+/// projects with none are left out.
+#[tauri::command]
+pub async fn project_memory_pending(
+    storage: State<'_, StorageState>,
+) -> Result<Vec<PendingCount>, AppError> {
+    pending_counts(storage.get()?)
+}
+
+/// The body of `project_memory_pending`, without Tauri.
+pub fn pending_counts(storage: &Storage) -> Result<Vec<PendingCount>, AppError> {
+    let mut counts: HashMap<Uuid, usize> = HashMap::new();
+    for chat in storage.pending_chats(None)? {
+        *counts.entry(chat.project_id).or_default() += 1;
+    }
+    Ok(counts
+        .into_iter()
+        .map(|(project_id, pending)| PendingCount {
+            project_id,
+            pending,
+        })
+        .collect())
 }
 
 /// Replaces a chat's entry with the user's text; its next summary starts
@@ -127,9 +238,12 @@ pub async fn project_delete(
     storage: State<'_, StorageState>,
     ollama: State<'_, Arc<Ollama>>,
     chats: State<'_, Arc<TempChats>>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     id: Uuid,
 ) -> Result<usize, AppError> {
-    delete_project(storage.get()?, &ollama, &chats, id).await
+    let deleted = delete_project(storage.get()?, &ollama, &chats, id).await?;
+    scheduler.forget_project(id).await;
+    Ok(deleted)
 }
 
 /// The body of `project_delete`, without Tauri. Like `conversation_delete`

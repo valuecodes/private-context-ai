@@ -1,11 +1,13 @@
 import { Ghost, Pencil, SquarePen, Trash } from "lucide-react";
 import type { SubmitEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
+import { projectMemoryCatchUp } from "~/lib/ipc";
 import type { AppError, Conversation, Project } from "~/lib/types";
 
 import { MemoryPanel } from "./memory-panel";
 import { MemoryPreview } from "./memory-preview";
+import type { ProjectMemoryStatus } from "./use-memory-status";
 
 const button =
   "flex items-center gap-1 rounded border border-zinc-300 px-2 py-1 text-sm hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800";
@@ -31,9 +33,16 @@ type ProjectViewProps = {
   onNewTemporary: () => void;
   onOpenChat: (id: string) => void;
   onDelete: () => void;
+  /** The project's background memory: the list reloads as it saves. */
+  memory?: ProjectMemoryStatus;
+  /** After the memory list changed here, so pending counts follow. */
+  onMemoryChanged?: () => void;
 };
 
-/** A project's name, instructions, memory and chats. */
+/**
+ * A project's name, instructions, memory and chats. Opening it moves its
+ * pending chats to the front of the background memory queue.
+ */
 const ProjectView = ({
   project,
   chats,
@@ -47,8 +56,16 @@ const ProjectView = ({
   onNewTemporary,
   onOpenChat,
   onDelete,
+  memory,
+  onMemoryChanged,
 }: ProjectViewProps) => {
   const [mode, setMode] = useState<"view" | "rename" | "confirm">("view");
+
+  useEffect(() => {
+    projectMemoryCatchUp(project.id).catch(() => {
+      // Best effort: the startup catch-up and idle timer still run.
+    });
+  }, [project.id]);
   const [previewing, setPreviewing] = useState(false);
   const titleOf = (id: string): string =>
     chats.find((chat) => chat.id === id)?.title ?? "A chat";
@@ -194,6 +211,8 @@ const ProjectView = ({
           onPreview={() => {
             setPreviewing(true);
           }}
+          status={memory}
+          onChanged={onMemoryChanged}
         />
         {previewing && (
           <MemoryPreview

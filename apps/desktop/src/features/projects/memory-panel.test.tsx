@@ -19,6 +19,7 @@ const entry = (overrides: Partial<MemoryEntry> = {}): MemoryEntry => ({
   rebuilt: false,
   truncated: false,
   state: "current",
+  skipReason: null,
   ...overrides,
 });
 
@@ -48,8 +49,13 @@ describe("entryNotes", () => {
   it("explains stale, pending, edited, rebuilt and shortened entries", () => {
     expect(entryNotes(entry({ state: "stale" }))[0]).toMatch(/Out of date/);
     expect(entryNotes(entry({ state: "pending" }))).toEqual([
-      "New messages not in memory yet",
+      "Not saved yet: new messages are not in memory",
     ]);
+    expect(
+      entryNotes(
+        entry({ state: "pending", skipReason: "model not installed" })
+      )[1]
+    ).toBe("Skipped: model not installed");
     expect(
       entryNotes(entry({ rebuilt: true, userEdited: true, truncated: true }))
     ).toEqual([
@@ -103,5 +109,21 @@ describe("MemoryList", () => {
     });
     expect(html).toContain('role="alert"');
     expect(html).toContain("Chat b: the summary was too long");
+  });
+
+  it("marks chats with no entry as not saved yet, or why they are skipped", () => {
+    const html = list({
+      unsaved: [
+        { conversationId: "b", title: "Budget", skipReason: null },
+        {
+          conversationId: "c",
+          title: "Code",
+          skipReason: "model not installed",
+        },
+      ],
+    });
+    expect(html).toContain('aria-label="Chats not in memory"');
+    expect(html).toMatch(/Budget.*Not saved yet/);
+    expect(html).toMatch(/Code.*Skipped: model not installed/);
   });
 });

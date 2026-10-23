@@ -8,6 +8,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::memory::MemoryScheduler;
 use crate::ollama::Ollama;
 use crate::redacted::Redacted;
 use crate::storage::conversations::{Conversation, ConversationSettings, ConversationWithMessages};
@@ -95,9 +96,11 @@ pub async fn conversation_rename(
 pub async fn conversation_delete(
     storage: State<'_, StorageState>,
     ollama: State<'_, Arc<Ollama>>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     id: Uuid,
 ) -> Result<(), AppError> {
     storage.get()?.delete_conversation(id)?;
     ollama.cancel_conversation(id).await;
+    scheduler.forget_chat(id);
     Ok(())
 }

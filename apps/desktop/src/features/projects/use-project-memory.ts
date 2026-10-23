@@ -7,12 +7,20 @@ import {
   projectMemoryRefresh,
   projectMemoryUpdate,
 } from "~/lib/ipc";
-import type { AppError, MemoryEntry, RefreshResult } from "~/lib/types";
+import type {
+  AppError,
+  MemoryEntry,
+  MemoryList,
+  RefreshResult,
+  UnsavedChat,
+} from "~/lib/types";
 
 type MemoryState = {
   phase: "loading" | "ready";
   /** Newest first, as Rust lists them. */
   entries: MemoryEntry[];
+  /** Chats with replies and no entry yet, oldest first. */
+  unsaved: UnsavedChat[];
   /** The chat being refreshed, `all` for the whole project, or `null`. */
   refreshing: string | null;
   /** The chats the last refresh could not summarize, with why. */
@@ -21,7 +29,7 @@ type MemoryState = {
 };
 
 type MemoryAction =
-  | { type: "loaded"; entries: MemoryEntry[] }
+  | { type: "loaded"; list: MemoryList }
   | { type: "saved"; entry: MemoryEntry }
   | { type: "deleted"; conversationId: string }
   | { type: "refreshing"; target: string }
@@ -31,6 +39,7 @@ type MemoryAction =
 const initialMemory: MemoryState = {
   phase: "loading",
   entries: [],
+  unsaved: [],
   refreshing: null,
   failures: [],
   error: null,
@@ -41,7 +50,12 @@ const memoryReducer = (
   action: MemoryAction
 ): MemoryState => {
   if (action.type === "loaded") {
-    return { ...state, phase: "ready", entries: action.entries };
+    return {
+      ...state,
+      phase: "ready",
+      entries: action.list.entries,
+      unsaved: action.list.unsaved,
+    };
   }
   if (action.type === "saved") {
     // An edit makes it the newest entry, as Rust would list it.
@@ -74,15 +88,18 @@ const memoryReducer = (
   return { ...state, phase: "ready", refreshing: null, error: action.error };
 };
 
-/** The project's memory entries, and editing, deleting and refreshing them. */
-const useProjectMemory = (projectId: string) => {
+/**
+ * The project's memory entries, and editing, deleting and refreshing them.
+ * `onChanged` runs after each change, so pending counts elsewhere follow.
+ */
+const useProjectMemory = (projectId: string, onChanged?: () => void) => {
   const [state, dispatch] = useReducer(memoryReducer, initialMemory);
 
   const reload = useCallback(
     (): Promise<void> =>
       projectMemoryList(projectId).then(
-        (entries) => {
-          dispatch({ type: "loaded", entries });
+        (list) => {
+          dispatch({ type: "loaded", list });
         },
         (error: unknown) => {
           dispatch({ type: "failed", error: toAppError(error) });
@@ -100,6 +117,7 @@ const useProjectMemory = (projectId: string) => {
     projectMemoryUpdate(conversationId, content).then(
       (entry) => {
         dispatch({ type: "saved", entry });
+        onChanged?.();
         return true;
       },
       (error: unknown) => {
@@ -112,6 +130,9 @@ const useProjectMemory = (projectId: string) => {
     void projectMemoryDelete(conversationId).then(
       () => {
         dispatch({ type: "deleted", conversationId });
+        onChanged?.();
+        // The chat may now be listed as not saved.
+        void reload();
       },
       (error: unknown) => {
         dispatch({ type: "failed", error: toAppError(error) });
@@ -131,10 +152,11 @@ const useProjectMemory = (projectId: string) => {
           dispatch({ type: "failed", error: toAppError(error) });
         }
       )
-      .then(reload);
+      .then(reload)
+      .then(onChanged);
   };
 
-  return { state, update, remove, refresh };
+  return { state, reload, update, remove, refresh };
 };
 
 export type { MemoryState };

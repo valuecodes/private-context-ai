@@ -11,6 +11,7 @@ import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
 import { MemoryPreview } from "~/features/projects/memory-preview";
 import { ProjectView } from "~/features/projects/project-view";
+import { useMemoryStatus } from "~/features/projects/use-memory-status";
 import { useProjects } from "~/features/projects/use-projects";
 import { SettingsView } from "~/features/settings/settings-view";
 import { OllamaStatus } from "~/features/status/ollama-status";
@@ -54,6 +55,17 @@ const Workspace = () => {
   });
   // A temporary chat can be left while it answers; leaving discards it.
   const locked = chat.state.phase !== "idle" && !chat.state.temporary;
+  const memory = useMemoryStatus();
+  const { reload: reloadMemoryCounts } = memory;
+
+  // Projects and chats added, deleted or switched change the counts.
+  useEffect(() => {
+    reloadMemoryCounts();
+  }, [
+    reloadMemoryCounts,
+    projects.state.projects,
+    conversations.state.conversations,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,6 +191,11 @@ const Workspace = () => {
     chat.state.temporary || chat.state.conversationId === null
       ? null
       : chat.state.conversationId;
+  const openActivity = () => {
+    leaveTo("activity");
+  };
+  const chatMemory =
+    chatProject === undefined ? undefined : memory.statuses[chatProject.id];
 
   const remove = (id: string) => {
     void conversations.remove(id).then((deleted) => {
@@ -213,6 +230,8 @@ const Workspace = () => {
         onDelete={remove}
         onPrepareCopy={conversations.prepareMarkdown}
         onCopy={conversations.copyMarkdown}
+        memory={memory.statuses}
+        onOpenActivity={openActivity}
       />
       <div className="flex min-w-0 flex-1 flex-col">
         <nav
@@ -273,6 +292,17 @@ const Workspace = () => {
                             },
                     }
               }
+              memory={
+                previewChat === null
+                  ? undefined
+                  : {
+                      state:
+                        chatMemory?.conversationId === previewChat
+                          ? chatMemory.state
+                          : null,
+                      onOpenActivity: openActivity,
+                    }
+              }
             />
           )}
           {view === "chat" &&
@@ -315,6 +345,8 @@ const Workspace = () => {
               onDelete={() => {
                 removeProject(shownProject.id);
               }}
+              memory={memory.statuses[shownProject.id]}
+              onMemoryChanged={reloadMemoryCounts}
             />
           )}
           {view === "activity" && <ActivityPanel />}
