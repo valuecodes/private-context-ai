@@ -328,7 +328,8 @@ const Sidebar = ({
         <NewProject disabled={disabled} onCreate={onNewProject} />
       </div>
       {!searching && projects.length > 0 && (
-        <div className="max-h-[40%] overflow-y-auto">
+        // `relative`, like the list below: it contains the sr-only labels.
+        <div className="relative max-h-[40%] overflow-y-auto">
           <ProjectGroups
             projects={projects}
             conversations={state.conversations}
@@ -377,7 +378,9 @@ const Sidebar = ({
           {state.error.message}
         </p>
       )}
-      <nav className="min-h-0 flex-1 overflow-y-auto">{list}</nav>
+      {/* `relative`: an unpositioned scroller leaves its sr-only labels
+          (absolute) to the page, which then scrolls with them. */}
+      <nav className="relative min-h-0 flex-1 overflow-y-auto">{list}</nav>
       <p className="text-xs text-zinc-400 dark:text-zinc-500">
         {version === "" ? "" : `v${version}`}
       </p>

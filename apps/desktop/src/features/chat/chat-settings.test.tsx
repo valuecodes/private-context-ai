@@ -1,31 +1,18 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConversationSettings, ModelCapabilities } from "~/lib/types";
+import type { ConversationSettings } from "~/lib/types";
 
 import { ChatSettings, ChatSettingsPanel } from "./chat-settings";
 import { DEFAULT_SETTINGS } from "./default-settings";
 
 vi.mock("~/lib/ipc");
 
-const qwen3: ModelCapabilities = {
-  thinking: true,
-  vision: false,
-  tools: true,
-  embeddingOnly: false,
-  thinkStyle: { kind: "bool" },
-};
-
-const panel = (
-  settings: ConversationSettings,
-  caps: ModelCapabilities | undefined = undefined,
-  disabled = false
-) =>
+const panel = (settings: ConversationSettings, disabled = false) =>
   renderToString(
     <ChatSettingsPanel
       settings={settings}
       onChange={vi.fn()}
-      caps={caps}
       disabled={disabled}
     />
   );
@@ -36,7 +23,6 @@ const inProject = (onPreview?: () => void) =>
     <ChatSettingsPanel
       settings={DEFAULT_SETTINGS}
       onChange={vi.fn()}
-      caps={undefined}
       disabled={false}
       project={{ name: "Thesis", onOpen: vi.fn(), onPreview }}
     />
@@ -68,16 +54,10 @@ describe("ChatSettingsPanel", () => {
     );
   });
 
-  it("disables the Charts switch for a model without tools", () => {
-    const off = panel(DEFAULT_SETTINGS, { ...qwen3, tools: false });
-    expect(off).toMatch(/<input[^>]*id="charts"[^>]*disabled=""/);
-    expect(off).toContain("doesn&#x27;t support tools");
-    const unknown = panel(DEFAULT_SETTINGS);
-    expect(unknown).toMatch(/<input[^>]*id="charts"[^>]*disabled=""/);
-
-    const on = panel({ ...DEFAULT_SETTINGS, charts: true }, qwen3);
-    expect(on).toMatch(/<input[^>]*id="charts"[^>]*checked=""/);
-    expect(on).not.toMatch(/<input[^>]*id="charts"[^>]*disabled=""/);
+  it("leaves Think and Charts to the composer", () => {
+    const html = panel({ ...DEFAULT_SETTINGS, charts: true });
+    expect(html).not.toContain("Thinking");
+    expect(html).not.toContain('id="charts"');
   });
 
   it("shows the saved values", () => {
@@ -101,20 +81,8 @@ describe("ChatSettingsPanel", () => {
     expect(html).toMatch(/<option value="6000" selected="">6000 tokens/);
   });
 
-  it("shows the Think control only for thinking models", () => {
-    expect(panel(DEFAULT_SETTINGS)).not.toContain("Thinking");
-    expect(
-      panel(DEFAULT_SETTINGS, { ...qwen3, thinking: false })
-    ).not.toContain("Thinking");
-    const html = panel({ ...DEFAULT_SETTINGS, think: { kind: "on" } }, qwen3);
-    expect(html).toContain("Thinking");
-    expect(html).toContain('aria-pressed="true"');
-  });
-
   it("disables every control while the chat loads", () => {
-    expect(panel(DEFAULT_SETTINGS, qwen3, true)).toMatch(
-      /<fieldset[^>]* disabled=""/
-    );
+    expect(panel(DEFAULT_SETTINGS, true)).toMatch(/<fieldset[^>]* disabled=""/);
   });
 });
 
@@ -124,7 +92,6 @@ describe("ChatSettings", () => {
       <ChatSettings
         settings={DEFAULT_SETTINGS}
         onChange={vi.fn()}
-        caps={undefined}
         disabled={false}
       />
     );

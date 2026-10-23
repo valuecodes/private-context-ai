@@ -2,6 +2,12 @@
 
 @source "./**/*.{js,jsx,ts,tsx}";
 
+/* The bundled fonts, imported in `main.tsx`. */
+@theme {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
 /* Replies rendered by `features/chat/markdown.tsx`. */
 @layer components {
   .markdown {

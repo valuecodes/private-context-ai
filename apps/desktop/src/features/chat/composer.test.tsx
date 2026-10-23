@@ -31,4 +31,19 @@ describe("Composer", () => {
     expect(html).not.toContain("aria-disabled");
     expect(html.match(/<button/g)).toHaveLength(1);
   });
+
+  it("renders the toolbar under the textarea, before Send", () => {
+    const html = renderToString(
+      <Composer
+        streaming={false}
+        canSend
+        onSend={() => true}
+        onStop={() => undefined}
+        toolbar={<span id="toolbar-slot">controls</span>}
+      />
+    );
+    expect(html).toMatch(
+      /<textarea[^>]*id="composer"[\s\S]*id="toolbar-slot"[\s\S]*aria-label="Send message"/
+    );
+  });
 });

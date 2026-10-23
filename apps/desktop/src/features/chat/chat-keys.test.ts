@@ -12,7 +12,7 @@ const key = (
   ...changes,
 });
 
-const streaming = { streaming: true, inTextField: false };
+const streaming = { streaming: true, inTextField: false, handled: false };
 
 describe("sendsMessage", () => {
   it("sends on Enter", () => {
@@ -39,15 +39,21 @@ describe("stopsReply", () => {
   });
 
   it("ignores Escape when idle, while composing, or in a text input", () => {
-    expect(
-      stopsReply(key("Escape"), { streaming: false, inTextField: false })
-    ).toBe(false);
+    expect(stopsReply(key("Escape"), { ...streaming, streaming: false })).toBe(
+      false
+    );
     expect(stopsReply(key("Escape", { isComposing: true }), streaming)).toBe(
       false
     );
-    expect(
-      stopsReply(key("Escape"), { streaming: true, inTextField: true })
-    ).toBe(false);
+    expect(stopsReply(key("Escape"), { ...streaming, inTextField: true })).toBe(
+      false
+    );
+  });
+
+  it("ignores an Escape an open menu already used to close", () => {
+    expect(stopsReply(key("Escape"), { ...streaming, handled: true })).toBe(
+      false
+    );
   });
 
   it("ignores other keys", () => {
