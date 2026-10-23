@@ -338,6 +338,14 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
       ? createChatState(null, true, action.projectId ?? null)
       : state;
   }
+  if (action.type === "projectDeleted") {
+    // Checked when the delete lands: another chat may be open by now. Rust
+    // already discarded a temporary chat and cancelled its reply.
+    return state.projectId === action.projectId &&
+      (state.phase === "idle" || state.temporary)
+      ? createChatState()
+      : state;
+  }
   if (
     action.type === "loaded" ||
     action.type === "loadFailed" ||

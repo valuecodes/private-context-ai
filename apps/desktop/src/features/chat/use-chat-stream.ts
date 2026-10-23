@@ -1,4 +1,4 @@
-import { useReducer, useRef } from "react";
+import { useEffect, useReducer, useRef } from "react";
 
 import { chatReducer, createChatState } from "~/features/chat/chat-reducer";
 import type {
@@ -92,6 +92,11 @@ const settled = (messages: UiMessage[], compare: CompareState | null) =>
 
 const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const [state, dispatch] = useReducer(chatReducer, null, createChatState);
+  // The last rendered state, for callbacks that land after later renders.
+  const latest = useRef(state);
+  useEffect(() => {
+    latest.current = state;
+  });
   // One per chat view; `tempSession` itself starts nothing until a send.
   const session = useRef<TempSession>(tempSession()).current;
   const sync = useRef<SettingsSync>(settingsSync()).current;
@@ -155,6 +160,23 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     session.discard();
     sync.open(null);
     dispatch({ type: "openTemporary", projectId });
+  };
+
+  /**
+   * Clears the view if the open chat, saved or temporary, is still in the
+   * project Rust deleted. Read from the latest state, not this render's:
+   * another chat may have opened while the delete ran.
+   */
+  const closeProject = (projectId: string) => {
+    const current = latest.current;
+    if (
+      current.projectId === projectId &&
+      (current.phase === "idle" || current.temporary)
+    ) {
+      session.discard();
+      sync.open(null);
+    }
+    dispatch({ type: "projectDeleted", projectId });
   };
 
   /** Clears the view if the deleted conversation is still the open one. */
@@ -440,6 +462,7 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     state,
     open,
     openTemporary,
+    closeProject,
     forget,
     updateSettings,
     send,
