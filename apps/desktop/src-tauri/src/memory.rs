@@ -509,11 +509,17 @@ impl MemoryScheduler {
                 return;
             }
         };
-        self.queue().upsert(Job {
-            project_id,
-            conversation_id,
-            due: Instant::now() + self.timings.idle,
-        });
+        {
+            let mut queue = self.queue();
+            if queue.capped(conversation_id) {
+                return;
+            }
+            queue.upsert(Job {
+                project_id,
+                conversation_id,
+                due: Instant::now() + self.timings.idle,
+            });
+        }
         self.wake.notify_one();
         self.send(project_id, conversation_id, MemoryStatusState::Queued);
     }
@@ -599,7 +605,7 @@ impl MemoryScheduler {
             queue.running.filter(|job| job.project_id == project_id)
         };
         if let Some(job) = running {
-            self.ollama.cancel_conversation(job.conversation_id).await;
+            self.ollama.cancel_background(job.conversation_id).await;
         }
     }
 
@@ -646,7 +652,9 @@ impl MemoryScheduler {
             return Next::CatchUp;
         }
         if queue.paused {
-            return if queue.jobs.is_empty() {
+            // Before Ollama was first seen, the startup catch-up waits on a
+            // probe too.
+            return if queue.jobs.is_empty() && queue.reachable_seen {
                 Next::Wait {
                     until: queue.catch_up_at,
                     idle: false,
@@ -1785,15 +1793,32 @@ mod tests {
         }
     }
 
+    /// An address nothing listens on.
+    async fn dead_url() -> Result<OllamaBaseUrl, AppError> {
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        OllamaBaseUrl::parse(&format!("http://{dead}"))
+    }
+
     #[tokio::test]
     async fn catch_up_waits_for_reachable_true() {
         let setup = setup().await;
-        two_pending(&setup);
-        let (scheduler, _) = scheduler(&setup, startup_soon());
+        let (a, _) = two_pending(&setup);
+        setup.ollama.set_base_url(dead_url().await);
+        let (scheduler, statuses) = scheduler(&setup, startup_soon());
 
         pause(300).await;
         assert!(summary_bodies(&setup.fake).is_empty());
         assert!(scheduler.queued().is_empty());
+
+        // Nobody checks the status: the worker's own probe finds Ollama.
+        setup
+            .ollama
+            .set_base_url(OllamaBaseUrl::parse(&format!("http://{}", setup.fake.addr)));
+        wait_state(&statuses, a, MemoryStatusState::Saved).await;
     }
 
     #[tokio::test]
@@ -1883,6 +1908,8 @@ mod tests {
         assert_eq!(failed, 3);
         assert_eq!(scheduler.skip_reason(a).as_deref(), Some(GAVE_UP));
         scheduler.catch_up(setup.project);
+        scheduler.reply_completed(a);
+        assert!(scheduler.queued().is_empty());
         pause(300).await;
         assert_eq!(summary_bodies(&setup.fake).len(), 3);
         assert!(setup.storage.is_pending(a).unwrap());
@@ -1992,14 +2019,7 @@ mod tests {
         let a = chat(&setup, "Alpha");
         say(&setup, a, "One");
         let (scheduler, statuses) = scheduler(&setup, fast());
-        let dead = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap()
-            .local_addr()
-            .unwrap();
-        setup
-            .ollama
-            .set_base_url(OllamaBaseUrl::parse(&format!("http://{dead}")));
+        setup.ollama.set_base_url(dead_url().await);
 
         scheduler.reply_completed(a);
         wait_state(&statuses, a, MemoryStatusState::Cancelled).await;
@@ -2020,6 +2040,61 @@ mod tests {
                 .iter()
                 .any(|(kind, status, _)| kind == "ollama.version" && *status == AuditStatus::Ok)
         );
+    }
+
+    #[tokio::test]
+    async fn completed_send_queues_its_chat() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        let timings = Timings {
+            idle: Duration::from_secs(10),
+            ..fast()
+        };
+        let (scheduler, _) = scheduler(&setup, timings);
+
+        let hook = Arc::clone(&scheduler);
+        crate::commands::ollama::send_turn_then(
+            &setup.ollama,
+            Arc::clone(&setup.storage),
+            SendRequest {
+                conversation_id: a,
+                model: "qwen3".into(),
+                input: TurnInput::New(Redacted::new("One")),
+                think_choice: ThinkChoice::Off,
+                think: no_think(&setup.ollama),
+            },
+            FlushPolicy::default(),
+            |_| true,
+            move || hook.reply_completed(a),
+        )
+        .unwrap();
+
+        wait_until(|| scheduler.queued() == [a]).await;
+    }
+
+    #[tokio::test]
+    async fn auto_memory_off_cancels_running_summary_only() {
+        let setup = setup_with(SHOW, |_| Reply::Silent).await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let (scheduler, statuses) = scheduler(&setup, fast());
+        scheduler.reply_completed(a);
+        wait_until(|| summary_bodies(&setup.fake).len() == 1).await;
+
+        crate::commands::projects::set_auto_memory(
+            &setup.storage,
+            &scheduler,
+            setup.project,
+            false,
+        )
+        .await
+        .unwrap();
+
+        wait_state(&statuses, a, MemoryStatusState::Cancelled).await;
+        pause(300).await;
+        assert!(scheduler.queued().is_empty());
+        assert_eq!(summary_bodies(&setup.fake).len(), 1);
+        assert!(entry(&setup, a).is_none());
     }
 
     #[tokio::test]
