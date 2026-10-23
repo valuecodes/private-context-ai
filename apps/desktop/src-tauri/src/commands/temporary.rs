@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::commands::ollama::{
     SendRequest, SendStarted, Shared, channel_sink, chart_follow_up, check_prompt, check_turn,
-    finish_turn, recording_sink,
+    finish_turn, model_history, recording_sink,
 };
 use crate::error::AppError;
 use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
@@ -185,13 +185,14 @@ where
     )));
     let sink = recording_sink(Arc::clone(&recorder), send);
     let tools = turn.charts && think.tools;
-    let follow_up = chart_follow_up(&recorder, &turn.history, tools);
+    let history = model_history(turn.history, think.tools);
+    let follow_up = chart_follow_up(&recorder, &history, tools);
     let request_id = ollama
         .start(
             admission,
             ChatCall {
                 model: &model,
-                messages: &turn.history,
+                messages: &history,
                 options: turn.options.as_ref(),
                 think,
                 keep_alive: None,

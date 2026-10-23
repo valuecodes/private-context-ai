@@ -276,6 +276,43 @@ pub fn replay(content: &str, charts: &[ChartEntry]) -> Vec<ChatMessage> {
     messages
 }
 
+/// `history` for a model that is not offered tools: each replayed chart turn
+/// becomes one plain assistant message again (its text before the calls
+/// plus the commentary), with no `tool_calls` and no `tool` messages, which
+/// a tool-less template may reject.
+pub fn without_tools(history: &[ChatMessage]) -> Vec<ChatMessage> {
+    let mut plain: Vec<ChatMessage> = Vec::with_capacity(history.len());
+    // The text of a reply whose calls were just dropped, waiting for its
+    // commentary.
+    let mut open: Option<String> = None;
+    for message in history {
+        match message.role {
+            ChatRole::Tool => {}
+            ChatRole::Assistant if message.tool_calls.is_some() => {
+                if let Some(text) = open.take().filter(|text| !text.is_empty()) {
+                    plain.push(ChatMessage::new(ChatRole::Assistant, Redacted::new(text)));
+                }
+                open = Some(message.content.expose().to_owned());
+            }
+            ChatRole::Assistant if open.is_some() => {
+                let mut text = open.take().unwrap_or_default();
+                text.push_str(message.content.expose());
+                plain.push(ChatMessage::new(ChatRole::Assistant, Redacted::new(text)));
+            }
+            _ => {
+                if let Some(text) = open.take().filter(|text| !text.is_empty()) {
+                    plain.push(ChatMessage::new(ChatRole::Assistant, Redacted::new(text)));
+                }
+                plain.push(message.clone());
+            }
+        }
+    }
+    if let Some(text) = open.filter(|text| !text.is_empty()) {
+        plain.push(ChatMessage::new(ChatRole::Assistant, Redacted::new(text)));
+    }
+    plain
+}
+
 /// `text`'s length in UTF-16 code units, the unit offsets are in.
 pub fn utf16_len(text: &str) -> u64 {
     text.chars().map(|c| c.len_utf16() as u64).sum()
@@ -479,6 +516,57 @@ mod tests {
                 Redacted::new("Plain")
             )]
         );
+    }
+
+    #[test]
+    fn without_tools_restores_plain_replies() {
+        let chart = ChartEntry {
+            offset: 5,
+            spec: Some(bar()),
+            error: None,
+        };
+        let user = |text: &str| ChatMessage::new(ChatRole::User, Redacted::new(text));
+        let mut history = vec![user("Chart it")];
+        history.extend(replay("Here: Grew.", std::slice::from_ref(&chart)));
+        history.push(user("And?"));
+        // A stopped chart-only reply: nothing left to send.
+        history.extend(replay(
+            "",
+            &[ChartEntry {
+                offset: 0,
+                ..chart.clone()
+            }],
+        ));
+        history.push(user("Last"));
+        // Text before the calls, no commentary.
+        history.extend(replay("Only", &[ChartEntry { offset: 4, ..chart }]));
+
+        let plain = without_tools(&history);
+        let texts: Vec<(ChatRole, &str)> = plain
+            .iter()
+            .map(|message| (message.role, message.content.expose()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (ChatRole::User, "Chart it"),
+                (ChatRole::Assistant, "Here: Grew."),
+                (ChatRole::User, "And?"),
+                (ChatRole::User, "Last"),
+                (ChatRole::Assistant, "Only"),
+            ]
+        );
+        assert!(
+            plain
+                .iter()
+                .all(|message| message.tool_calls.is_none() && message.tool_name.is_none())
+        );
+        // A history without charts is unchanged.
+        let simple = vec![
+            user("a"),
+            ChatMessage::new(ChatRole::Assistant, Redacted::new("b")),
+        ];
+        assert_eq!(without_tools(&simple), simple);
     }
 
     #[test]

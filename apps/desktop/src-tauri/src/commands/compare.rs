@@ -15,6 +15,7 @@ use crate::commands::ollama::{
     SharedRecorder, check_turn, finish_turn, lock, recording_sink, spawn_ticker,
 };
 use crate::error::AppError;
+use crate::ollama::chart_tool::without_tools;
 use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
 use crate::ollama::{Admission, ChatCall, ConnectionId, Ollama};
 use crate::redacted::Redacted;
@@ -219,6 +220,8 @@ where
     } = run;
     let send = Arc::new(send);
     let gone = Arc::new(AtomicBool::new(false));
+    // Candidates are never offered tools: earlier charts go as plain text.
+    let history = without_tools(&turn.history);
     let last = turn.candidates.len().saturating_sub(1);
     for (index, (message_id, model)) in turn.candidates.iter().enumerate() {
         let recorder: SharedRecorder = Arc::new(Mutex::new(TurnRecorder::new(
@@ -273,7 +276,7 @@ where
         spawn_ticker(Arc::clone(&recorder), policy.every, stop_ticker.clone());
         let call = ChatCall {
             model,
-            messages: &turn.history,
+            messages: &history,
             options: turn.options.as_ref(),
             think,
             // Only one model sits in memory: each but the last unloads.
