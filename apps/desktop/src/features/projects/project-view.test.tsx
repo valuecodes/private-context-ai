@@ -30,12 +30,17 @@ const chat = (id: string, title: string): Conversation => ({
   projectId: "p1",
 });
 
-const view = (chats: Conversation[], disabled = false) =>
+const view = (
+  chats: Conversation[],
+  disabled = false,
+  canStartTemporary = true
+) =>
   renderToString(
     <ProjectView
       project={project}
       chats={chats}
       disabled={disabled}
+      canStartTemporary={canStartTemporary}
       error={null}
       onRename={() => Promise.resolve(true)}
       onInstructions={vi.fn()}
@@ -69,6 +74,17 @@ describe("ProjectView", () => {
       "Delete “Thesis” and its 3 saved chats? An open temporary chat in it is closed too."
     );
     expect(deleteQuestion("Thesis", 1)).toContain("its 1 saved chat?");
+  });
+
+  it("starts a temporary chat only while no reply runs", () => {
+    expect(view([])).not.toMatch(/disabled=""[^>]*>.*New temporary chat</);
+    expect(view([], false, false)).toMatch(
+      /<button[^>]*disabled=""[^>]*>.*New temporary chat</
+    );
+    // A new saved chat can still start: it discards the temporary one.
+    expect(view([], false, false)).not.toMatch(
+      /<button[^>]*disabled=""[^>]*>(?:(?!<button).)*New chat</
+    );
   });
 
   it("disables starting and deleting while a reply streams", () => {
