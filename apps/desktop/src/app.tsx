@@ -110,6 +110,23 @@ const Workspace = () => {
     }
   };
 
+  /**
+   * Switches to a tab. Leaving a project waits for the instructions saved as
+   * it lost focus, so the next send uses them; a failed save keeps the
+   * project view, with its error.
+   */
+  const leaveTo = (next: View) => {
+    if (view !== "project") {
+      setView(next);
+      return;
+    }
+    void projects.settled().then((saved) => {
+      if (saved) {
+        setView(next);
+      }
+    });
+  };
+
   const openProject = (id: string) => {
     if (locked) {
       return;
@@ -144,9 +161,7 @@ const Workspace = () => {
       }
       conversations.projectDeleted(id);
       // Rust discarded its chats; a temporary one is closed here too.
-      if (chat.state.projectId === id) {
-        chat.open(null, null);
-      }
+      chat.closeProject(id);
       setView("chat");
     });
   };
@@ -202,7 +217,7 @@ const Workspace = () => {
               type="button"
               aria-current={view === id ? "page" : undefined}
               onClick={() => {
-                setView(id);
+                leaveTo(id);
               }}
               className={`flex items-center gap-1.5 rounded-t px-3 py-1 text-sm ${view === id ? "border-b-2 border-zinc-900 font-medium dark:border-zinc-100" : "text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"}`}
             >

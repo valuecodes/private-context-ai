@@ -41,6 +41,30 @@ describe("temporary chats in the reducer", () => {
     expect(state).toBe(left);
   });
 
+  it("closes a chat of a deleted project, even a streaming temporary one", () => {
+    const temporary = chatReducer(
+      chatReducer(createChatState(), {
+        type: "openTemporary",
+        projectId: "p1",
+      }),
+      { type: "send", streamId: "s1", text: "Hi" }
+    );
+    expect(temporary.projectId).toBe("p1");
+    expect(
+      chatReducer(temporary, { type: "projectDeleted", projectId: "p1" })
+    ).toEqual(createChatState());
+
+    // Another project's chat, or one opened since, stays.
+    const saved = chatReducer(createChatState(), {
+      type: "open",
+      conversationId: "c1",
+      projectId: "p2",
+    });
+    expect(
+      chatReducer(saved, { type: "projectDeleted", projectId: "p1" })
+    ).toBe(saved);
+  });
+
   it("still keeps a saved chat open while it answers", () => {
     const streaming = chatReducer(createChatState("c1"), {
       type: "send",

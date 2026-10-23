@@ -115,6 +115,8 @@ type ChatAction =
   | { type: "cancel" }
   | { type: "failed"; streamId: string; error: AppError }
   | { type: "deleted"; conversationId: string }
+  /** Rust deleted the project, its chats and its temporary chats. */
+  | { type: "projectDeleted"; projectId: string }
   /** The open chat's settings changed; `error` when saving them failed. */
   | { type: "settings"; settings: ConversationSettings; error?: AppError };
 
