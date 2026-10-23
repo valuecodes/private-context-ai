@@ -73,20 +73,29 @@ const Workspace = () => {
     };
   }, []);
 
-  /** A saved conversation, or a new chat outside any project for `null`. */
+  /**
+   * A saved conversation, or a new chat outside any project for `null`,
+   * once project instructions edited just before are saved: a failed save
+   * keeps the project view, with its error.
+   */
   const open = (id: string | null) => {
     if (locked) {
       return;
     }
-    setView("chat");
-    conversations.select(id);
     const saved = conversations.state.conversations.find(
       (conversation) => conversation.id === id
     );
-    chat.open(id, saved?.projectId ?? null);
-    if (saved !== undefined && saved.model !== "") {
-      setModel(saved.model);
-    }
+    void projects.settled().then((ok) => {
+      if (!ok) {
+        return;
+      }
+      setView("chat");
+      conversations.select(id);
+      chat.open(id, saved?.projectId ?? null);
+      if (saved !== undefined && saved.model !== "") {
+        setModel(saved.model);
+      }
+    });
   };
 
   const temporary = (on: boolean) => {
@@ -239,11 +248,14 @@ const Workspace = () => {
           )}
           {view === "project" && shownProject !== null && (
             <ProjectView
+              // A fresh view per project, so a pending delete never carries over.
+              key={shownProject.id}
               project={shownProject}
               chats={conversations.state.conversations.filter(
                 (conversation) => conversation.projectId === shownProject.id
               )}
               disabled={locked}
+              canStartTemporary={chat.state.phase === "idle"}
               error={projects.state.error}
               onRename={(name) => projects.rename(shownProject.id, name)}
               onInstructions={(instructions) => {

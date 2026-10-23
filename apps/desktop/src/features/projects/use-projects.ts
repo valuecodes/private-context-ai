@@ -72,8 +72,8 @@ const projectsReducer = (
 /** The projects, and saving their names and instructions. */
 const useProjects = () => {
   const [state, dispatch] = useReducer(projectsReducer, initialProjects);
-  // Instruction saves run one at a time, in order; `true` while every save
-  // since the last `settled` has succeeded.
+  // Instruction saves run one at a time, in order; `false` once the latest
+  // one failed, until a later save succeeds or `settled` reported it.
   const saves = useRef<Promise<boolean>>(Promise.resolve(true));
 
   useEffect(() => {
@@ -123,11 +123,11 @@ const useProjects = () => {
 
   /** Queues a save of the project's instructions; a failure shows its error. */
   const saveInstructions = (id: string, instructions: string) => {
-    saves.current = saves.current.then((ok) =>
+    saves.current = saves.current.then(() =>
       projectUpdateInstructions(id, instructions).then(
         (project) => {
           dispatch({ type: "saved", project });
-          return ok;
+          return true;
         },
         (error: unknown) => {
           dispatch({ type: "failed", error: toAppError(error) });
@@ -139,7 +139,8 @@ const useProjects = () => {
 
   /**
    * Resolves once every queued instructions save has finished: `false` when
-   * one of them failed since the last call.
+   * the latest one failed. A failure is reported once, so the next call
+   * proceeds with the instructions Rust kept.
    */
   const settled = (): Promise<boolean> => {
     const result = saves.current;

@@ -17,6 +17,8 @@ type ProjectViewProps = {
   chats: Conversation[];
   /** True while a saved chat's reply streams: changes wait for it. */
   disabled: boolean;
+  /** False while any reply runs: a temporary chat starts only from idle. */
+  canStartTemporary: boolean;
   error: AppError | null;
   /** Resolves `false` when the name was refused, keeping the editor open. */
   onRename: (name: string) => Promise<boolean>;
@@ -32,6 +34,7 @@ const ProjectView = ({
   project,
   chats,
   disabled,
+  canStartTemporary,
   error,
   onRename,
   onInstructions,
@@ -187,7 +190,7 @@ const ProjectView = ({
           <button
             type="button"
             onClick={onNewTemporary}
-            disabled={disabled}
+            disabled={disabled || !canStartTemporary}
             className={button}
           >
             <Ghost aria-hidden="true" className="size-4" />
