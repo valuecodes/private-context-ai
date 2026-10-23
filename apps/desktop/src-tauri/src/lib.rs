@@ -5,6 +5,7 @@
 pub mod audit;
 pub mod commands;
 pub mod error;
+pub mod memory;
 pub mod observability;
 pub mod ollama;
 pub mod redacted;
@@ -155,6 +156,12 @@ pub fn run() {
             commands::projects::project_rename,
             commands::projects::project_update_instructions,
             commands::projects::project_delete,
+            commands::projects::project_set_auto_memory,
+            commands::projects::project_memory_list,
+            commands::projects::project_memory_update,
+            commands::projects::project_memory_delete,
+            commands::projects::project_memory_refresh,
+            commands::projects::project_context_preview,
             commands::activity::activity_list,
             commands::activity::activity_hosts,
             commands::settings::settings_get,

@@ -5,6 +5,7 @@ import {
   formatTime,
   formatTokens,
   hostsSummary,
+  kindLabel,
   statusLabel,
 } from "~/features/activity/activity";
 import { toAppError } from "~/lib/app-error";
@@ -56,7 +57,7 @@ const ActivityTable = ({ events, hosts }: ActivityTableProps) => (
                 <td className={`${cell} whitespace-nowrap`}>
                   {formatTime(event.at)}
                 </td>
-                <td className={cell}>{event.kind}</td>
+                <td className={cell}>{kindLabel(event.kind)}</td>
                 <td className={cell}>{event.host ?? "—"}</td>
                 <td className={cell}>{event.model ?? "—"}</td>
                 <td className={cell}>{formatTokens(event)}</td>

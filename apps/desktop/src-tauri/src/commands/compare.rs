@@ -160,12 +160,18 @@ where
     let admission = ollama.admit(conversation_id)?;
     // Every candidate is answered by the Ollama current now.
     let connection = ollama.connection_id();
-    let turn = storage.begin_compare(conversation_id, &prompt, &models, |history, settings| {
-        for model in &models {
-            check_turn(ollama, model, &choice, history, settings)?;
-        }
-        Ok(())
-    })?;
+    let turn = storage.begin_compare(
+        conversation_id,
+        &prompt,
+        &models,
+        ollama.max_prompt_bytes(),
+        |history, settings| {
+            for model in &models {
+                check_turn(ollama, model, &choice, history, settings)?;
+            }
+            Ok(())
+        },
+    )?;
     let started = CompareStarted {
         request_id: admission.request_id(),
         user_message_id: turn.user_id,

@@ -9,8 +9,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::Storage;
-use super::conversations::{
-    ConversationSettings, NOW, load_project_instructions, load_settings, uuid_column,
+use super::conversations::{ConversationSettings, NOW, load_settings, uuid_column};
+use super::memory::{
+    ProjectContext, build_system_message, history_bytes, load_conversation_context,
 };
 use crate::error::AppError;
 use crate::ollama::chart_tool::{ChartEntry, replay};
@@ -144,10 +145,13 @@ fn thinking_column(thinking: &str) -> Option<&str> {
 /// The rows a conversation shows: not replaced by a running turn.
 const LIVE: &str = "conversation_id = ?1 AND superseded_by IS NULL";
 
-/// The rows the conversation's turns are made of: shown, and not part of a
-/// comparison still waiting for a pick.
-pub(super) const SETTLED: &str =
-    "conversation_id = ?1 AND superseded_by IS NULL AND compare_group IS NULL";
+/// The rows the model is sent, which project memory summarizes: shown, not
+/// part of a comparison still waiting for a pick, and `complete` or a
+/// `cancelled` reply with visible text or charts.
+pub(super) const HISTORY_ROWS: &str =
+    "conversation_id = ?1 AND superseded_by IS NULL AND compare_group IS NULL
+     AND (status = 'complete'
+          OR (status = 'cancelled' AND (content <> '' OR charts IS NOT NULL)))";
 
 /// Oldest first. Rows inserted in the same millisecond keep insert order.
 /// Rows a running turn replaces are left out; an unpicked comparison is
@@ -256,11 +260,7 @@ pub(super) fn load_history(
     conversation_id: &str,
     until: Option<(&Position, &str)>,
 ) -> rusqlite::Result<Vec<ChatMessage>> {
-    let mut sql = format!(
-        "SELECT role, content, charts FROM messages
-         WHERE {SETTLED} AND (status = 'complete'
-               OR (status = 'cancelled' AND (content <> '' OR charts IS NOT NULL)))"
-    );
+    let mut sql = format!("SELECT role, content, charts FROM messages WHERE {HISTORY_ROWS}");
     let mut args: Vec<Value> = vec![conversation_id.to_owned().into()];
     if let Some((position, op)) = until {
         sql.push_str(&format!(" AND (created_at, rowid) {op} (?2, ?3)"));
@@ -302,36 +302,26 @@ pub struct Turn {
     pub charts: bool,
 }
 
-/// The one `system` message a chat is sent: its project's instructions
-/// under a fixed heading, then the chat's own prompt. A chat prompt alone is
-/// sent as it is, and nothing when both are blank. Never saved as a row.
-pub(crate) fn system_message(
-    project_instructions: &Redacted,
-    chat_prompt: &Redacted,
-) -> Option<ChatMessage> {
-    let instructions = project_instructions.expose().trim();
-    let prompt = chat_prompt.expose().trim();
-    let text = match (instructions.is_empty(), prompt.is_empty()) {
-        (true, true) => return None,
-        (true, false) => chat_prompt.clone(),
-        (false, true) => Redacted::new(format!("## Project instructions\n\n{instructions}")),
-        (false, false) => Redacted::new(format!(
-            "## Project instructions\n\n{instructions}\n\n## This chat\n\n{prompt}"
-        )),
-    };
-    Some(ChatMessage::new(ChatRole::System, text))
-}
-
-/// The history with the [`system_message`] first, when there is one.
+/// The history with the chat's one `system` message first, when there is
+/// one: see [`build_system_message`], which fits the project's memory into
+/// what `max_prompt_bytes` leaves. Never saved as a row.
 pub(crate) fn with_system_message(
-    project_instructions: &Redacted,
+    context: &ProjectContext,
     settings: &ConversationSettings,
     history: Vec<ChatMessage>,
+    max_prompt_bytes: usize,
 ) -> Vec<ChatMessage> {
-    system_message(project_instructions, &settings.system_prompt)
-        .into_iter()
-        .chain(history)
-        .collect()
+    build_system_message(
+        context,
+        &settings.system_prompt,
+        settings.options.num_ctx,
+        history_bytes(&history),
+        max_prompt_bytes,
+    )
+    .message
+    .into_iter()
+    .chain(history)
+    .collect()
 }
 
 /// When a turn's new rows are created: never before an existing row, even
@@ -411,19 +401,21 @@ impl Storage {
     /// `superseded_by` the new reply: they disappear from the conversation
     /// now and are deleted only once that reply completes (see
     /// [`TurnRecorder`]). The reply row records `model`. Refused while a
-    /// comparison waits for a pick.
+    /// comparison waits for a pick. Project memory only fills what
+    /// `max_prompt_bytes` leaves.
     pub fn begin_turn(
         &self,
         conversation_id: Uuid,
         model: &str,
         input: &TurnInput,
+        max_prompt_bytes: usize,
         check: impl FnOnce(&[ChatMessage], &ConversationSettings) -> Result<(), AppError>,
     ) -> Result<Turn, AppError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
-        let instructions = load_project_instructions(&tx, &id)?;
+        let context = load_conversation_context(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
 
         // `replaced`: the first row this turn replaces is after (`>`) or at
@@ -468,7 +460,7 @@ impl Storage {
         if let Some(prompt) = input.prompt() {
             history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
         }
-        let history = with_system_message(&instructions, &settings, history);
+        let history = with_system_message(&context, &settings, history, max_prompt_bytes);
         check(&history, &settings)?;
 
         let assistant_id = Uuid::new_v4();
@@ -784,14 +776,16 @@ impl TurnRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::testing::{count_rows, temp_storage};
+    use crate::storage::testing::{PROMPT_LIMIT, count_rows, temp_storage};
 
     fn conversation(storage: &Storage) -> Uuid {
         storage.create_conversation(None, "m").unwrap().id
     }
 
     fn begin(storage: &Storage, conversation_id: Uuid, input: TurnInput) -> Result<Turn, AppError> {
-        storage.begin_turn(conversation_id, "llama3.2", &input, |_, _| Ok(()))
+        storage.begin_turn(conversation_id, "llama3.2", &input, PROMPT_LIMIT, |_, _| {
+            Ok(())
+        })
     }
 
     fn turn(storage: &Storage, conversation_id: Uuid, prompt: &str) -> Turn {
@@ -916,10 +910,16 @@ mod tests {
 
         let mut seen = None;
         let turn = storage
-            .begin_turn(id, "m", &TurnInput::New(Redacted::new("Two")), |_, s| {
-                seen = Some(s.clone());
-                Ok(())
-            })
+            .begin_turn(
+                id,
+                "m",
+                &TurnInput::New(Redacted::new("Two")),
+                PROMPT_LIMIT,
+                |_, s| {
+                    seen = Some(s.clone());
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(seen, Some(settings));
         assert_eq!(
@@ -956,7 +956,12 @@ mod tests {
     }
 
     fn system_text(instructions: &str, prompt: &str) -> Option<String> {
-        system_message(&Redacted::new(instructions), &Redacted::new(prompt))
+        let context = ProjectContext {
+            instructions: Redacted::new(instructions),
+            memories: Vec::new(),
+        };
+        build_system_message(&context, &Redacted::new(prompt), None, 0, PROMPT_LIMIT)
+            .message
             .map(|message| message.content.expose().to_owned())
     }
 
@@ -1088,6 +1093,7 @@ mod tests {
                 id,
                 "other",
                 &TurnInput::New(Redacted::new("Hi")),
+                PROMPT_LIMIT,
                 |history, _| {
                     assert_eq!(history.len(), 1);
                     Err(AppError::TooLarge("too big".into()))
@@ -1192,6 +1198,7 @@ mod tests {
                 id,
                 "other",
                 &edit(user_ids(&storage, id)[0], "x"),
+                PROMPT_LIMIT,
                 |_, _| Err(AppError::TooLarge("too big".into())),
             )
             .unwrap_err();

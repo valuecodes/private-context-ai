@@ -8,6 +8,7 @@ pub mod db;
 pub mod export;
 pub mod key;
 pub mod lock;
+pub mod memory;
 pub mod messages;
 mod migrations;
 pub mod projects;
@@ -170,6 +171,9 @@ impl StorageState {
 pub mod testing {
     use super::*;
     use crate::storage::key::testing::MemoryKeySource;
+
+    /// The request limit tests begin turns with: the client's default.
+    pub const PROMPT_LIMIT: usize = 1024 * 1024;
 
     /// A fresh database in a temp dir, plus the dir that keeps it alive.
     pub fn temp_storage() -> (Arc<Storage>, tempfile::TempDir) {

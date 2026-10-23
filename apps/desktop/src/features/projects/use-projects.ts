@@ -6,6 +6,7 @@ import {
   projectDelete,
   projectList,
   projectRename,
+  projectSetAutoMemory,
   projectUpdateInstructions,
 } from "~/lib/ipc";
 import type { AppError, Project } from "~/lib/types";
@@ -148,6 +149,18 @@ const useProjects = () => {
     return result;
   };
 
+  /** Saves the project's Automatic memory switch. */
+  const setAutoMemory = (id: string, on: boolean) => {
+    void projectSetAutoMemory(id, on).then(
+      (project) => {
+        dispatch({ type: "saved", project });
+      },
+      (error: unknown) => {
+        dispatch({ type: "failed", error: toAppError(error) });
+      }
+    );
+  };
+
   /** Resolves `false` when the delete failed. */
   const remove = (id: string): Promise<boolean> =>
     projectDelete(id).then(
@@ -161,7 +174,15 @@ const useProjects = () => {
       }
     );
 
-  return { state, create, rename, saveInstructions, settled, remove };
+  return {
+    state,
+    create,
+    rename,
+    saveInstructions,
+    setAutoMemory,
+    settled,
+    remove,
+  };
 };
 
 export type { ProjectsState };

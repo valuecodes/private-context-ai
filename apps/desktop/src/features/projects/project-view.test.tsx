@@ -13,6 +13,7 @@ const project: Project = {
   instructions: "Cite sources.",
   createdAt: "x",
   updatedAt: "x",
+  autoMemory: true,
 };
 
 const chat = (id: string, title: string): Conversation => ({
@@ -44,6 +45,7 @@ const view = (
       error={null}
       onRename={() => Promise.resolve(true)}
       onInstructions={vi.fn()}
+      onAutoMemory={vi.fn()}
       onNewChat={vi.fn()}
       onNewTemporary={vi.fn()}
       onOpenChat={vi.fn()}

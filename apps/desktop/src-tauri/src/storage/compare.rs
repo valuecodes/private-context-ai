@@ -4,9 +4,8 @@ use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use super::Storage;
-use super::conversations::{
-    ConversationSettings, NOW, load_project_instructions, load_settings, not_found,
-};
+use super::conversations::{ConversationSettings, NOW, load_settings, not_found};
+use super::memory::load_conversation_context;
 use super::messages::{
     check_no_comparison, insert_pending_reply, insert_prompt, load_history, next_created_at,
     with_system_message,
@@ -42,17 +41,18 @@ impl Storage {
         conversation_id: Uuid,
         prompt: &Redacted,
         models: &[String],
+        max_prompt_bytes: usize,
         check: impl FnOnce(&[ChatMessage], &ConversationSettings) -> Result<(), AppError>,
     ) -> Result<CompareTurn, AppError> {
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
-        let instructions = load_project_instructions(&tx, &id)?;
+        let context = load_conversation_context(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
         let mut history = load_history(&tx, &id, None)?;
         history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
-        let history = with_system_message(&instructions, &settings, history);
+        let history = with_system_message(&context, &settings, history, max_prompt_bytes);
         check(&history, &settings)?;
 
         let group = Uuid::new_v4();
@@ -183,7 +183,7 @@ mod tests {
     use crate::storage::messages::{
         FlushPolicy, MessageStatus, ReplyStats, StoredMessage, TurnInput, TurnRecorder,
     };
-    use crate::storage::testing::{count_rows, temp_storage};
+    use crate::storage::testing::{PROMPT_LIMIT, count_rows, temp_storage};
 
     fn models(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| (*name).to_owned()).collect()
@@ -191,9 +191,13 @@ mod tests {
 
     fn compare(storage: &Storage, id: Uuid, prompt: &str) -> CompareTurn {
         storage
-            .begin_compare(id, &Redacted::new(prompt), &models(&["a", "b"]), |_, _| {
-                Ok(())
-            })
+            .begin_compare(
+                id,
+                &Redacted::new(prompt),
+                &models(&["a", "b"]),
+                PROMPT_LIMIT,
+                |_, _| Ok(()),
+            )
             .unwrap()
     }
 
@@ -215,6 +219,7 @@ mod tests {
                 id,
                 "m",
                 &TurnInput::New(Redacted::new("One")),
+                PROMPT_LIMIT,
                 |_, _| Ok(()),
             )
             .unwrap();
@@ -305,9 +310,13 @@ mod tests {
         let (storage, _dir) = temp_storage();
         let id = answered(&storage);
         let err = storage
-            .begin_compare(id, &Redacted::new("Two"), &models(&["a", "b"]), |_, _| {
-                Err(AppError::TooLarge("too big".into()))
-            })
+            .begin_compare(
+                id,
+                &Redacted::new("Two"),
+                &models(&["a", "b"]),
+                PROMPT_LIMIT,
+                |_, _| Err(AppError::TooLarge("too big".into())),
+            )
             .unwrap_err();
         assert!(matches!(err, AppError::TooLarge(_)));
         assert_eq!(count_rows(&storage, "messages"), 2);
@@ -333,9 +342,13 @@ mod tests {
 
         storage.compare_pick(id, turn.candidates[1].0).unwrap();
         let next = storage
-            .begin_turn(id, "b", &TurnInput::New(Redacted::new("Three")), |_, _| {
-                Ok(())
-            })
+            .begin_turn(
+                id,
+                "b",
+                &TurnInput::New(Redacted::new("Three")),
+                PROMPT_LIMIT,
+                |_, _| Ok(()),
+            )
             .unwrap();
         assert_eq!(
             texts(&next.history),
@@ -361,7 +374,7 @@ mod tests {
             },
         ] {
             assert!(matches!(
-                storage.begin_turn(id, "m", &input, |_, _| Ok(())),
+                storage.begin_turn(id, "m", &input, PROMPT_LIMIT, |_, _| Ok(())),
                 Err(AppError::InvalidInput(_))
             ));
         }
@@ -370,6 +383,7 @@ mod tests {
                 id,
                 &Redacted::new("Again"),
                 &models(&["a", "b"]),
+                PROMPT_LIMIT,
                 |_, _| Ok(())
             ),
             Err(AppError::InvalidInput(_))
@@ -519,9 +533,13 @@ mod tests {
         assert_eq!(count_rows(&storage, "messages"), 2);
         // Sending works again.
         storage
-            .begin_turn(id, "m", &TurnInput::New(Redacted::new("Next")), |_, _| {
-                Ok(())
-            })
+            .begin_turn(
+                id,
+                "m",
+                &TurnInput::New(Redacted::new("Next")),
+                PROMPT_LIMIT,
+                |_, _| Ok(()),
+            )
             .unwrap();
     }
 

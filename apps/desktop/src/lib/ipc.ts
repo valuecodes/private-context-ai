@@ -8,13 +8,16 @@ import type {
   ChatEvent,
   CompareEvent,
   CompareStarted,
+  ContextPreview,
   Conversation,
   ConversationSettings,
   ConversationWithMessages,
+  MemoryEntry,
   ModelCapabilities,
   ModelInfo,
   OllamaStatus,
   Project,
+  RefreshResult,
   RequestId,
   SendStarted,
   Settings,
@@ -102,6 +105,51 @@ const projectUpdateInstructions = (
  */
 const projectDelete = (id: string): Promise<number> =>
   invoke<number>("project_delete", { id });
+
+/** Only saved for now: nothing writes memory on its own yet. */
+const projectSetAutoMemory = (id: string, on: boolean): Promise<Project> =>
+  invoke<Project>("project_set_auto_memory", { id, on });
+
+/** The project's memory entries, newest first. */
+const projectMemoryList = (projectId: string): Promise<MemoryEntry[]> =>
+  invoke<MemoryEntry[]>("project_memory_list", { projectId });
+
+/** Replaces a chat's entry; its next summary starts from this text. */
+const projectMemoryUpdate = (
+  conversationId: string,
+  content: string
+): Promise<MemoryEntry> =>
+  invoke<MemoryEntry>("project_memory_update", { conversationId, content });
+
+const projectMemoryDelete = (conversationId: string): Promise<void> =>
+  invoke<undefined>("project_memory_delete", { conversationId });
+
+/**
+ * Summarizes one chat, or every saved chat of the project when
+ * `conversationId` is `null`, each with its own model. Each request is
+ * audited as `ollama.memory`.
+ */
+const projectMemoryRefresh = (
+  projectId: string,
+  conversationId: string | null
+): Promise<RefreshResult[]> =>
+  invoke<RefreshResult[]>("project_memory_refresh", {
+    projectId,
+    conversationId,
+  });
+
+/**
+ * The exact `system` message the project's chats get, or with
+ * `conversationId` what that chat gets. Sends nothing to Ollama.
+ */
+const projectContextPreview = (
+  projectId: string,
+  conversationId: string | null
+): Promise<ContextPreview> =>
+  invoke<ContextPreview>("project_context_preview", {
+    projectId,
+    conversationId,
+  });
 
 /** Rust sends the chat's saved settings: system prompt, options and Think. */
 type ChatTurnArgs = { model: string };
@@ -305,10 +353,16 @@ export {
   ollamaListModels,
   ollamaModelCapabilities,
   ollamaStatus,
+  projectContextPreview,
   projectCreate,
   projectDelete,
   projectList,
+  projectMemoryDelete,
+  projectMemoryList,
+  projectMemoryRefresh,
+  projectMemoryUpdate,
   projectRename,
+  projectSetAutoMemory,
   projectUpdateInstructions,
   settingsGet,
   settingsSet,

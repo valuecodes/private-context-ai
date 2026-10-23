@@ -34,6 +34,10 @@ const MIB: usize = 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
 const TAGS_TIMEOUT: Duration = Duration::from_secs(10);
 const SHOW_TIMEOUT: Duration = Duration::from_secs(10);
+/// Audit kinds of `/api/chat` requests: a chat's turn, and a project memory
+/// summary.
+const CHAT_KIND: &str = "ollama.chat";
+const MEMORY_KIND: &str = "ollama.memory";
 
 /// Capabilities by (`host:port`, model), so a lookup is one audit row per
 /// model and Ollama.
@@ -78,7 +82,11 @@ impl Default for Limits {
 
 #[derive(Debug)]
 struct InflightEntry {
+    /// The chat, or for a memory summary the project.
     conversation_id: Uuid,
+    /// The chat a memory summary is written for; a send in that chat
+    /// cancels it.
+    summarizing: Option<Uuid>,
     cancel: CancellationToken,
     /// Cancelled by the worker's guard once the entry is gone.
     finished: CancellationToken,
@@ -523,23 +531,64 @@ impl Ollama {
         )
     }
 
+    /// What a request may send in total, in content bytes.
+    pub fn max_prompt_bytes(&self) -> usize {
+        self.limits.max_prompt_bytes
+    }
+
     /// Takes a slot for `conversation_id` (one per conversation, `max_inflight`
     /// in total). The slot is visible to `chat_cancel` and
-    /// `cancel_conversation` at once; dropping the admission frees it.
+    /// `cancel_conversation` at once; dropping the admission frees it. Under
+    /// the same lock, a memory summary of this chat is cancelled, since the
+    /// turn changes what it summarizes.
     pub fn admit(&self, conversation_id: Uuid) -> Result<Admission, AppError> {
+        self.admit_entry(conversation_id, None)
+    }
+
+    /// Takes the slot a memory summary of `conversation_id` runs on. It is
+    /// keyed by `project_id`, so one summary runs per project and the chat
+    /// itself never reports `Busy` because of it. `Busy` while the chat is
+    /// answering.
+    pub fn admit_summary(
+        &self,
+        project_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Admission, AppError> {
+        self.admit_entry(project_id, Some(conversation_id))
+    }
+
+    /// Whether a memory summary of project `project_id` holds a slot.
+    pub fn summary_running(&self, project_id: Uuid) -> bool {
+        lock(&self.inflight)
+            .values()
+            .any(|entry| entry.conversation_id == project_id && entry.summarizing.is_some())
+    }
+
+    fn admit_entry(
+        &self,
+        conversation_id: Uuid,
+        summarizing: Option<Uuid>,
+    ) -> Result<Admission, AppError> {
         self.connection().get()?;
         let request_id = Uuid::new_v4();
         let cancel = CancellationToken::new();
         let finished = CancellationToken::new();
         {
             let mut inflight = lock(&self.inflight);
+            if let Some(chat) = summarizing
+                && inflight.values().any(|entry| entry.conversation_id == chat)
+            {
+                return Err(AppError::Busy("this chat is answering".into()));
+            }
             if inflight
                 .values()
                 .any(|entry| entry.conversation_id == conversation_id)
             {
-                return Err(AppError::Busy(
-                    "this conversation is still answering".into(),
-                ));
+                return Err(AppError::Busy(if summarizing.is_some() {
+                    "project memory is already being refreshed".into()
+                } else {
+                    "this conversation is still answering".into()
+                }));
             }
             if inflight.len() >= self.limits.max_inflight {
                 return Err(AppError::Busy(format!(
@@ -547,10 +596,18 @@ impl Ollama {
                     self.limits.max_inflight
                 )));
             }
+            if summarizing.is_none() {
+                for entry in inflight.values() {
+                    if entry.summarizing == Some(conversation_id) {
+                        entry.cancel.cancel();
+                    }
+                }
+            }
             inflight.insert(
                 request_id,
                 InflightEntry {
                     conversation_id,
+                    summarizing,
                     cancel: cancel.clone(),
                     finished: finished.clone(),
                 },
@@ -566,9 +623,9 @@ impl Ollama {
         })
     }
 
-    /// Everything `start` needs before spawning; the audit row is written
-    /// last, so a request refused here leaves no `attempt` behind.
-    fn prepare_chat(&self, call: ChatCall<'_>) -> Result<Prepared, AppError> {
+    /// Everything `start` needs before spawning; the audit row, of `kind`,
+    /// is written last, so a request refused here leaves no `attempt` behind.
+    fn prepare_chat(&self, call: ChatCall<'_>, kind: &'static str) -> Result<Prepared, AppError> {
         let connection = self.connection();
         if connection.id != call.think.connection {
             return Err(connection_changed());
@@ -584,13 +641,7 @@ impl Ollama {
             tools: call.tools.then_some(&*CHART_TOOLS),
         })
         .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
-        let tracked = Tracked::begin(
-            &self.audit,
-            "ollama.chat",
-            base,
-            "/api/chat",
-            Some(call.model),
-        )?;
+        let tracked = Tracked::begin(&self.audit, kind, base, "/api/chat", Some(call.model))?;
         Ok(Prepared {
             http: http.clone(),
             url: base.endpoint("/api/chat"),
@@ -652,6 +703,51 @@ impl Ollama {
     ) where
         E: FnOnce(&ChatEnd),
     {
+        self.run_as(CHAT_KIND, admission, call, sink, on_end).await;
+    }
+
+    /// Like [`Self::run`], for a project memory summary: audited as
+    /// `ollama.memory`.
+    pub async fn run_memory<E>(
+        &self,
+        admission: &Admission,
+        call: ChatCall<'_>,
+        sink: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
+        on_end: E,
+    ) where
+        E: FnOnce(&ChatEnd),
+    {
+        self.run_as(MEMORY_KIND, admission, call, sink, on_end)
+            .await;
+    }
+
+    /// Writes an `ollama.memory` row for a summary refused before any
+    /// request, with why in `detail`. Nothing is sent.
+    pub fn record_memory_skip(&self, model: &str, detail: &str) {
+        let host = self
+            .connection()
+            .base_url
+            .as_ref()
+            .map(OllamaBaseUrl::host_port)
+            .unwrap_or_default();
+        let mut event = NewAuditEvent::request(MEMORY_KIND, host, "/api/chat", Some(model));
+        event.outcome = AuditOutcome {
+            detail: Some(detail.to_owned()),
+            ..AuditOutcome::new(AuditStatus::Error)
+        };
+        self.audit.record(event);
+    }
+
+    async fn run_as<E>(
+        &self,
+        kind: &'static str,
+        admission: &Admission,
+        call: ChatCall<'_>,
+        sink: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
+        on_end: E,
+    ) where
+        E: FnOnce(&ChatEnd),
+    {
         if admission.is_cancelled() {
             on_end(&ChatEnd::Cancelled);
             return;
@@ -662,7 +758,7 @@ impl Ollama {
             body,
             tools,
             tracked,
-        } = match self.prepare_chat(call) {
+        } = match self.prepare_chat(call, kind) {
             Ok(prepared) => prepared,
             Err(error) => {
                 sink(ChatEvent::Error {
@@ -719,7 +815,7 @@ impl Ollama {
             body,
             tools,
             tracked,
-        } = match self.prepare_chat(call) {
+        } = match self.prepare_chat(call, CHAT_KIND) {
             Ok(prepared) => prepared,
             Err(err) => {
                 on_end(&ChatEnd::Failed(err.clone()));
@@ -808,11 +904,16 @@ impl Ollama {
     }
 
     /// Cancels whatever runs for `conversation_id`, admitted or streaming,
-    /// and waits like [`Self::chat_cancel`]. Nothing running is a no-op.
+    /// including a memory summary of it or, for a project id, of any of its
+    /// chats, and waits like [`Self::chat_cancel`]. Nothing running is a
+    /// no-op.
     pub async fn cancel_conversation(&self, conversation_id: Uuid) {
         let finished: Vec<CancellationToken> = lock(&self.inflight)
             .values()
-            .filter(|entry| entry.conversation_id == conversation_id)
+            .filter(|entry| {
+                entry.conversation_id == conversation_id
+                    || entry.summarizing == Some(conversation_id)
+            })
             .map(|entry| {
                 entry.cancel.cancel();
                 entry.finished.clone()

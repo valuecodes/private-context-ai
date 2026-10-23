@@ -4,6 +4,9 @@ import { useState } from "react";
 
 import type { AppError, Conversation, Project } from "~/lib/types";
 
+import { MemoryPanel } from "./memory-panel";
+import { MemoryPreview } from "./memory-preview";
+
 const button =
   "flex items-center gap-1 rounded border border-zinc-300 px-2 py-1 text-sm hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:border-zinc-700 dark:hover:bg-zinc-800";
 
@@ -23,13 +26,14 @@ type ProjectViewProps = {
   /** Resolves `false` when the name was refused, keeping the editor open. */
   onRename: (name: string) => Promise<boolean>;
   onInstructions: (instructions: string) => void;
+  onAutoMemory: (on: boolean) => void;
   onNewChat: () => void;
   onNewTemporary: () => void;
   onOpenChat: (id: string) => void;
   onDelete: () => void;
 };
 
-/** A project's name, instructions and chats. */
+/** A project's name, instructions, memory and chats. */
 const ProjectView = ({
   project,
   chats,
@@ -38,12 +42,16 @@ const ProjectView = ({
   error,
   onRename,
   onInstructions,
+  onAutoMemory,
   onNewChat,
   onNewTemporary,
   onOpenChat,
   onDelete,
 }: ProjectViewProps) => {
   const [mode, setMode] = useState<"view" | "rename" | "confirm">("view");
+  const [previewing, setPreviewing] = useState(false);
+  const titleOf = (id: string): string =>
+    chats.find((chat) => chat.id === id)?.title ?? "A chat";
 
   const onSubmitName = (event: SubmitEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -177,6 +185,25 @@ const ProjectView = ({
             message.
           </p>
         </div>
+        <MemoryPanel
+          projectId={project.id}
+          autoMemory={project.autoMemory}
+          disabled={disabled}
+          titleOf={titleOf}
+          onAutoMemory={onAutoMemory}
+          onPreview={() => {
+            setPreviewing(true);
+          }}
+        />
+        {previewing && (
+          <MemoryPreview
+            projectId={project.id}
+            conversationId={null}
+            onClose={() => {
+              setPreviewing(false);
+            }}
+          />
+        )}
         <div className="flex gap-2">
           <button
             type="button"

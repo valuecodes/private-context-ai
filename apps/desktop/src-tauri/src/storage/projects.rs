@@ -20,9 +20,11 @@ pub struct Project {
     pub instructions: Redacted,
     pub created_at: String,
     pub updated_at: String,
+    /// Whether its chats' memory is written without asking; on by default.
+    pub auto_memory: bool,
 }
 
-const COLUMNS: &str = "id, name, instructions, created_at, updated_at";
+const COLUMNS: &str = "id, name, instructions, created_at, updated_at, auto_memory";
 
 fn project_row(row: &Row<'_>) -> rusqlite::Result<Project> {
     Ok(Project {
@@ -31,6 +33,7 @@ fn project_row(row: &Row<'_>) -> rusqlite::Result<Project> {
         instructions: Redacted::new(row.get::<_, String>(2)?),
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
+        auto_memory: row.get::<_, i64>(5)? != 0,
     })
 }
 
@@ -56,7 +59,7 @@ impl Storage {
         let conn = self.conn();
         let project = conn.query_row(
             &format!(
-                "INSERT INTO projects ({COLUMNS}) VALUES (?1, ?2, '', {NOW}, {NOW})
+                "INSERT INTO projects ({COLUMNS}) VALUES (?1, ?2, '', {NOW}, {NOW}, 1)
                  RETURNING {COLUMNS}"
             ),
             params![Uuid::new_v4().to_string(), name],
@@ -88,9 +91,20 @@ impl Storage {
             .ok_or_else(not_found)
     }
 
-    /// What a temporary chat in project `id` is sent, read at each turn.
-    pub fn project_instructions(&self, id: Uuid) -> Result<Redacted, AppError> {
-        Ok(self.get_project(id)?.instructions)
+    /// Only saved here; whether memory is then written on its own is up to
+    /// the scheduler.
+    pub fn set_auto_memory(&self, id: Uuid, on: bool) -> Result<Project, AppError> {
+        self.conn()
+            .query_row(
+                &format!(
+                    "UPDATE projects SET auto_memory = ?2, updated_at = {NOW}
+                     WHERE id = ?1 RETURNING {COLUMNS}"
+                ),
+                params![id.to_string(), on],
+                project_row,
+            )
+            .optional()?
+            .ok_or_else(not_found)
     }
 
     pub fn rename_project(&self, id: Uuid, name: &str) -> Result<Project, AppError> {
@@ -147,7 +161,7 @@ mod tests {
         ConversationSettings, MAX_SYSTEM_PROMPT_BYTES, MAX_TITLE_CHARS,
     };
     use crate::storage::messages::TurnInput;
-    use crate::storage::testing::{count_rows, temp_storage};
+    use crate::storage::testing::{PROMPT_LIMIT, count_rows, temp_storage};
 
     #[test]
     fn project_crud() {
@@ -172,9 +186,18 @@ mod tests {
         assert_eq!(updated.instructions.expose(), "Cite sources.");
         assert_eq!(updated.name.expose(), "Dissertation");
         assert_eq!(
-            storage.project_instructions(created.id).unwrap().expose(),
+            storage
+                .project_context(created.id)
+                .unwrap()
+                .instructions
+                .expose(),
             "Cite sources."
         );
+        assert!(created.auto_memory);
+        let off = storage.set_auto_memory(created.id, false).unwrap();
+        assert!(!off.auto_memory);
+        assert_eq!(off.instructions.expose(), "Cite sources.");
+        assert!(storage.get_project(created.id).unwrap() == off);
 
         assert!(storage.delete_project(created.id).unwrap().is_empty());
         assert_eq!(storage.list_projects().unwrap(), [second]);
@@ -183,6 +206,7 @@ mod tests {
             storage.get_project(created.id),
             storage.rename_project(created.id, "x"),
             storage.update_project_instructions(created.id, &Redacted::new("x")),
+            storage.set_auto_memory(created.id, true),
         ] {
             assert!(matches!(result, Err(AppError::NotFound(_))));
         }
@@ -249,7 +273,13 @@ mod tests {
                 .unwrap()
                 .id;
             storage
-                .begin_turn(id, "m", &TurnInput::New(Redacted::new("Hi")), |_, _| Ok(()))
+                .begin_turn(
+                    id,
+                    "m",
+                    &TurnInput::New(Redacted::new("Hi")),
+                    PROMPT_LIMIT,
+                    |_, _| Ok(()),
+                )
                 .unwrap();
             id
         };

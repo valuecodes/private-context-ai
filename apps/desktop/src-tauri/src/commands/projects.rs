@@ -7,8 +7,10 @@ use tauri::State;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::memory::{RefreshResult, refresh};
 use crate::ollama::Ollama;
 use crate::redacted::Redacted;
+use crate::storage::memory::{ContextPreview, MemoryEntry};
 use crate::storage::projects::Project;
 use crate::storage::{Storage, StorageState};
 use crate::temporary::TempChats;
@@ -53,6 +55,71 @@ pub async fn project_update_instructions(
         .update_project_instructions(id, &instructions)
 }
 
+/// Only saved in this version: nothing writes memory on its own yet.
+#[tauri::command]
+pub async fn project_set_auto_memory(
+    storage: State<'_, StorageState>,
+    id: Uuid,
+    on: bool,
+) -> Result<Project, AppError> {
+    storage.get()?.set_auto_memory(id, on)
+}
+
+/// The project's memory entries, newest first.
+#[tauri::command]
+pub async fn project_memory_list(
+    storage: State<'_, StorageState>,
+    project_id: Uuid,
+) -> Result<Vec<MemoryEntry>, AppError> {
+    storage.get()?.list_memories(project_id)
+}
+
+/// Replaces a chat's entry with the user's text; its next summary starts
+/// from it.
+#[tauri::command]
+pub async fn project_memory_update(
+    storage: State<'_, StorageState>,
+    conversation_id: Uuid,
+    content: Redacted,
+) -> Result<MemoryEntry, AppError> {
+    storage.get()?.update_memory(conversation_id, &content)
+}
+
+#[tauri::command]
+pub async fn project_memory_delete(
+    storage: State<'_, StorageState>,
+    conversation_id: Uuid,
+) -> Result<(), AppError> {
+    storage.get()?.delete_memory(conversation_id)
+}
+
+/// Summarizes one chat of the project, or every saved chat one after
+/// another, each with its own model. Every request is audited as
+/// `ollama.memory`.
+#[tauri::command]
+pub async fn project_memory_refresh(
+    storage: State<'_, StorageState>,
+    ollama: State<'_, Arc<Ollama>>,
+    project_id: Uuid,
+    conversation_id: Option<Uuid>,
+) -> Result<Vec<RefreshResult>, AppError> {
+    refresh(&ollama, storage.get()?, project_id, conversation_id).await
+}
+
+/// The exact `system` message the project's chats get now, or with
+/// `conversation_id` what that chat gets. Sends nothing.
+#[tauri::command]
+pub async fn project_context_preview(
+    storage: State<'_, StorageState>,
+    ollama: State<'_, Arc<Ollama>>,
+    project_id: Uuid,
+    conversation_id: Option<Uuid>,
+) -> Result<ContextPreview, AppError> {
+    storage
+        .get()?
+        .context_preview(project_id, conversation_id, ollama.max_prompt_bytes())
+}
+
 /// Deletes the project with its saved chats and temporary chats; returns how
 /// many saved chats were deleted.
 #[tauri::command]
@@ -67,8 +134,9 @@ pub async fn project_delete(
 
 /// The body of `project_delete`, without Tauri. Like `conversation_delete`
 /// and a temporary chat's discard: the rows and sessions go first, then
-/// their replies are cancelled. A send racing this either finds its chat
-/// gone, or was admitted before and is cancelled here.
+/// their replies are cancelled, and so is a memory summary of the project.
+/// A send racing this either finds its chat gone, or was admitted before
+/// and is cancelled here.
 pub async fn delete_project(
     storage: &Storage,
     ollama: &Ollama,
@@ -77,7 +145,7 @@ pub async fn delete_project(
 ) -> Result<usize, AppError> {
     let saved = storage.delete_project(id)?;
     let temporary = chats.discard_project(id);
-    for chat in saved.iter().chain(&temporary) {
+    for chat in saved.iter().chain(&temporary).chain([&id]) {
         ollama.cancel_conversation(*chat).await;
     }
     Ok(saved.len())
@@ -97,6 +165,7 @@ mod tests {
     use crate::ollama::types::ThinkChoice;
     use crate::storage::conversations::ConversationSettings;
     use crate::storage::key::testing::MemoryKeySource;
+    use crate::storage::memory::ProjectContext;
     use crate::storage::messages::{FlushPolicy, TurnInput};
     use crate::storage::testing::count_rows;
 
@@ -176,14 +245,14 @@ mod tests {
     }
 
     fn send_temp(setup: &Setup, session: Uuid, prompt: &str) -> Result<(), AppError> {
-        let instructions = match setup.chats.project(session)? {
-            Some(project) => setup.storage.project_instructions(project)?,
-            None => Redacted::default(),
+        let context = match setup.chats.project(session)? {
+            Some(project) => setup.storage.project_context(project)?,
+            None => ProjectContext::default(),
         };
         send_temp_turn(
             &setup.ollama,
             &setup.chats,
-            instructions,
+            context,
             request(&setup.ollama, session, prompt),
             |_| true,
         )
@@ -342,7 +411,7 @@ mod tests {
         send_temp_turn(
             &ollama,
             &chats,
-            Redacted::default(),
+            ProjectContext::default(),
             request(&ollama, session, "Hi"),
             |_| true,
         )

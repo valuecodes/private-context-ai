@@ -13,6 +13,7 @@ const project = (id: string, name: string, createdAt = "x"): Project => ({
   instructions: "",
   createdAt,
   updatedAt: createdAt,
+  autoMemory: true,
 });
 
 const names = (state: ProjectsState): string[] =>
