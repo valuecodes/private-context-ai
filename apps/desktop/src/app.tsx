@@ -9,6 +9,8 @@ import { ChatView } from "~/features/chat/chat-view";
 import { useChatStream } from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
+import { ProjectView } from "~/features/projects/project-view";
+import { useProjects } from "~/features/projects/use-projects";
 import { SettingsView } from "~/features/settings/settings-view";
 import { OllamaStatus } from "~/features/status/ollama-status";
 import { isReachable } from "~/features/status/status-state";
@@ -18,9 +20,14 @@ import { toAppError } from "~/lib/app-error";
 import { settingsGet, storageStatus } from "~/lib/ipc";
 import type { StorageStatus } from "~/lib/types";
 
-type View = "chat" | "activity" | "settings";
+/** `project`: a project's view, opened from the sidebar; not a tab. */
+type View = "chat" | "activity" | "settings" | "project";
 
-const VIEWS: { id: View; label: string; Icon: LucideIcon }[] = [
+const VIEWS: {
+  id: Exclude<View, "project">;
+  label: string;
+  Icon: LucideIcon;
+}[] = [
   { id: "chat", label: "Chat", Icon: MessageSquare },
   { id: "activity", label: "Activity", Icon: Activity },
   { id: "settings", label: "Settings", Icon: Settings },
@@ -33,8 +40,11 @@ const Workspace = () => {
   const [model, setModel] = useState("");
   const [defaultModel, setDefaultModel] = useState("");
   const [view, setView] = useState<View>("chat");
+  // The project whose view is open, or was last.
+  const [projectId, setProjectId] = useState<string | null>(null);
   const { status, retry } = useOllamaStatus();
   const conversations = useConversations();
+  const projects = useProjects();
   const chat = useChatStream({
     onCreated: conversations.created,
     onStarted: conversations.touched,
@@ -63,16 +73,17 @@ const Workspace = () => {
     };
   }, []);
 
+  /** A saved conversation, or a new chat outside any project for `null`. */
   const open = (id: string | null) => {
     if (locked) {
       return;
     }
     setView("chat");
     conversations.select(id);
-    chat.open(id);
     const saved = conversations.state.conversations.find(
       (conversation) => conversation.id === id
     );
+    chat.open(id, saved?.projectId ?? null);
     if (saved !== undefined && saved.model !== "") {
       setModel(saved.model);
     }
@@ -81,12 +92,61 @@ const Workspace = () => {
   const temporary = (on: boolean) => {
     // Never selected in the sidebar: a temporary chat is not listed there.
     conversations.select(null);
+    // An empty new chat stays in its project either way.
+    const { projectId: project } = chat.state;
     if (on) {
-      chat.openTemporary();
+      chat.openTemporary(project);
     } else {
-      chat.open(null);
+      chat.open(null, project);
     }
   };
+
+  const openProject = (id: string) => {
+    if (locked) {
+      return;
+    }
+    setProjectId(id);
+    setView("project");
+  };
+
+  /**
+   * A new chat in project `id`, once its instructions are saved: a failed
+   * save keeps the project view, with its error.
+   */
+  const newInProject = (id: string, temporaryChat: boolean) => {
+    void projects.settled().then((saved) => {
+      if (!saved) {
+        return;
+      }
+      setView("chat");
+      conversations.select(null);
+      if (temporaryChat) {
+        chat.openTemporary(id);
+      } else {
+        chat.open(null, id);
+      }
+    });
+  };
+
+  const removeProject = (id: string) => {
+    void projects.remove(id).then((deleted) => {
+      if (!deleted) {
+        return;
+      }
+      conversations.projectDeleted(id);
+      // Rust discarded its chats; a temporary one is closed here too.
+      if (chat.state.projectId === id) {
+        chat.open(null, null);
+      }
+      setView("chat");
+    });
+  };
+
+  const shownProject =
+    projects.state.projects.find((project) => project.id === projectId) ?? null;
+  const chatProject = projects.state.projects.find(
+    (project) => project.id === chat.state.projectId
+  );
 
   const remove = (id: string) => {
     void conversations.remove(id).then((deleted) => {
@@ -100,11 +160,22 @@ const Workspace = () => {
     <div className="flex h-screen bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <Sidebar
         state={conversations.state}
+        projects={projects.state.projects}
+        selectedProjectId={view === "project" ? projectId : null}
         disabled={locked}
         version={version}
         onNew={() => {
           open(null);
         }}
+        onNewProject={(name) =>
+          projects.create(name).then((project) => {
+            if (project !== null) {
+              openProject(project.id);
+            }
+            return project !== null;
+          })
+        }
+        onOpenProject={openProject}
         onSelect={open}
         onRename={conversations.rename}
         onDelete={remove}
@@ -154,6 +225,40 @@ const Workspace = () => {
               model={model}
               setModel={setModel}
               defaultModel={defaultModel}
+              project={
+                chatProject === undefined
+                  ? undefined
+                  : {
+                      name: chatProject.name,
+                      onOpen: () => {
+                        openProject(chatProject.id);
+                      },
+                    }
+              }
+            />
+          )}
+          {view === "project" && shownProject !== null && (
+            <ProjectView
+              project={shownProject}
+              chats={conversations.state.conversations.filter(
+                (conversation) => conversation.projectId === shownProject.id
+              )}
+              disabled={locked}
+              error={projects.state.error}
+              onRename={(name) => projects.rename(shownProject.id, name)}
+              onInstructions={(instructions) => {
+                projects.saveInstructions(shownProject.id, instructions);
+              }}
+              onNewChat={() => {
+                newInProject(shownProject.id, false);
+              }}
+              onNewTemporary={() => {
+                newInProject(shownProject.id, true);
+              }}
+              onOpenChat={open}
+              onDelete={() => {
+                removeProject(shownProject.id);
+              }}
             />
           )}
           {view === "activity" && <ActivityPanel />}

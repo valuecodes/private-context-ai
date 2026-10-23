@@ -30,6 +30,8 @@ type ChatState = {
   conversationId: string | null;
   /** A temporary chat: kept in Rust's memory only, never saved. */
   temporary: boolean;
+  /** The chat's project, whose instructions it is sent; `null` outside one. */
+  projectId: string | null;
   /** The saved messages are still loading; sending waits for them. */
   loading: boolean;
   messages: UiMessage[];
@@ -55,9 +57,10 @@ type ChatState = {
   settings: ConversationSettings;
 };
 
+/** `projectId`: the chat's project; outside any project when left out. */
 type ChatAction =
-  | { type: "open"; conversationId: string | null }
-  | { type: "openTemporary" }
+  | { type: "open"; conversationId: string | null; projectId?: string | null }
+  | { type: "openTemporary"; projectId?: string | null }
   | {
       type: "loaded";
       conversationId: string;
@@ -122,10 +125,12 @@ type TurnAction = Extract<
 
 const createChatState = (
   conversationId: string | null = null,
-  temporary = false
+  temporary = false,
+  projectId: string | null = null
 ): ChatState => ({
   conversationId,
   temporary,
+  projectId,
   loading: false,
   messages: [],
   phase: "idle",

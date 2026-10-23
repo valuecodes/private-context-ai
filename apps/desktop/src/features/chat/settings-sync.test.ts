@@ -31,6 +31,7 @@ const saved = (id: string): Conversation => ({
   createdAt: "x",
   updatedAt: "x",
   settings: DEFAULT_SETTINGS,
+  projectId: null,
 });
 
 describe("settingsSync", () => {

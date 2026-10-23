@@ -36,15 +36,20 @@ pub struct ConversationSettings {
     pub charts: bool,
 }
 
+/// At most [`MAX_SYSTEM_PROMPT_BYTES`] of text: a system prompt or a
+/// project's instructions, named `what` in the error.
+pub(super) fn check_prompt_text(text: &Redacted, what: &str) -> Result<(), AppError> {
+    if text.len_bytes() > MAX_SYSTEM_PROMPT_BYTES || text.expose().contains('\0') {
+        return Err(AppError::InvalidInput(format!(
+            "{what} is at most {MAX_SYSTEM_PROMPT_BYTES} bytes of text"
+        )));
+    }
+    Ok(())
+}
+
 impl ConversationSettings {
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.system_prompt.len_bytes() > MAX_SYSTEM_PROMPT_BYTES
-            || self.system_prompt.expose().contains('\0')
-        {
-            return Err(AppError::InvalidInput(format!(
-                "a system prompt is at most {MAX_SYSTEM_PROMPT_BYTES} bytes of text"
-            )));
-        }
+        check_prompt_text(&self.system_prompt, "a system prompt")?;
         if self.options.num_predict.is_some() || self.options.seed.is_some() {
             return Err(AppError::InvalidInput(
                 "only temperature and num_ctx can be saved".into(),
@@ -71,6 +76,8 @@ pub struct Conversation {
     pub created_at: String,
     pub updated_at: String,
     pub settings: ConversationSettings,
+    /// The project it belongs to; `None` outside any project.
+    pub project_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -80,8 +87,8 @@ pub struct ConversationWithMessages {
     pub messages: Vec<StoredMessage>,
 }
 
-const COLUMNS: &str =
-    "id, title, model, created_at, updated_at, system_prompt, temperature, num_ctx, think, charts";
+const COLUMNS: &str = "id, title, model, created_at, updated_at, system_prompt, temperature, \
+                       num_ctx, think, charts, project_id";
 const SETTINGS_COLUMNS: &str = "system_prompt, temperature, num_ctx, think, charts";
 
 /// The `think` column: `off`, `on` or `level:<name>`.
@@ -134,6 +141,20 @@ pub(super) fn load_settings(conn: &Connection, id: &str) -> Result<ConversationS
     .ok_or_else(not_found)
 }
 
+/// The instructions of conversation `id`'s project, empty outside any
+/// project. Read on `conn` so a transaction sees its own snapshot.
+pub(super) fn load_project_instructions(conn: &Connection, id: &str) -> Result<Redacted, AppError> {
+    conn.query_row(
+        "SELECT coalesce(p.instructions, '') FROM conversations c
+         LEFT JOIN projects p ON p.id = c.project_id WHERE c.id = ?1",
+        [id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()?
+    .map(Redacted::new)
+    .ok_or_else(not_found)
+}
+
 /// ISO 8601 UTC with milliseconds, computed by SQLite.
 pub(super) const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ', 'now')";
 
@@ -152,21 +173,30 @@ fn conversation_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
         created_at: row.get(3)?,
         updated_at: row.get(4)?,
         settings: settings_row(row, 5)?,
+        project_id: row
+            .get::<_, Option<String>>(10)?
+            .map(|_| uuid_column(row, 10))
+            .transpose()?,
     })
 }
 
-/// Trimmed, 1 to [`MAX_TITLE_CHARS`] characters, no control characters.
-fn clean_title(title: &str) -> Result<String, AppError> {
-    let title = title.trim();
-    if title.is_empty()
-        || title.chars().count() > MAX_TITLE_CHARS
-        || title.chars().any(char::is_control)
+/// Trimmed, 1 to [`MAX_TITLE_CHARS`] characters, no control characters: a
+/// title or a project name, named `what` in the error.
+pub(super) fn clean_line(text: &str, what: &str) -> Result<String, AppError> {
+    let text = text.trim();
+    if text.is_empty()
+        || text.chars().count() > MAX_TITLE_CHARS
+        || text.chars().any(char::is_control)
     {
         return Err(AppError::InvalidInput(format!(
-            "a title is 1 to {MAX_TITLE_CHARS} characters on one line"
+            "{what} is 1 to {MAX_TITLE_CHARS} characters on one line"
         )));
     }
-    Ok(title.to_owned())
+    Ok(text.to_owned())
+}
+
+fn clean_title(title: &str) -> Result<String, AppError> {
+    clean_line(title, "a title")
 }
 
 pub(super) fn not_found() -> AppError {
@@ -181,27 +211,34 @@ impl Storage {
         title: Option<&str>,
         model: &str,
     ) -> Result<Conversation, AppError> {
-        self.create_conversation_with(title, model, &ConversationSettings::default())
+        self.create_conversation_with(title, model, &ConversationSettings::default(), None)
     }
 
     /// Like [`Self::create_conversation`], saved with `settings` at once so
-    /// no later update can race the first send.
+    /// no later update can race the first send, and in project `project_id`
+    /// when given (`NotFound` if it does not exist).
     pub fn create_conversation_with(
         &self,
         title: Option<&str>,
         model: &str,
         settings: &ConversationSettings,
+        project_id: Option<Uuid>,
     ) -> Result<Conversation, AppError> {
         let title = clean_title(title.unwrap_or(DEFAULT_TITLE))?;
         if !model.is_empty() {
             validate_model(model)?;
         }
         settings.validate()?;
-        let conn = self.conn();
-        let conversation = conn.query_row(
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let project_id = project_id.map(|id| id.to_string());
+        if let Some(project) = &project_id {
+            super::projects::check_exists(&tx, project)?;
+        }
+        let conversation = tx.query_row(
             &format!(
                 "INSERT INTO conversations ({COLUMNS})
-                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7, ?8)
+                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7, ?8, ?9)
                  RETURNING {COLUMNS}"
             ),
             params![
@@ -212,10 +249,12 @@ impl Storage {
                 settings.options.temperature.map(f64::from),
                 settings.options.num_ctx,
                 think_column(&settings.think),
-                settings.charts
+                settings.charts,
+                project_id
             ],
             conversation_row,
         )?;
+        tx.commit()?;
         Ok(conversation)
     }
 
@@ -452,7 +491,7 @@ mod tests {
 
         let first = settings("Answer only in Finnish", Some(0.7), ThinkChoice::On);
         let created = storage
-            .create_conversation_with(Some("t"), "m", &first)
+            .create_conversation_with(Some("t"), "m", &first, None)
             .unwrap();
         assert_eq!(created.settings, first);
         assert_eq!(
@@ -512,7 +551,7 @@ mod tests {
                 Err(AppError::InvalidInput(_))
             ));
             assert!(matches!(
-                storage.create_conversation_with(None, "m", settings),
+                storage.create_conversation_with(None, "m", settings, None),
                 Err(AppError::InvalidInput(_))
             ));
         }

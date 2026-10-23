@@ -61,6 +61,17 @@ mod tests {
     use super::*;
     use crate::storage::key::new_key;
 
+    /// Undoes migration 0008. The index goes first: SQLite refuses to drop
+    /// an indexed column.
+    fn undo_projects(conn: &Connection) {
+        conn.execute_batch(
+            "DROP INDEX conversations_project_idx;
+             ALTER TABLE conversations DROP COLUMN project_id;
+             DROP TABLE projects;",
+        )
+        .unwrap();
+    }
+
     #[test]
     fn open_creates_and_migrates() {
         let dir = tempfile::tempdir().unwrap();
@@ -69,7 +80,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -80,7 +91,13 @@ mod tests {
         tables.sort();
         assert_eq!(
             tables,
-            ["audit_events", "conversations", "messages", "settings"]
+            [
+                "audit_events",
+                "conversations",
+                "messages",
+                "projects",
+                "settings"
+            ]
         );
         let foreign_keys: i64 = conn
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
@@ -174,6 +191,7 @@ mod tests {
         let key = new_key();
         let conn = open(&path, &key).unwrap();
         // Back to what the first release wrote.
+        undo_projects(&conn);
         conn.execute_batch(
             "ALTER TABLE conversations DROP COLUMN system_prompt;
              ALTER TABLE conversations DROP COLUMN temperature;
@@ -213,6 +231,7 @@ mod tests {
         let key = new_key();
         let conn = open(&path, &key).unwrap();
         // Back to what the previous release wrote.
+        undo_projects(&conn);
         conn.execute_batch(
             "ALTER TABLE conversations DROP COLUMN system_prompt;
              ALTER TABLE conversations DROP COLUMN temperature;
@@ -248,6 +267,7 @@ mod tests {
         let key = new_key();
         let conn = open(&path, &key).unwrap();
         // Back to what the previous release wrote.
+        undo_projects(&conn);
         conn.execute_batch(
             "ALTER TABLE conversations DROP COLUMN charts;
              ALTER TABLE messages DROP COLUMN charts;
@@ -282,6 +302,7 @@ mod tests {
         let key = new_key();
         let conn = open(&path, &key).unwrap();
         // Back to what the previous release wrote.
+        undo_projects(&conn);
         conn.execute_batch(
             "ALTER TABLE conversations DROP COLUMN charts;
              ALTER TABLE messages DROP COLUMN charts;
@@ -314,6 +335,7 @@ mod tests {
         let key = new_key();
         let conn = open(&path, &key).unwrap();
         // Back to what the previous release wrote.
+        undo_projects(&conn);
         conn.execute_batch(
             "ALTER TABLE conversations DROP COLUMN charts;
              ALTER TABLE messages DROP COLUMN charts;
@@ -336,6 +358,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (0, None));
+    }
+
+    #[test]
+    fn version_seven_db_leaves_project_id_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        undo_projects(&conn);
+        conn.execute_batch(
+            "PRAGMA user_version = 7;
+             INSERT INTO conversations (id, title, model, created_at, updated_at)
+               VALUES ('c', 't', 'm', 'x', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let project: Option<String> = conn
+            .query_row(
+                "SELECT project_id FROM conversations WHERE id = 'c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(project, None);
+        let projects: i64 = conn
+            .query_row("SELECT count(*) FROM projects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(projects, 0);
     }
 
     #[test]

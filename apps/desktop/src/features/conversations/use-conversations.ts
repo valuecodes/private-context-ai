@@ -30,6 +30,8 @@ type ConversationsAction =
   | { type: "created"; conversation: Conversation }
   | { type: "renamed"; conversation: Conversation }
   | { type: "deleted"; id: string }
+  /** Rust deleted the project and, with it, its chats. */
+  | { type: "projectDeleted"; projectId: string }
   | { type: "touched"; id: string; model: string }
   | { type: "failed"; error: AppError };
 
@@ -98,6 +100,22 @@ const conversationsReducer = (
         (conversation) => conversation.id !== action.id
       ),
       selectedId: state.selectedId === action.id ? null : state.selectedId,
+      error: null,
+    };
+  }
+  if (action.type === "projectDeleted") {
+    const gone = (conversation: Conversation) =>
+      conversation.projectId === action.projectId;
+    const selected = state.conversations.find(
+      ({ id }) => id === state.selectedId
+    );
+    return {
+      ...state,
+      conversations: state.conversations.filter(
+        (conversation) => !gone(conversation)
+      ),
+      selectedId:
+        selected !== undefined && gone(selected) ? null : state.selectedId,
       error: null,
     };
   }
@@ -206,6 +224,11 @@ const useConversations = () => {
       }
     );
 
+  /** Drops the chats of a project Rust has deleted. */
+  const projectDeleted = (projectId: string) => {
+    dispatch({ type: "projectDeleted", projectId });
+  };
+
   /**
    * Fetches a conversation's Markdown ahead of a click on its copy button,
    * so the copy can run inside the click. A failed fetch is left to the
@@ -242,6 +265,7 @@ const useConversations = () => {
     touched,
     rename,
     remove,
+    projectDeleted,
     prepareMarkdown,
     copyMarkdown,
   };

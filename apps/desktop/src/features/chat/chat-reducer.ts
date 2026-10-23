@@ -325,12 +325,18 @@ const chatReducer = (state: ChatState, action: ChatAction): ChatState => {
       return state;
     }
     return {
-      ...createChatState(action.conversationId),
+      ...createChatState(
+        action.conversationId,
+        false,
+        action.projectId ?? null
+      ),
       loading: action.conversationId !== null,
     };
   }
   if (action.type === "openTemporary") {
-    return state.phase === "idle" ? createChatState(null, true) : state;
+    return state.phase === "idle"
+      ? createChatState(null, true, action.projectId ?? null)
+      : state;
   }
   if (
     action.type === "loaded" ||

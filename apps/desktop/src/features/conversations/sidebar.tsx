@@ -3,11 +3,15 @@ import type { KeyboardEvent, SubmitEvent } from "react";
 import { useState } from "react";
 
 import {
+  NewProject,
+  ProjectGroups,
+} from "~/features/conversations/project-groups";
+import {
   filterConversations,
   useConversationSearch,
 } from "~/features/conversations/use-conversation-search";
 import type { ConversationsState } from "~/features/conversations/use-conversations";
-import type { Conversation } from "~/lib/types";
+import type { Conversation, Project } from "~/lib/types";
 
 const COPIED_MS = 1500;
 
@@ -191,11 +195,33 @@ const SidebarItem = ({
   );
 };
 
+/**
+ * The chats under "Conversations": those outside any project, or while
+ * searching every match, in a project or not.
+ */
+const listedConversations = (
+  conversations: Conversation[],
+  query: string,
+  matches: Parameters<typeof filterConversations>[2]
+): Conversation[] => {
+  const searching = query.trim() !== "";
+  return filterConversations(conversations, query, matches).filter(
+    (conversation) => searching || conversation.projectId === null
+  );
+};
+
 type SidebarProps = {
   state: ConversationsState;
+  /** Sorted by name. */
+  projects: Project[];
+  /** The project whose view is open, if any. */
+  selectedProjectId: string | null;
   disabled: boolean;
   version: string;
   onNew: () => void;
+  /** Resolves `false` when the name was refused. */
+  onNewProject: (name: string) => Promise<boolean>;
+  onOpenProject: (id: string) => void;
   onSelect: (id: string) => void;
   /** Resolves `false` when the title was refused, keeping the editor open. */
   onRename: (id: string, title: string) => Promise<boolean>;
@@ -208,9 +234,13 @@ type SidebarProps = {
 
 const Sidebar = ({
   state,
+  projects,
+  selectedProjectId,
   disabled,
   version,
   onNew,
+  onNewProject,
+  onOpenProject,
   onSelect,
   onRename,
   onDelete,
@@ -225,10 +255,42 @@ const Sidebar = ({
   const [query, setQuery] = useState("");
   // `disabled` is true exactly while a saved chat's reply streams.
   const matches = useConversationSearch(query, state.conversations, disabled);
-  const shown = filterConversations(state.conversations, query, matches);
+  const searching = query.trim() !== "";
+  const shown = listedConversations(state.conversations, query, matches);
 
   const modeOf = (id: string): ItemMode =>
     editing?.id === id ? editing.mode : "view";
+
+  const item = (conversation: Conversation) => (
+    <SidebarItem
+      key={conversation.id}
+      conversation={conversation}
+      selected={conversation.id === state.selectedId}
+      disabled={disabled}
+      mode={modeOf(conversation.id)}
+      onSelect={() => {
+        onSelect(conversation.id);
+      }}
+      onMode={(mode) => {
+        setEditing(mode === "view" ? null : { id: conversation.id, mode });
+      }}
+      onRename={(title) => {
+        void onRename(conversation.id, title).then((saved) => {
+          if (saved) {
+            setEditing(null);
+          }
+        });
+      }}
+      onDelete={() => {
+        setEditing(null);
+        onDelete(conversation.id);
+      }}
+      onPrepareCopy={() => {
+        onPrepareCopy(conversation.id);
+      }}
+      onCopy={() => onCopy(conversation.id)}
+    />
+  );
 
   let list = (
     <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
@@ -239,7 +301,7 @@ const Sidebar = ({
     list = (
       <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">Loading…</p>
     );
-  } else if (state.conversations.length > 0 && shown.length === 0) {
+  } else if (searching && shown.length === 0) {
     list = (
       <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
         No matching conversations
@@ -248,38 +310,7 @@ const Sidebar = ({
   } else if (shown.length > 0) {
     list = (
       <ul aria-label="Conversations" className="mt-2 flex flex-col gap-0.5">
-        {shown.map((conversation) => (
-          <SidebarItem
-            key={conversation.id}
-            conversation={conversation}
-            selected={conversation.id === state.selectedId}
-            disabled={disabled}
-            mode={modeOf(conversation.id)}
-            onSelect={() => {
-              onSelect(conversation.id);
-            }}
-            onMode={(mode) => {
-              setEditing(
-                mode === "view" ? null : { id: conversation.id, mode }
-              );
-            }}
-            onRename={(title) => {
-              void onRename(conversation.id, title).then((saved) => {
-                if (saved) {
-                  setEditing(null);
-                }
-              });
-            }}
-            onDelete={() => {
-              setEditing(null);
-              onDelete(conversation.id);
-            }}
-            onPrepareCopy={() => {
-              onPrepareCopy(conversation.id);
-            }}
-            onCopy={() => onCopy(conversation.id)}
-          />
-        ))}
+        {shown.map(item)}
       </ul>
     );
   }
@@ -287,6 +318,23 @@ const Sidebar = ({
   return (
     <aside className="flex w-64 flex-col border-r border-zinc-200 p-4 dark:border-zinc-800">
       <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold">Projects</h2>
+        <NewProject disabled={disabled} onCreate={onNewProject} />
+      </div>
+      {!searching && projects.length > 0 && (
+        <div className="max-h-[40%] overflow-y-auto">
+          <ProjectGroups
+            projects={projects}
+            conversations={state.conversations}
+            selectedId={state.selectedId}
+            selectedProjectId={selectedProjectId}
+            disabled={disabled}
+            onOpenProject={onOpenProject}
+            renderChat={item}
+          />
+        </div>
+      )}
+      <div className="mt-4 flex items-center justify-between">
         <h2 className="text-sm font-semibold">Conversations</h2>
         <button
           type="button"
@@ -329,4 +377,4 @@ const Sidebar = ({
   );
 };
 
-export { Sidebar, SidebarItem };
+export { listedConversations, Sidebar, SidebarItem };

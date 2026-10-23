@@ -9,7 +9,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use super::Storage;
-use super::conversations::{ConversationSettings, NOW, load_settings, uuid_column};
+use super::conversations::{
+    ConversationSettings, NOW, load_project_instructions, load_settings, uuid_column,
+};
 use crate::error::AppError;
 use crate::ollama::chart_tool::{ChartEntry, replay};
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
@@ -300,16 +302,36 @@ pub struct Turn {
     pub charts: bool,
 }
 
-/// The conversation's system prompt as the first message, when not blank.
-pub(crate) fn with_system_prompt(
+/// The one `system` message a chat is sent: its project's instructions
+/// under a fixed heading, then the chat's own prompt. A chat prompt alone is
+/// sent as it is, and nothing when both are blank. Never saved as a row.
+pub(crate) fn system_message(
+    project_instructions: &Redacted,
+    chat_prompt: &Redacted,
+) -> Option<ChatMessage> {
+    let instructions = project_instructions.expose().trim();
+    let prompt = chat_prompt.expose().trim();
+    let text = match (instructions.is_empty(), prompt.is_empty()) {
+        (true, true) => return None,
+        (true, false) => chat_prompt.clone(),
+        (false, true) => Redacted::new(format!("## Project instructions\n\n{instructions}")),
+        (false, false) => Redacted::new(format!(
+            "## Project instructions\n\n{instructions}\n\n## This chat\n\n{prompt}"
+        )),
+    };
+    Some(ChatMessage::new(ChatRole::System, text))
+}
+
+/// The history with the [`system_message`] first, when there is one.
+pub(crate) fn with_system_message(
+    project_instructions: &Redacted,
     settings: &ConversationSettings,
     history: Vec<ChatMessage>,
 ) -> Vec<ChatMessage> {
-    if settings.system_prompt.expose().trim().is_empty() {
-        return history;
-    }
-    let system = ChatMessage::new(ChatRole::System, settings.system_prompt.clone());
-    std::iter::once(system).chain(history).collect()
+    system_message(project_instructions, &settings.system_prompt)
+        .into_iter()
+        .chain(history)
+        .collect()
 }
 
 /// When a turn's new rows are created: never before an existing row, even
@@ -401,6 +423,7 @@ impl Storage {
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
+        let instructions = load_project_instructions(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
 
         // `replaced`: the first row this turn replaces is after (`>`) or at
@@ -445,7 +468,7 @@ impl Storage {
         if let Some(prompt) = input.prompt() {
             history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
         }
-        let history = with_system_prompt(&settings, history);
+        let history = with_system_message(&instructions, &settings, history);
         check(&history, &settings)?;
 
         let assistant_id = Uuid::new_v4();
@@ -930,6 +953,78 @@ mod tests {
         let turn = begin(&storage, id, TurnInput::Regenerate).unwrap();
         assert_eq!(turn.history[0].role, ChatRole::User);
         assert_eq!(turn.options, blank.options());
+    }
+
+    fn system_text(instructions: &str, prompt: &str) -> Option<String> {
+        system_message(&Redacted::new(instructions), &Redacted::new(prompt))
+            .map(|message| message.content.expose().to_owned())
+    }
+
+    #[test]
+    fn instructions_precede_chat_prompt() {
+        assert_eq!(
+            system_text(" Cite sources. ", "Answer in Finnish"),
+            Some(
+                "## Project instructions\n\nCite sources.\n\n## This chat\n\nAnswer in Finnish"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            system_text("Cite sources.", " \n"),
+            Some("## Project instructions\n\nCite sources.".to_owned())
+        );
+    }
+
+    #[test]
+    fn blank_instructions_and_prompt_send_no_system() {
+        assert_eq!(system_text("", ""), None);
+        assert_eq!(system_text(" \n", "\t"), None);
+    }
+
+    #[test]
+    fn chat_prompt_alone_is_unchanged() {
+        assert_eq!(
+            system_text("  ", " Answer in Finnish\n"),
+            Some(" Answer in Finnish\n".to_owned())
+        );
+    }
+
+    #[test]
+    fn begin_turn_in_project_reads_current_instructions() {
+        use crate::storage::conversations::ConversationSettings;
+
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        let settings = ConversationSettings {
+            system_prompt: Redacted::new("Be brief"),
+            ..ConversationSettings::default()
+        };
+        let id = storage
+            .create_conversation_with(None, "m", &settings, Some(project))
+            .unwrap()
+            .id;
+        let system = |storage: &Arc<Storage>, prompt: &str| {
+            let turn = turn(storage, id, prompt);
+            reply(storage, &turn, "ok");
+            turn.history[0].clone()
+        };
+
+        // Blank project instructions: the chat prompt as before.
+        assert_eq!(system(&storage, "One").content.expose(), "Be brief");
+        storage
+            .update_project_instructions(project, &Redacted::new("Cite sources."))
+            .unwrap();
+        let first = system(&storage, "Two");
+        assert_eq!(first.role, ChatRole::System);
+        assert_eq!(
+            first.content.expose(),
+            "## Project instructions\n\nCite sources.\n\n## This chat\n\nBe brief"
+        );
+        assert!(
+            messages(&storage, id)
+                .iter()
+                .all(|message| message.role != ChatRole::System)
+        );
     }
 
     #[test]

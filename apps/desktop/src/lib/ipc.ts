@@ -14,6 +14,7 @@ import type {
   ModelCapabilities,
   ModelInfo,
   OllamaStatus,
+  Project,
   RequestId,
   SendStarted,
   Settings,
@@ -36,13 +37,22 @@ const ollamaListModels = (): Promise<ModelInfo[]> =>
 const ollamaModelCapabilities = (model: string): Promise<ModelCapabilities> =>
   invoke<ModelCapabilities>("ollama_model_capabilities", { model });
 
-/** Saved with `settings` at once, so its first send already uses them. */
+/**
+ * Saved with `settings` at once, so its first send already uses them; in
+ * project `projectId` unless it is `null`.
+ */
 const conversationCreate = (
   title: string | null,
   model: string,
-  settings: ConversationSettings
+  settings: ConversationSettings,
+  projectId: string | null
 ): Promise<Conversation> =>
-  invoke<Conversation>("conversation_create", { title, model, settings });
+  invoke<Conversation>("conversation_create", {
+    title,
+    model,
+    settings,
+    projectId,
+  });
 
 const conversationList = (): Promise<Conversation[]> =>
   invoke<Conversation[]>("conversation_list");
@@ -70,6 +80,28 @@ const conversationUpdateSettings = (
 
 const conversationDelete = (id: string): Promise<void> =>
   invoke<undefined>("conversation_delete", { id });
+
+const projectCreate = (name: string): Promise<Project> =>
+  invoke<Project>("project_create", { name });
+
+const projectList = (): Promise<Project[]> => invoke<Project[]>("project_list");
+
+const projectRename = (id: string, name: string): Promise<Project> =>
+  invoke<Project>("project_rename", { id, name });
+
+/** Applies from the next send of every chat in the project. */
+const projectUpdateInstructions = (
+  id: string,
+  instructions: string
+): Promise<Project> =>
+  invoke<Project>("project_update_instructions", { id, instructions });
+
+/**
+ * Deletes the project, its saved chats and its temporary chats; resolves
+ * with how many saved chats were deleted.
+ */
+const projectDelete = (id: string): Promise<number> =>
+  invoke<number>("project_delete", { id });
 
 /** Rust sends the chat's saved settings: system prompt, options and Think. */
 type ChatTurnArgs = { model: string };
@@ -168,10 +200,13 @@ const chatCompareDiscard = (
 
 /**
  * A temporary chat kept only in Rust's memory, with `settings` from its first
- * send on; resolves with its id.
+ * send on, in project `projectId` unless it is `null`; resolves with its id.
  */
-const tempChatStart = (settings: ConversationSettings): Promise<string> =>
-  invoke<string>("temp_chat_start", { settings });
+const tempChatStart = (
+  settings: ConversationSettings,
+  projectId: string | null
+): Promise<string> =>
+  invoke<string>("temp_chat_start", { settings, projectId });
 
 /** Applies from the temporary chat's next send. */
 const tempChatUpdateSettings = (
@@ -270,6 +305,11 @@ export {
   ollamaListModels,
   ollamaModelCapabilities,
   ollamaStatus,
+  projectCreate,
+  projectDelete,
+  projectList,
+  projectRename,
+  projectUpdateInstructions,
   settingsGet,
   settingsSet,
   storageStatus,

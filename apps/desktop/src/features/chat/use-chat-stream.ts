@@ -108,16 +108,17 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
   const cancelling = useRef<Promise<void>>(Promise.resolve());
 
   /**
-   * Shows a saved conversation, or a new chat for `null`. Leaving a
-   * temporary chat discards it, even while it answers.
+   * Shows a saved conversation, or a new chat for `null`, in project
+   * `projectId` unless it is `null`. Leaving a temporary chat discards it,
+   * even while it answers.
    */
-  const open = (conversationId: string | null) => {
+  const open = (conversationId: string | null, projectId: string | null) => {
     if (state.phase !== "idle" && !state.temporary) {
       return;
     }
     session.discard();
     const opened = sync.open(conversationId);
-    dispatch({ type: "open", conversationId });
+    dispatch({ type: "open", conversationId, projectId });
     if (conversationId === null) {
       return;
     }
@@ -143,14 +144,17 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
     });
   };
 
-  /** Starts an empty temporary chat; its session starts with the first send. */
-  const openTemporary = () => {
+  /**
+   * Starts an empty temporary chat, in project `projectId` unless it is
+   * `null`; its session starts with the first send.
+   */
+  const openTemporary = (projectId: string | null) => {
     if (state.phase !== "idle") {
       return;
     }
     session.discard();
     sync.open(null);
-    dispatch({ type: "openTemporary" });
+    dispatch({ type: "openTemporary", projectId });
   };
 
   /** Clears the view if the deleted conversation is still the open one. */
@@ -232,10 +236,10 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
         reload();
       }
     };
-    let target: SendTarget = { kind: "new" };
+    let target: SendTarget = { kind: "new", projectId: state.projectId };
     if (state.temporary) {
       // The same session every send; a refused start is tried again.
-      current.session = session.id(settings);
+      current.session = session.id(settings, state.projectId);
       target = { kind: "temporary", sessionId: current.session };
     } else if (saved !== null) {
       target = { kind: "saved", conversationId: saved };

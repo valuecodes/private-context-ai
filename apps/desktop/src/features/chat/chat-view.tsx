@@ -66,6 +66,8 @@ type ChatViewProps = {
   setModel: Dispatch<SetStateAction<string>>;
   /** From Settings; used when `model` is empty or not installed. */
   defaultModel: string;
+  /** The open chat's project, if it is in one. */
+  project?: { name: string; onOpen: () => void };
 };
 
 const ChatView = ({
@@ -83,6 +85,7 @@ const ChatView = ({
   model,
   setModel,
   defaultModel,
+  project,
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
@@ -231,6 +234,7 @@ const ChatView = ({
           onChange={onSettings}
           caps={selectedCaps}
           disabled={state.loading}
+          project={project}
         />
         {models.phase === "failed" && (
           <>
@@ -276,6 +280,11 @@ const ChatView = ({
       {empty ? (
         <div className="flex flex-1 flex-col items-center justify-end gap-2 pb-4 text-center">
           <h2 className="text-2xl font-semibold">How can I help?</h2>
+          {project !== undefined && (
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">
+              {`In project ${project.name}`}
+            </p>
+          )}
           {selected === "" && (
             <p className="text-sm text-zinc-500 dark:text-zinc-400">
               Pick a model and send a message to start.

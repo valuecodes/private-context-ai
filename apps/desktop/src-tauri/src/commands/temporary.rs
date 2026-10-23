@@ -18,16 +18,66 @@ use crate::ollama::{ChatCall, ChatThink, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::TurnInput;
+use crate::storage::{Storage, StorageState};
 use crate::temporary::{MemoryRecorder, TempChats};
 
 /// Starts an empty temporary chat and returns its session id. Its settings
-/// come with its first send, like a new saved chat's.
+/// come with its first send, like a new saved chat's. With `project_id` it
+/// is started in that project.
 #[tauri::command]
 pub fn temp_chat_start(
+    storage: State<'_, StorageState>,
     chats: State<'_, Arc<TempChats>>,
     settings: Option<ConversationSettings>,
+    project_id: Option<Uuid>,
 ) -> Result<Uuid, AppError> {
-    chats.start_with(settings.unwrap_or_default())
+    start_temp(&storage, &chats, settings.unwrap_or_default(), project_id)
+}
+
+/// The body of `temp_chat_start`. A chat in a project needs storage, which
+/// holds the instructions, and an existing project.
+pub fn start_temp(
+    storage: &StorageState,
+    chats: &TempChats,
+    settings: ConversationSettings,
+    project_id: Option<Uuid>,
+) -> Result<Uuid, AppError> {
+    let Some(project) = project_id else {
+        return chats.start_with(settings, None);
+    };
+    let storage = storage.get()?;
+    storage.get_project(project)?;
+    let id = chats.start_with(settings, Some(project))?;
+    confirm_project(storage, chats, id, project)
+}
+
+/// Checks project `project` again once session `id` is started in it. A
+/// project deleted in between had its sessions discarded before this one
+/// existed, so this one is removed here instead.
+pub(crate) fn confirm_project(
+    storage: &Storage,
+    chats: &TempChats,
+    id: Uuid,
+    project: Uuid,
+) -> Result<Uuid, AppError> {
+    if let Err(error) = storage.get_project(project) {
+        chats.remove(id);
+        return Err(error);
+    }
+    Ok(id)
+}
+
+/// What the temporary chat's project currently instructs; empty outside a
+/// project, which needs no storage.
+fn session_instructions(
+    storage: &StorageState,
+    chats: &TempChats,
+    session_id: Uuid,
+) -> Result<Redacted, AppError> {
+    match chats.project(session_id)? {
+        None => Ok(Redacted::default()),
+        Some(project) => storage.get()?.project_instructions(project),
+    }
 }
 
 /// Applies from the temporary chat's next send.
@@ -56,6 +106,7 @@ async fn session_think(
 #[tauri::command]
 pub async fn temp_chat_send(
     ollama: State<'_, Arc<Ollama>>,
+    storage: State<'_, StorageState>,
     chats: State<'_, Arc<TempChats>>,
     session_id: Uuid,
     model: String,
@@ -66,6 +117,7 @@ pub async fn temp_chat_send(
     send_temp_turn(
         &ollama,
         &chats,
+        session_instructions(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -81,6 +133,7 @@ pub async fn temp_chat_send(
 #[tauri::command]
 pub async fn temp_chat_regenerate(
     ollama: State<'_, Arc<Ollama>>,
+    storage: State<'_, StorageState>,
     chats: State<'_, Arc<TempChats>>,
     session_id: Uuid,
     model: String,
@@ -90,6 +143,7 @@ pub async fn temp_chat_regenerate(
     send_temp_turn(
         &ollama,
         &chats,
+        session_instructions(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -103,8 +157,13 @@ pub async fn temp_chat_regenerate(
 
 /// Like `chat_edit`, for a temporary chat.
 #[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri injects the three states; the rest is the IPC payload"
+)]
 pub async fn temp_chat_edit(
     ollama: State<'_, Arc<Ollama>>,
+    storage: State<'_, StorageState>,
     chats: State<'_, Arc<TempChats>>,
     session_id: Uuid,
     message_id: Uuid,
@@ -116,6 +175,7 @@ pub async fn temp_chat_edit(
     send_temp_turn(
         &ollama,
         &chats,
+        session_instructions(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -150,10 +210,12 @@ pub async fn discard(ollama: &Ollama, chats: &TempChats, session_id: Uuid) {
 /// is the session id. The slot is taken before the session is read, so a
 /// discard either lands first (`NotFound`) or finds the slot and cancels it.
 /// Nothing changes when the history is refused, and a request that does not
-/// start is taken back.
+/// start is taken back. `instructions` are the chat's project's, read just
+/// before.
 pub fn send_temp_turn<S>(
     ollama: &Arc<Ollama>,
     chats: &Arc<TempChats>,
+    instructions: Redacted,
     request: SendRequest,
     send: S,
 ) -> Result<SendStarted, AppError>
@@ -171,7 +233,7 @@ where
     validate_model(&model)?;
     let admission = ollama.admit(session_id)?;
     ollama.check_connection(think.connection)?;
-    let turn = chats.begin(session_id, &input, |history, settings| {
+    let turn = chats.begin(session_id, &instructions, &input, |history, settings| {
         check_turn(ollama, &model, &think_choice, history, settings)
     })?;
 
@@ -232,6 +294,7 @@ mod tests {
         send_temp_turn(
             ollama,
             chats,
+            Redacted::default(),
             SendRequest {
                 conversation_id: session,
                 model: "llama3.2".into(),

@@ -19,17 +19,20 @@ pub fn storage_status(storage: State<'_, StorageState>) -> StorageStatus {
 }
 
 /// A new chat's settings come with its first send, so no update races it.
+/// With `project_id`, the chat is created in that project.
 #[tauri::command]
 pub async fn conversation_create(
     storage: State<'_, StorageState>,
     title: Option<Redacted>,
     model: String,
     settings: Option<ConversationSettings>,
+    project_id: Option<Uuid>,
 ) -> Result<Conversation, AppError> {
     storage.get()?.create_conversation_with(
         title.as_ref().map(Redacted::expose),
         &model,
         &settings.unwrap_or_default(),
+        project_id,
     )
 }
 
