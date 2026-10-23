@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::AppError;
-use crate::ollama::chart_tool::{ChartEntry, follow_up_history};
+use crate::ollama::chart_tool::{ChartEntry, follow_up_history, without_tools};
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{
     ChatEvent, ChatMessage, ModelCapabilities, ModelInfo, OllamaStatus, ThinkChoice, validate_model,
@@ -252,6 +252,17 @@ pub(crate) fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
     recorder.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The history as `model` is sent it: a model whose capabilities do not list
+/// `tools` gets earlier charted replies as plain text, without tool calls or
+/// tool messages its template may reject.
+pub(crate) fn model_history(history: Vec<ChatMessage>, tools: bool) -> Vec<ChatMessage> {
+    if tools {
+        history
+    } else {
+        without_tools(&history)
+    }
+}
+
 /// What a reply that called `render_chart` continues with: `history`, the
 /// answer so far with its calls, and their results. `history` is only
 /// cloned when tools are offered.
@@ -309,12 +320,13 @@ where
     let sink = recording_sink(Arc::clone(&recorder), send);
     // Only when the user turned Charts on and the model lists `tools`.
     let tools = turn.charts && think.tools;
-    let follow_up = chart_follow_up(&recorder, &turn.history, tools);
+    let history = model_history(turn.history, think.tools);
+    let follow_up = chart_follow_up(&recorder, &history, tools);
     let request_id = ollama.start(
         admission,
         ChatCall {
             model: &model,
-            messages: &turn.history,
+            messages: &history,
             options: turn.options.as_ref(),
             think,
             keep_alive: None,
