@@ -166,6 +166,42 @@ type MemoryEntry = {
   /** A message too long for one summary request was shortened. */
   truncated: boolean;
   state: MemoryState;
+  /** Why automatic memory skips the chat, such as "model not installed". */
+  skipReason: string | null;
+};
+
+/** A chat with replies and no memory entry yet. */
+type UnsavedChat = {
+  conversationId: string;
+  title: string;
+  skipReason: string | null;
+};
+
+/** What `project_memory_list` returns. */
+type MemoryList = {
+  /** Newest first. */
+  entries: MemoryEntry[];
+  /** Oldest first. */
+  unsaved: UnsavedChat[];
+};
+
+/** How many of a project's chats are not in its memory yet. */
+type PendingCount = { projectId: string; pending: number };
+
+type MemoryStatusState =
+  | "queued"
+  | "running"
+  | "saved"
+  | "failed"
+  | "cancelled";
+
+/** The `memory-status` event: ids, a state and a count, never text. */
+type MemoryStatus = {
+  projectId: string;
+  conversationId: string;
+  state: MemoryStatusState;
+  /** The project's pending chats after this change. */
+  pending: number;
 };
 
 /** How one chat of `project_memory_refresh` went. */
@@ -320,9 +356,12 @@ export type {
   ConversationWithMessages,
   LogLevel,
   MemoryEntry,
+  MemoryList,
+  MemoryStatus,
   ModelCapabilities,
   ModelInfo,
   OllamaStatus,
+  PendingCount,
   Project,
   RefreshResult,
   RequestId,
@@ -334,4 +373,5 @@ export type {
   ThinkChoice,
   ThinkLevel,
   ThinkStyle,
+  UnsavedChat,
 };

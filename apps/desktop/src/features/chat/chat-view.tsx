@@ -10,6 +10,8 @@ import { CompareView } from "~/features/chat/compare-view";
 import { Composer } from "~/features/chat/composer";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
+import { MemoryIndicator } from "~/features/projects/memory-indicator";
+import type { ProjectMemoryStatus } from "~/features/projects/use-memory-status";
 import { toAppError } from "~/lib/app-error";
 import { ollamaListModels, ollamaModelCapabilities } from "~/lib/ipc";
 import type {
@@ -69,6 +71,11 @@ type ChatViewProps = {
   defaultModel: string;
   /** The open chat's project, if it is in one. */
   project?: ChatSettingsProps["project"];
+  /** The open saved chat's background memory, shown in the header. */
+  memory?: {
+    state: ProjectMemoryStatus["state"];
+    onOpenActivity: () => void;
+  };
 };
 
 const ChatView = ({
@@ -87,6 +94,7 @@ const ChatView = ({
   setModel,
   defaultModel,
   project,
+  memory,
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
   const [modelsAttempt, setModelsAttempt] = useState(0);
@@ -237,6 +245,12 @@ const ChatView = ({
           disabled={state.loading}
           project={project}
         />
+        {memory !== undefined && (
+          <MemoryIndicator
+            state={memory.state}
+            onOpenActivity={memory.onOpenActivity}
+          />
+        )}
         {models.phase === "failed" && (
           <>
             <span className="text-xs text-red-600 dark:text-red-400">

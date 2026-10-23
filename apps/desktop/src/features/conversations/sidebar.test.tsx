@@ -1,6 +1,7 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
+import type { MemoryStatuses } from "~/features/projects/use-memory-status";
 import type { Conversation, Project } from "~/lib/types";
 
 import { listedConversations, Sidebar, SidebarItem } from "./sidebar";
@@ -42,7 +43,8 @@ const renderSidebar = (
   state: Partial<ConversationsState>,
   disabled = false,
   projects: Project[] = [],
-  selectedProjectId: string | null = null
+  selectedProjectId: string | null = null,
+  memory: MemoryStatuses = {}
 ): string =>
   renderToString(
     <Sidebar
@@ -65,6 +67,8 @@ const renderSidebar = (
       onDelete={noop}
       onPrepareCopy={noop}
       onCopy={() => Promise.resolve(true)}
+      memory={memory}
+      onOpenActivity={noop}
     />
   );
 
@@ -160,6 +164,20 @@ describe("Sidebar", () => {
       error: { kind: "database", message: "disk full" },
     });
     expect(html).toMatch(/role="alert"[^>]*>disk full</);
+  });
+
+  it("shows a project's memory being saved and its pending count", () => {
+    const html = renderSidebar(
+      {},
+      false,
+      [project("p1", "Thesis"), project("p2", "Taxes")],
+      null,
+      { p1: { pending: 2, conversationId: "b", state: "running" } }
+    );
+    expect(html).toMatch(/Thesis.*Saving to project memory…/);
+    expect(html).toContain('aria-label="2 memories pending"');
+    // Only Thesis has a badge.
+    expect(html.match(/aria-label="\d+ memor/g)).toHaveLength(1);
   });
 });
 

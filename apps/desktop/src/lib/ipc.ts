@@ -1,6 +1,7 @@
 // The only module that imports `@tauri-apps/api`. Everything else calls these
 // typed wrappers, so `vi.mock("~/lib/ipc")` is the single test seam.
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import type {
   AppInfo,
@@ -13,9 +14,12 @@ import type {
   ConversationSettings,
   ConversationWithMessages,
   MemoryEntry,
+  MemoryList,
+  MemoryStatus,
   ModelCapabilities,
   ModelInfo,
   OllamaStatus,
+  PendingCount,
   Project,
   RefreshResult,
   RequestId,
@@ -106,13 +110,35 @@ const projectUpdateInstructions = (
 const projectDelete = (id: string): Promise<number> =>
   invoke<number>("project_delete", { id });
 
-/** Only saved for now: nothing writes memory on its own yet. */
+/**
+ * Off stops the project's background summaries; on queues its pending chats
+ * at once.
+ */
 const projectSetAutoMemory = (id: string, on: boolean): Promise<Project> =>
   invoke<Project>("project_set_auto_memory", { id, on });
 
-/** The project's memory entries, newest first. */
-const projectMemoryList = (projectId: string): Promise<MemoryEntry[]> =>
-  invoke<MemoryEntry[]>("project_memory_list", { projectId });
+/** The project's memory entries, and its chats that have none yet. */
+const projectMemoryList = (projectId: string): Promise<MemoryList> =>
+  invoke<MemoryList>("project_memory_list", { projectId });
+
+/** Moves the project's pending chats to the front of the background queue. */
+const projectMemoryCatchUp = (projectId: string): Promise<void> =>
+  invoke<undefined>("project_memory_catch_up", { projectId });
+
+/** Pending chats per project with automatic memory on; zeros left out. */
+const projectMemoryPending = (): Promise<PendingCount[]> =>
+  invoke<PendingCount[]>("project_memory_pending");
+
+/**
+ * Calls `handler` for every `memory-status` event; resolves with the
+ * function that stops listening.
+ */
+const onMemoryStatus = (
+  handler: (status: MemoryStatus) => void
+): Promise<() => void> =>
+  listen<MemoryStatus>("memory-status", (event) => {
+    handler(event.payload);
+  });
 
 /** Replaces a chat's entry; its next summary starts from this text. */
 const projectMemoryUpdate = (
@@ -353,12 +379,15 @@ export {
   ollamaListModels,
   ollamaModelCapabilities,
   ollamaStatus,
+  onMemoryStatus,
   projectContextPreview,
   projectCreate,
   projectDelete,
   projectList,
+  projectMemoryCatchUp,
   projectMemoryDelete,
   projectMemoryList,
+  projectMemoryPending,
   projectMemoryRefresh,
   projectMemoryUpdate,
   projectRename,

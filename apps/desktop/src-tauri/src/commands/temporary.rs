@@ -267,7 +267,9 @@ where
             },
             sink,
             follow_up,
-            move |end| finish_turn(&recorder, end),
+            move |end| {
+                finish_turn(&recorder, end);
+            },
         )
         .inspect_err(|_| {
             // A regenerate or edit was already undone by its recorder,

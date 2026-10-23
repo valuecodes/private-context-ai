@@ -16,12 +16,13 @@ pub mod temporary;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Emitter, Manager, RunEvent};
 use tracing_appender::non_blocking::WorkerGuard;
 
 use crate::audit::{Audit, AuditStatus, NewAuditEvent};
 use crate::commands::settings::SettingsLock;
 use crate::error::AppError;
+use crate::memory::{MemoryScheduler, MemoryStatus, Timings};
 use crate::ollama::Ollama;
 use crate::ollama::client::resolve_base_url;
 use crate::settings::Settings;
@@ -97,6 +98,7 @@ pub fn run() {
             let storage = StorageState::open(&app.path().app_data_dir()?, &KeychainKeySource);
             tracing::info!(status = storage.status().kind(), "storage opened");
             let stored = open_audit(&audit, &storage);
+            let opened = storage.get().ok().map(Arc::clone);
             app.manage(storage);
 
             if let Some(settings) = &stored
@@ -117,8 +119,24 @@ pub fn run() {
             if let Err(err) = &base_url {
                 tracing::warn!(error = %err, "Ollama base URL rejected");
             }
-            app.manage(Arc::new(Ollama::new(base_url, audit)));
+            let ollama = Arc::new(Ollama::new(base_url, audit));
+            app.manage(Arc::clone(&ollama));
             app.manage(Arc::new(TempChats::default()));
+
+            let handle = app.handle().clone();
+            let emit = Arc::new(move |status: MemoryStatus| {
+                if let Err(error) = handle.emit("memory-status", status) {
+                    tracing::warn!(error = %error, "could not emit memory status");
+                }
+            });
+            let scheduler = Arc::new(MemoryScheduler::new(
+                ollama,
+                opened,
+                emit,
+                Timings::default(),
+            ));
+            tauri::async_runtime::spawn(Arc::clone(&scheduler).run());
+            app.manage(scheduler);
 
             tracing::info!(version = env!("CARGO_PKG_VERSION"), "app started");
             Ok(())
@@ -161,6 +179,8 @@ pub fn run() {
             commands::projects::project_memory_update,
             commands::projects::project_memory_delete,
             commands::projects::project_memory_refresh,
+            commands::projects::project_memory_catch_up,
+            commands::projects::project_memory_pending,
             commands::projects::project_context_preview,
             commands::activity::activity_list,
             commands::activity::activity_hosts,

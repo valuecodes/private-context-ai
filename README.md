@@ -73,6 +73,11 @@ What the app guarantees, and what enforces it:
   but cannot rule it out with an LLM. Because the model has no tools, the worst case is
   a worse answer. Every entry can be viewed, edited and deleted, and "View full memory"
   shows the exact message sent. A change that gives the model tools must revisit this.
+  Summaries also run in the background: about a minute after a project chat's last
+  reply, and to catch up on unsaved chats shortly after startup and when a project is
+  opened. They run one at a time, only while no other request is in flight, and any new
+  request cancels them. Each is audited like a manual refresh, and "Automatic memory"
+  turns them off per project ("Refresh memory" still works).
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random
   32-byte key lives in the OS keychain and never reaches the webview. Without a working
   keychain the app stores nothing. Temporary chats are kept only in process memory,

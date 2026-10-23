@@ -11,6 +11,7 @@ import {
   useConversationSearch,
 } from "~/features/conversations/use-conversation-search";
 import type { ConversationsState } from "~/features/conversations/use-conversations";
+import type { MemoryStatuses } from "~/features/projects/use-memory-status";
 import type { Conversation, Project } from "~/lib/types";
 
 const COPIED_MS = 1500;
@@ -230,6 +231,9 @@ type SidebarProps = {
   onPrepareCopy: (id: string) => void;
   /** Copies the conversation as Markdown; resolves `false` on failure. */
   onCopy: (id: string) => Promise<boolean>;
+  /** Each project's background memory, for its indicator. */
+  memory: MemoryStatuses;
+  onOpenActivity: () => void;
 };
 
 const Sidebar = ({
@@ -246,6 +250,8 @@ const Sidebar = ({
   onDelete,
   onPrepareCopy,
   onCopy,
+  memory,
+  onOpenActivity,
 }: SidebarProps) => {
   // At most one conversation is being renamed or confirmed at a time.
   const [editing, setEditing] = useState<{
@@ -329,7 +335,9 @@ const Sidebar = ({
             selectedId={state.selectedId}
             selectedProjectId={selectedProjectId}
             disabled={disabled}
+            memory={memory}
             onOpenProject={onOpenProject}
+            onOpenActivity={onOpenActivity}
             renderChat={item}
           />
         </div>

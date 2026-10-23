@@ -1,9 +1,10 @@
 import { Eye, Pencil, RefreshCw, Trash } from "lucide-react";
 import type { SubmitEvent } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import type { MemoryEntry } from "~/lib/types";
+import type { MemoryEntry, UnsavedChat } from "~/lib/types";
 
+import type { ProjectMemoryStatus } from "./use-memory-status";
 import type { MemoryState } from "./use-project-memory";
 import { useProjectMemory } from "./use-project-memory";
 
@@ -24,7 +25,10 @@ const entryNotes = (entry: MemoryEntry): string[] => {
   if (entry.state === "stale") {
     notes.push("Out of date: the chat was edited. Not sent until refreshed");
   } else if (entry.state === "pending") {
-    notes.push("New messages not in memory yet");
+    notes.push("Not saved yet: new messages are not in memory");
+  }
+  if (entry.skipReason !== null) {
+    notes.push(`Skipped: ${entry.skipReason}`);
   }
   if (entry.rebuilt) {
     notes.push("Rebuilt after the chat was edited");
@@ -37,6 +41,10 @@ const entryNotes = (entry: MemoryEntry): string[] => {
   }
   return notes;
 };
+
+/** What the panel says about a chat that has no entry yet. */
+const unsavedNote = (chat: UnsavedChat): string =>
+  chat.skipReason === null ? "Not saved yet" : `Skipped: ${chat.skipReason}`;
 
 type EntryProps = {
   entry: MemoryEntry;
@@ -254,6 +262,21 @@ const MemoryList = ({
           Nothing remembered yet
         </p>
       )}
+      {state.unsaved.length > 0 && (
+        <ul aria-label="Chats not in memory" className="flex flex-col gap-1">
+          {state.unsaved.map((chat) => (
+            <li
+              key={chat.conversationId}
+              className="flex items-center gap-2 text-sm"
+            >
+              <span className="min-w-0 flex-1 truncate">{chat.title}</span>
+              <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-xs text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                {unsavedNote(chat)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
       {state.entries.length > 0 && (
         <ul aria-label="Memory entries" className="flex flex-col gap-2">
           {state.entries.map((entry) => (
@@ -280,11 +303,29 @@ const MemoryList = ({
 type MemoryPanelProps = Pick<
   MemoryListProps,
   "autoMemory" | "disabled" | "titleOf" | "onAutoMemory" | "onPreview"
-> & { projectId: string };
+> & {
+  projectId: string;
+  /** Background memory of the project: the list reloads when it ends. */
+  status?: ProjectMemoryStatus;
+  onChanged?: () => void;
+};
 
 /** The memory list of one project, loading and changing its entries. */
-const MemoryPanel = ({ projectId, ...props }: MemoryPanelProps) => {
-  const memory = useProjectMemory(projectId);
+const MemoryPanel = ({
+  projectId,
+  status,
+  onChanged,
+  ...props
+}: MemoryPanelProps) => {
+  const memory = useProjectMemory(projectId, onChanged);
+  const { reload } = memory;
+  const ended = status?.state === "saved" || status?.state === "failed";
+  const endedChat = ended ? status.conversationId : null;
+  useEffect(() => {
+    if (endedChat !== null) {
+      void reload();
+    }
+  }, [endedChat, reload]);
   return (
     <MemoryList
       {...props}

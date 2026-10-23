@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
@@ -87,17 +88,38 @@ struct InflightEntry {
     /// The chat a memory summary is written for; a send in that chat
     /// cancels it.
     summarizing: Option<Uuid>,
+    /// A summary the scheduler started on its own; every other admission
+    /// cancels it.
+    background: bool,
     cancel: CancellationToken,
     /// Cancelled by the worker's guard once the entry is gone.
     finished: CancellationToken,
 }
 
-type Inflight = Arc<Mutex<HashMap<Uuid, InflightEntry>>>;
+impl InflightEntry {
+    /// False for a background summary already told to stop: it is winding
+    /// down and no longer holds its slot.
+    fn live(&self) -> bool {
+        !(self.background && self.cancel.is_cancelled())
+    }
+}
+
+#[derive(Debug, Default)]
+struct InflightMap {
+    entries: Mutex<HashMap<Uuid, InflightEntry>>,
+    /// Woken when the last entry goes.
+    emptied: Notify,
+}
+
+type Inflight = Arc<InflightMap>;
 
 fn lock(inflight: &Inflight) -> MutexGuard<'_, HashMap<Uuid, InflightEntry>> {
     // Every critical section is a single map operation, so a panic elsewhere
     // cannot leave the map half-updated.
-    inflight.lock().unwrap_or_else(PoisonError::into_inner)
+    inflight
+        .entries
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Removes the worker's entry on every exit path, including a panic, then
@@ -110,8 +132,15 @@ struct InflightGuard {
 
 impl Drop for InflightGuard {
     fn drop(&mut self) {
-        lock(&self.inflight).remove(&self.request_id);
+        let empty = {
+            let mut entries = lock(&self.inflight);
+            entries.remove(&self.request_id);
+            entries.is_empty()
+        };
         self.finished.cancel();
+        if empty {
+            self.inflight.emptied.notify_waiters();
+        }
     }
 }
 
@@ -577,9 +606,10 @@ impl Ollama {
     /// in total). The slot is visible to `chat_cancel` and
     /// `cancel_conversation` at once; dropping the admission frees it. Under
     /// the same lock, a memory summary of this chat is cancelled, since the
-    /// turn changes what it summarizes.
+    /// turn changes what it summarizes, and so is a background summary of any
+    /// chat.
     pub fn admit(&self, conversation_id: Uuid) -> Result<Admission, AppError> {
-        self.admit_entry(conversation_id, None)
+        self.admit_entry(conversation_id, None, false)
     }
 
     /// Takes the slot a memory summary of `conversation_id` runs on. It is
@@ -591,13 +621,26 @@ impl Ollama {
         project_id: Uuid,
         conversation_id: Uuid,
     ) -> Result<Admission, AppError> {
-        self.admit_entry(project_id, Some(conversation_id))
+        self.admit_entry(project_id, Some(conversation_id), false)
+    }
+
+    /// Like [`Self::admit_summary`], for a summary the scheduler starts on
+    /// its own: `Busy` unless nothing else is in flight, checked under the
+    /// same lock as the insert. Any later admission cancels it, so a user's
+    /// request never waits behind it.
+    pub fn admit_background(
+        &self,
+        project_id: Uuid,
+        conversation_id: Uuid,
+    ) -> Result<Admission, AppError> {
+        self.admit_entry(project_id, Some(conversation_id), true)
     }
 
     fn admit_entry(
         &self,
         conversation_id: Uuid,
         summarizing: Option<Uuid>,
+        background: bool,
     ) -> Result<Admission, AppError> {
         self.connection().get()?;
         let request_id = Uuid::new_v4();
@@ -605,14 +648,25 @@ impl Ollama {
         let finished = CancellationToken::new();
         {
             let mut inflight = lock(&self.inflight);
+            if background {
+                if !inflight.is_empty() {
+                    return Err(AppError::Busy("another request is running".into()));
+                }
+            } else {
+                for entry in inflight.values().filter(|entry| entry.background) {
+                    entry.cancel.cancel();
+                }
+            }
             if let Some(chat) = summarizing
-                && inflight.values().any(|entry| entry.conversation_id == chat)
+                && inflight
+                    .values()
+                    .any(|entry| entry.live() && entry.conversation_id == chat)
             {
                 return Err(AppError::Busy("this chat is answering".into()));
             }
             if inflight
                 .values()
-                .any(|entry| entry.conversation_id == conversation_id)
+                .any(|entry| entry.live() && entry.conversation_id == conversation_id)
             {
                 return Err(AppError::Busy(if summarizing.is_some() {
                     "project memory is already being refreshed".into()
@@ -620,7 +674,7 @@ impl Ollama {
                     "this conversation is still answering".into()
                 }));
             }
-            if inflight.len() >= self.limits.max_inflight {
+            if inflight.values().filter(|entry| entry.live()).count() >= self.limits.max_inflight {
                 return Err(AppError::Busy(format!(
                     "{} requests are already running",
                     self.limits.max_inflight
@@ -638,6 +692,7 @@ impl Ollama {
                 InflightEntry {
                     conversation_id,
                     summarizing,
+                    background,
                     cancel: cancel.clone(),
                     finished: finished.clone(),
                 },
@@ -952,6 +1007,24 @@ impl Ollama {
         for finished in finished {
             let _ = tokio::time::timeout(self.limits.cancel_wait, finished.cancelled()).await;
         }
+    }
+
+    /// Nothing is admitted or streaming.
+    pub fn is_idle(&self) -> bool {
+        lock(&self.inflight).is_empty()
+    }
+
+    /// Completes once nothing is in flight; at once when nothing is.
+    pub async fn wait_idle(&self) {
+        let notified = self.inflight.emptied.notified();
+        tokio::pin!(notified);
+        // Registered before the check, so an entry leaving in between still
+        // wakes it.
+        notified.as_mut().enable();
+        if self.is_idle() {
+            return;
+        }
+        notified.await;
     }
 
     #[cfg(test)]
@@ -1649,6 +1722,80 @@ mod tests {
         for id in ids {
             ollama.chat_cancel(id).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn background_admission_needs_idle() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let (project, chat) = (Uuid::new_v4(), Uuid::new_v4());
+
+        let id = send(&ollama, Uuid::new_v4(), |_| true).unwrap();
+        assert!(matches!(
+            ollama.admit_background(project, chat),
+            Err(AppError::Busy(_))
+        ));
+        ollama.chat_cancel(id).await.unwrap();
+
+        let admission = ollama.admit_background(project, chat).unwrap();
+        // Only one background summary at a time.
+        assert!(matches!(
+            ollama.admit_background(Uuid::new_v4(), Uuid::new_v4()),
+            Err(AppError::Busy(_))
+        ));
+        drop(admission);
+        assert!(ollama.is_idle());
+    }
+
+    #[tokio::test]
+    async fn user_admission_cancels_background() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        let project = Uuid::new_v4();
+        let background = ollama.admit_background(project, Uuid::new_v4()).unwrap();
+
+        // Another chat, and a manual refresh of the same project, both go
+        // first.
+        let chat = ollama.admit(Uuid::new_v4()).unwrap();
+        assert!(background.is_cancelled());
+        let manual = ollama.admit_summary(project, Uuid::new_v4()).unwrap();
+        assert!(!manual.is_cancelled());
+        assert!(!chat.is_cancelled());
+
+        // A winding-down background summary does not count toward the cap.
+        let more: Vec<Admission> = (0..2)
+            .map(|_| ollama.admit(Uuid::new_v4()).unwrap())
+            .collect();
+        assert_eq!(ollama.inflight_len(), 5);
+        assert!(matches!(
+            ollama.admit(Uuid::new_v4()),
+            Err(AppError::Busy(_))
+        ));
+        drop(more);
+    }
+
+    #[tokio::test]
+    async fn wait_idle_wakes_when_emptied() {
+        let fake = fake_ollama(Reply::Silent).await;
+        let (ollama, _) = ollama_at(fake.addr, test_limits());
+        ollama.wait_idle().await;
+
+        let first = ollama.admit(Uuid::new_v4()).unwrap();
+        let second = ollama.admit(Uuid::new_v4()).unwrap();
+        let waiting = tokio::spawn({
+            let ollama = Arc::clone(&ollama);
+            async move { ollama.wait_idle().await }
+        });
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(!waiting.is_finished());
+
+        drop(second);
+        tokio::time::timeout(Duration::from_secs(2), waiting)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     #[tokio::test]
