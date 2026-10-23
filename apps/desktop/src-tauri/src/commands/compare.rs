@@ -15,6 +15,7 @@ use crate::commands::ollama::{
     SharedRecorder, check_turn, finish_turn, lock, recording_sink, spawn_ticker,
 };
 use crate::error::AppError;
+use crate::memory::MemoryScheduler;
 use crate::ollama::chart_tool::without_tools;
 use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
 use crate::ollama::{Admission, ChatCall, ConnectionId, Ollama};
@@ -114,14 +115,17 @@ pub async fn chat_compare(
 }
 
 /// Keeps the complete candidate `message_id` and drops the others; the chat
-/// continues with its model.
+/// continues with its model. The kept reply counts as a completed one for
+/// automatic memory.
 #[tauri::command]
 pub fn chat_compare_pick(
     storage: State<'_, StorageState>,
+    scheduler: State<'_, Arc<MemoryScheduler>>,
     conversation_id: Uuid,
     message_id: Uuid,
 ) -> Result<(), AppError> {
     storage.get()?.compare_pick(conversation_id, message_id)?;
+    scheduler.reply_completed(conversation_id);
     Ok(())
 }
 
