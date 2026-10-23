@@ -243,7 +243,8 @@ fn position_row(row: &Row<'_>) -> rusqlite::Result<Position> {
     })
 }
 
-/// Every `complete` message plus the visible part of a `cancelled` reply;
+/// Every `complete` message plus the visible part (text or charts) of a
+/// `cancelled` reply;
 /// failed and unfinished replies are left out, and so is an unpicked
 /// comparison. Role and content only, with a charted reply replayed as its
 /// calls and their results: thinking is never sent back to the model. With
@@ -255,7 +256,8 @@ pub(super) fn load_history(
 ) -> rusqlite::Result<Vec<ChatMessage>> {
     let mut sql = format!(
         "SELECT role, content, charts FROM messages
-         WHERE {SETTLED} AND (status = 'complete' OR (status = 'cancelled' AND content <> ''))"
+         WHERE {SETTLED} AND (status = 'complete'
+               OR (status = 'cancelled' AND (content <> '' OR charts IS NOT NULL)))"
     );
     let mut args: Vec<Value> = vec![conversation_id.to_owned().into()];
     if let Some((position, op)) = until {
@@ -1419,6 +1421,28 @@ mod tests {
         let calls = next.history[1].tool_calls.as_ref().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(next.history[2].tool_name, Some("render_chart"));
+    }
+
+    #[test]
+    fn stopped_chart_only_reply_stays_in_history() {
+        let (storage, _dir) = temp_storage();
+        let id = conversation(&storage);
+        let first = turn(&storage, id, "Chart it");
+        let mut recorder = recorder(&storage, &first);
+        // Stopped during the follow-up, before any commentary.
+        recorder.push_chart(&bar_chart(0)).unwrap();
+        recorder.finish(MessageStatus::Cancelled).unwrap();
+
+        let next = turn(&storage, id, "Again");
+        assert_eq!(
+            texts(&next.history),
+            [
+                (ChatRole::User, "Chart it"),
+                (ChatRole::Assistant, ""),
+                (ChatRole::Tool, "The chart was shown to the user."),
+                (ChatRole::User, "Again"),
+            ]
+        );
     }
 
     #[test]
