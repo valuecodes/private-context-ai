@@ -126,7 +126,8 @@ const Composer = ({
           // No outline of its own: the form's ring shows the focus.
           className="max-h-48 resize-none overflow-y-auto bg-transparent px-2 py-2 text-sm outline-none"
         />
-        <div className="flex items-center gap-1">
+        {/* Wraps in a narrow window; Send stays at the right end. */}
+        <div className="flex flex-wrap items-center gap-1">
           {toolbar}
           {compare !== undefined && (
             <button
