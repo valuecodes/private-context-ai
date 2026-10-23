@@ -41,8 +41,14 @@ What the app guarantees, and what enforces it:
 
 - **The webview has no network.** The production CSP is `default-src 'none'` with
   `connect-src` limited to Tauri IPC. The app uses no Tauri plugins (no `http`, `fs`,
-  `shell`, `opener` or `dialog`), grants the window three core permissions only
+  `shell`, `opener` or `dialog`), grants the window two core permissions only
   (`capabilities/main.json`), and turns off `withGlobalTauri` and the asset protocol.
+  The CSP binds the page, not the browser engine that renders it. On Windows the
+  WebView2 runtime is started with switches (`additionalBrowserArgs` in
+  `tauri.conf.json`) that turn off its crash reporting, component updates, metrics
+  upload and background networking, on top of Tauri's own SmartScreen switch. Those
+  switches are Chromium flags Microsoft does not guarantee, so they reduce the runtime's
+  own traffic; they are not a promise that it stops (see Threat notes).
 - **Rust reaches only Ollama on loopback.** The base URL, including one saved in
   Settings, must be plain `http` on `127.0.0.0/8`, `::1` or `localhost`, with no
   credentials, path, query or fragment. The HTTP client ignores system proxies, follows
@@ -91,9 +97,33 @@ What this does **not** protect against:
 - **Ollama itself.** Ollama is a separate program with its own network access: it
   downloads models (`ollama pull`), may check for updates, and listens on loopback,
   where any local program can talk to it. The app's guarantees end at Ollama's port.
+  Everything you send is in Ollama's memory, and with `OLLAMA_DEBUG=1` Ollama writes
+  full prompts to its own `server.log`.
 - **The logged-in user's session.** Malware running as you can read the keychain entry
   and so the database. Encryption at rest protects a copied disk or a lost laptop that
   is powered off, not a compromised session.
+- **Your OS account protects the key.** The keychain entry is sealed with your login
+  (DPAPI on Windows). Someone with the disk and your account password, or a weak one
+  they can crack offline, can unseal the key and open the database. A strong password or
+  full-disk encryption (BitLocker, FileVault) is what makes a lost laptop safe. With a
+  roaming profile, both the encrypted database and its key roam with it.
+- **The clipboard.** Copy as Markdown and the copy buttons put plain text on the
+  clipboard. Windows Clipboard history keeps it (Win+V) and "Sync across your devices"
+  uploads it; clipboard managers keep it too. A webview cannot mark clipboard text as
+  excluded from those, so turn them off before copying sensitive chats.
+- **Memory on disk.** Chat text and key material in the app's process memory can end up
+  in the page file, the hibernation file or a crash dump (Windows Error Reporting local
+  dumps, when an administrator has turned them on). Full-disk encryption covers them.
+- **The browser engine's own traffic.** The WebView2 runtime (Edge) and WebKitGTK may
+  fetch components and report diagnostics on their own, outside the page and its CSP.
+  That traffic carries no chat text in normal operation, but a renderer crash report
+  would include page memory. The Windows switches above reduce it; Windows diagnostic
+  data settings and Microsoft's own policy decide the rest.
+- **The screen.** Screenshots, screen recording, remote desktop and Windows Recall see
+  whatever the window shows.
+- **Project memory, on purpose.** With Auto memory on, a summary of each chat in a
+  project is sent to the project's other chats, temporary ones included. Keep a chat out
+  of a project, or turn Auto memory off, when its summary must not travel.
 - **What the model says.** Replies can be wrong, made up or harmful. The model cannot
   act, but you can be misled.
 - **Debug builds.** A development build reads `PRIVATE_CONTEXT_OLLAMA_URL` to override
