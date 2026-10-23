@@ -13,6 +13,12 @@ use crate::error::AppError;
 /// safe only because the single-instance lock is already held.
 pub fn open(path: &Path, hex_key: &str) -> Result<Connection, AppError> {
     let mut conn = Connection::open(path)?;
+    // SQLCipher logs at WARN to stderr by default. On Windows, writing a log
+    // line allocates through SQLite, so with memory security on, a failed
+    // VirtualLock logs, which allocates, which fails again, until the stack
+    // overflows. NONE returns before formatting. The level is process-wide, so
+    // SQLCipher's own warnings and errors are suppressed for debugging too.
+    conn.pragma_update(None, "cipher_log_level", "NONE")?;
     {
         // `x'…'` hands SQLCipher the key itself, so its PBKDF2 step is skipped.
         let pragma = Zeroizing::new(format!("PRAGMA key = \"x'{hex_key}'\";"));
@@ -103,6 +109,17 @@ mod tests {
             .pragma_query_value(None, "foreign_keys", |row| row.get(0))
             .unwrap();
         assert_eq!(foreign_keys, 1);
+    }
+
+    #[test]
+    fn open_turns_sqlcipher_logging_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open(&dir.path().join("t.db"), &new_key()).unwrap();
+
+        let level: String = conn
+            .pragma_query_value(None, "cipher_log_level", |row| row.get(0))
+            .unwrap();
+        assert_eq!(level, "NONE");
     }
 
     #[test]
