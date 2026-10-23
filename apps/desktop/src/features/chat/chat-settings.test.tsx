@@ -31,6 +31,21 @@ const panel = (
   );
 
 describe("ChatSettingsPanel", () => {
+  it("says project instructions apply only in a project chat", () => {
+    expect(panel(DEFAULT_SETTINGS)).not.toContain("Project instructions apply");
+    const html = renderToString(
+      <ChatSettingsPanel
+        settings={DEFAULT_SETTINGS}
+        onChange={vi.fn()}
+        caps={undefined}
+        disabled={false}
+        project={{ name: "Thesis", onOpen: vi.fn() }}
+      />
+    );
+    expect(html).toContain("Project instructions apply");
+    expect(html).toMatch(/<button type="button"[^>]*>Open Thesis</);
+  });
+
   it("shows the defaults when nothing is set", () => {
     const html = panel(DEFAULT_SETTINGS);
     expect(html).toContain("System prompt");

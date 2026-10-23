@@ -41,10 +41,13 @@ type ChatCallbacks = {
   onStarted: (conversationId: string, model: string) => void;
 };
 
-/** Where a send goes. A temporary chat is never saved, so it has no callbacks. */
+/**
+ * Where a send goes: a new chat is created in `projectId` unless it is `null`.
+ * A temporary chat is never saved, so it has no callbacks.
+ */
 type SendTarget =
   | { kind: "saved"; conversationId: string }
-  | { kind: "new" }
+  | { kind: "new"; projectId: string | null }
   | { kind: "temporary"; sessionId: Promise<string> };
 
 /**
@@ -122,7 +125,8 @@ const startRequest = (
       : conversationCreate(
           titleFromPrompt(input.kind === "regenerate" ? "" : input.prompt),
           model,
-          settings
+          settings,
+          target.projectId
         ).then((created) => {
           onCreated(created);
           return created.id;
@@ -139,10 +143,13 @@ const startRequest = (
 
 type TempSession = {
   /**
-   * The session id, starting the session with `settings` on the first call;
-   * later calls ignore them.
+   * The session id, starting the session with `settings` in project
+   * `projectId` on the first call; later calls ignore them.
    */
-  id: (settings: ConversationSettings) => Promise<string>;
+  id: (
+    settings: ConversationSettings,
+    projectId: string | null
+  ) => Promise<string>;
   discard: () => void;
 };
 
@@ -154,9 +161,9 @@ type TempSession = {
 const tempSession = (): TempSession => {
   let current: Promise<string> | null = null;
   return {
-    id: (settings) => {
+    id: (settings, projectId) => {
       if (current === null) {
-        const started = tempChatStart(settings);
+        const started = tempChatStart(settings, projectId);
         current = started;
         // A refused start is not kept, so the next send tries again.
         started.catch(() => {

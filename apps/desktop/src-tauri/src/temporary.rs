@@ -12,7 +12,7 @@ use crate::ollama::chart_tool::{ChartEntry, replay};
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
-use crate::storage::messages::{MessageStatus, ReplyStats, TurnInput, with_system_prompt};
+use crate::storage::messages::{MessageStatus, ReplyStats, TurnInput, with_system_message};
 
 /// How many temporary chats may exist at once. The UI keeps one; the rest
 /// bound what a reloaded webview can leave behind.
@@ -50,6 +50,9 @@ struct Session {
     messages: Vec<TempMessage>,
     revision: Option<Revision>,
     settings: ConversationSettings,
+    /// The project it was started in. Only the id is kept: its instructions
+    /// are read from storage at every turn, so edits apply at once.
+    project_id: Option<Uuid>,
 }
 
 /// What [`TempChats::begin`] hands the send.
@@ -110,11 +113,16 @@ impl TempChats {
 
     /// A new, empty chat. `Busy` once `max_sessions` exist.
     pub fn start(&self) -> Result<Uuid, AppError> {
-        self.start_with(ConversationSettings::default())
+        self.start_with(ConversationSettings::default(), None)
     }
 
-    /// Like [`Self::start`], with `settings` from the first send on.
-    pub fn start_with(&self, settings: ConversationSettings) -> Result<Uuid, AppError> {
+    /// Like [`Self::start`], with `settings` from the first send on, in
+    /// project `project_id` when given.
+    pub fn start_with(
+        &self,
+        settings: ConversationSettings,
+        project_id: Option<Uuid>,
+    ) -> Result<Uuid, AppError> {
         settings.validate()?;
         let mut sessions = self.sessions();
         if sessions.len() >= self.max_sessions {
@@ -128,10 +136,34 @@ impl TempChats {
             id,
             Session {
                 settings,
+                project_id,
                 ..Session::default()
             },
         );
         Ok(id)
+    }
+
+    /// The project the chat was started in, which never changes.
+    pub fn project(&self, id: Uuid) -> Result<Option<Uuid>, AppError> {
+        self.sessions()
+            .get(&id)
+            .map(|session| session.project_id)
+            .ok_or_else(not_found)
+    }
+
+    /// Forgets every chat started in project `project_id` and returns their
+    /// ids, so their replies can be cancelled.
+    pub fn discard_project(&self, project_id: Uuid) -> Vec<Uuid> {
+        let mut sessions = self.sessions();
+        let ids: Vec<Uuid> = sessions
+            .iter()
+            .filter(|(_, session)| session.project_id == Some(project_id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ids {
+            sessions.remove(id);
+        }
+        ids
     }
 
     pub fn settings(&self, id: Uuid) -> Result<ConversationSettings, AppError> {
@@ -160,13 +192,15 @@ impl TempChats {
     }
 
     /// Under one lock, so a discard or settings change cannot land halfway:
-    /// the history `input` sends with the chat's settings, which `check` may
-    /// refuse (size limits, settings changed) before anything changes. Then
-    /// the prompt is kept, and a regenerate or edit sets aside the messages
-    /// it replaces until its reply ends ([`MemoryRecorder`]).
+    /// the history `input` sends with the chat's settings and its project's
+    /// `project_instructions` (read by the caller just before), which
+    /// `check` may refuse (size limits, settings changed) before anything
+    /// changes. Then the prompt is kept, and a regenerate or edit sets aside
+    /// the messages it replaces until its reply ends ([`MemoryRecorder`]).
     pub fn begin(
         &self,
         id: Uuid,
+        project_instructions: &Redacted,
         input: &TurnInput,
         check: impl FnOnce(&[ChatMessage], &ConversationSettings) -> Result<(), AppError>,
     ) -> Result<TempTurn, AppError> {
@@ -201,7 +235,7 @@ impl TempChats {
             .chain(&prompt)
             .flat_map(TempMessage::history)
             .collect();
-        let history = with_system_prompt(&session.settings, history);
+        let history = with_system_message(project_instructions, &session.settings, history);
         check(&history, &session.settings)?;
         let options = session.settings.options();
         let charts = session.settings.charts;
@@ -370,9 +404,16 @@ mod tests {
         TurnInput::New(Redacted::new(prompt))
     }
 
+    /// The instructions of a chat outside any project.
+    fn no_project() -> Redacted {
+        Redacted::default()
+    }
+
     /// Runs one turn of `input` that ends with `reply`, or fails when `None`.
     fn run(chats: &Arc<TempChats>, id: Uuid, input: &TurnInput, reply: Option<&str>) {
-        chats.begin(id, input, |_, _| Ok(())).unwrap();
+        chats
+            .begin(id, &no_project(), input, |_, _| Ok(()))
+            .unwrap();
         let revision = !matches!(input, TurnInput::New(_));
         let mut recorder = MemoryRecorder::new(chats, id, Uuid::new_v4(), revision);
         match reply {
@@ -400,7 +441,7 @@ mod tests {
         let ids = chats.ids(id);
 
         let turn = chats
-            .begin(id, &TurnInput::Regenerate, |_, _| Ok(()))
+            .begin(id, &no_project(), &TurnInput::Regenerate, |_, _| Ok(()))
             .unwrap();
         assert_eq!(turn.user_id, ids[2]);
         assert_eq!(
@@ -440,7 +481,9 @@ mod tests {
         run(&chats, id, &edit, None);
         assert_eq!(chats.history(id).unwrap(), before);
         assert_eq!(chats.ids(id), ids);
-        chats.begin(id, &edit, |_, _| Ok(())).unwrap();
+        chats
+            .begin(id, &no_project(), &edit, |_, _| Ok(()))
+            .unwrap();
         let mut stopped = MemoryRecorder::new(&chats, id, Uuid::new_v4(), true);
         stopped.push(&Redacted::new("Half")).unwrap();
         stopped.finish(MessageStatus::Cancelled).unwrap();
@@ -468,13 +511,13 @@ mod tests {
                 prompt: Redacted::new("x"),
             };
             assert!(matches!(
-                chats.begin(id, &edit, |_, _| Ok(())),
+                chats.begin(id, &no_project(), &edit, |_, _| Ok(())),
                 Err(AppError::NotFound(_))
             ));
         }
         let empty = chats.start().unwrap();
         assert!(matches!(
-            chats.begin(empty, &TurnInput::Regenerate, |_, _| Ok(())),
+            chats.begin(empty, &no_project(), &TurnInput::Regenerate, |_, _| Ok(())),
             Err(AppError::InvalidInput(_))
         ));
     }
@@ -486,12 +529,12 @@ mod tests {
             system_prompt: Redacted::new("Answer only in Finnish"),
             ..ConversationSettings::default()
         };
-        let id = chats.start_with(finnish.clone()).unwrap();
+        let id = chats.start_with(finnish.clone(), None).unwrap();
         assert_eq!(chats.settings(id).unwrap(), finnish);
 
         let mut seen = None;
         let turn = chats
-            .begin(id, &new("Hi"), |_, settings| {
+            .begin(id, &no_project(), &new("Hi"), |_, settings| {
                 seen = Some(settings.clone());
                 Ok(())
             })
@@ -517,7 +560,9 @@ mod tests {
         };
         chats.update_settings(id, warm.clone()).unwrap();
         chats.rollback(id);
-        let turn = chats.begin(id, &new("Again"), |_, _| Ok(())).unwrap();
+        let turn = chats
+            .begin(id, &no_project(), &new("Again"), |_, _| Ok(()))
+            .unwrap();
         assert_eq!(texts(&turn.history), [(ChatRole::User, "Again")]);
         assert_eq!(turn.options, warm.options());
 
@@ -533,7 +578,7 @@ mod tests {
             Err(AppError::InvalidInput(_))
         ));
         assert!(matches!(
-            chats.start_with(bad),
+            chats.start_with(bad, None),
             Err(AppError::InvalidInput(_))
         ));
         assert_eq!(chats.settings(id).unwrap(), warm);
@@ -546,6 +591,65 @@ mod tests {
             chats.settings(unknown),
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn temp_begin_puts_project_instructions_first() {
+        let chats = TempChats::default();
+        let project = Uuid::new_v4();
+        let finnish = ConversationSettings {
+            system_prompt: Redacted::new("Answer only in Finnish"),
+            ..ConversationSettings::default()
+        };
+        let id = chats.start_with(finnish, Some(project)).unwrap();
+        assert_eq!(chats.project(id).unwrap(), Some(project));
+
+        let turn = chats
+            .begin(id, &Redacted::new("Cite sources."), &new("Hi"), |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            texts(&turn.history),
+            [
+                (
+                    ChatRole::System,
+                    "## Project instructions\n\nCite sources.\n\n## This chat\n\nAnswer only in Finnish"
+                ),
+                (ChatRole::User, "Hi")
+            ]
+        );
+        assert_eq!(texts(&chats.history(id).unwrap()), [(ChatRole::User, "Hi")]);
+        assert!(matches!(
+            chats.project(Uuid::new_v4()),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn discard_project_removes_only_its_sessions() {
+        let chats = TempChats::default();
+        let project = Uuid::new_v4();
+        let first = chats
+            .start_with(ConversationSettings::default(), Some(project))
+            .unwrap();
+        let second = chats
+            .start_with(ConversationSettings::default(), Some(project))
+            .unwrap();
+        let other = chats
+            .start_with(ConversationSettings::default(), Some(Uuid::new_v4()))
+            .unwrap();
+        let loose = chats.start().unwrap();
+
+        let mut discarded = chats.discard_project(project);
+        discarded.sort();
+        let mut expected = vec![first, second];
+        expected.sort();
+        assert_eq!(discarded, expected);
+        assert!(chats.history(first).is_none());
+        assert!(chats.history(other).is_some());
+        assert!(chats.history(loose).is_some());
+        assert!(chats.discard_project(project).is_empty());
     }
 
     #[test]
@@ -565,7 +669,9 @@ mod tests {
         let id = chats.start().unwrap();
 
         let err = chats
-            .begin(id, &new("Hi"), |_, _| Err(AppError::TooLarge("big".into())))
+            .begin(id, &no_project(), &new("Hi"), |_, _| {
+                Err(AppError::TooLarge("big".into()))
+            })
             .unwrap_err();
 
         assert!(matches!(err, AppError::TooLarge(_)));
@@ -580,7 +686,9 @@ mod tests {
         };
         assert!(
             chats
-                .begin(id, &edit, |_, _| Err(AppError::TooLarge("big".into())))
+                .begin(id, &no_project(), &edit, |_, _| Err(AppError::TooLarge(
+                    "big".into()
+                )))
                 .is_err()
         );
         assert_eq!(chats.history(id).unwrap(), before);
@@ -590,7 +698,7 @@ mod tests {
     fn begin_unknown_chat_is_not_found() {
         let chats = TempChats::default();
         assert!(matches!(
-            chats.begin(Uuid::new_v4(), &new("Hi"), |_, _| Ok(())),
+            chats.begin(Uuid::new_v4(), &no_project(), &new("Hi"), |_, _| Ok(())),
             Err(AppError::NotFound(_))
         ));
     }
@@ -599,7 +707,9 @@ mod tests {
     fn rollback_takes_back_the_prompt() {
         let chats = TempChats::default();
         let id = chats.start().unwrap();
-        chats.begin(id, &new("Hi"), |_, _| Ok(())).unwrap();
+        chats
+            .begin(id, &no_project(), &new("Hi"), |_, _| Ok(()))
+            .unwrap();
 
         chats.rollback(id);
 
@@ -611,7 +721,9 @@ mod tests {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
         let turn = |prompt: &str, reply: &str, status: Option<MessageStatus>| {
-            chats.begin(id, &new(prompt), |_, _| Ok(())).unwrap();
+            chats
+                .begin(id, &no_project(), &new(prompt), |_, _| Ok(()))
+                .unwrap();
             let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
             recorder.push_thinking(&Redacted::new("hmm")).unwrap();
             recorder.push(&Redacted::new(reply)).unwrap();
@@ -647,12 +759,17 @@ mod tests {
 
         let chats = Arc::new(TempChats::default());
         let id = chats
-            .start_with(ConversationSettings {
-                charts: true,
-                ..ConversationSettings::default()
-            })
+            .start_with(
+                ConversationSettings {
+                    charts: true,
+                    ..ConversationSettings::default()
+                },
+                None,
+            )
             .unwrap();
-        let turn = chats.begin(id, &new("Chart it"), |_, _| Ok(())).unwrap();
+        let turn = chats
+            .begin(id, &no_project(), &new("Chart it"), |_, _| Ok(()))
+            .unwrap();
         assert!(turn.charts);
         let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
         recorder.push(&Redacted::new("Here:")).unwrap();
@@ -672,7 +789,9 @@ mod tests {
         recorder.push(&Redacted::new(" Done.")).unwrap();
         recorder.complete(ReplyStats::default()).unwrap();
 
-        let next = chats.begin(id, &new("Thanks"), |_, _| Ok(())).unwrap();
+        let next = chats
+            .begin(id, &no_project(), &new("Thanks"), |_, _| Ok(()))
+            .unwrap();
         assert_eq!(
             texts(&next.history),
             [
@@ -697,7 +816,7 @@ mod tests {
             .unwrap();
         stopped.finish(MessageStatus::Cancelled).unwrap();
         let roles: Vec<ChatRole> = chats
-            .begin(id, &new("Once more"), |_, _| Ok(()))
+            .begin(id, &no_project(), &new("Once more"), |_, _| Ok(()))
             .unwrap()
             .history
             .iter()
@@ -713,7 +832,9 @@ mod tests {
     fn discard_then_late_finish_is_noop() {
         let chats = Arc::new(TempChats::default());
         let id = chats.start().unwrap();
-        chats.begin(id, &new("Hi"), |_, _| Ok(())).unwrap();
+        chats
+            .begin(id, &no_project(), &new("Hi"), |_, _| Ok(()))
+            .unwrap();
         let mut recorder = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
         recorder.push(&Redacted::new("Late")).unwrap();
 

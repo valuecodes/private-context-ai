@@ -60,24 +60,51 @@ describe("new chat requests", () => {
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",
       settings: finnish,
+      projectId: null,
     };
     vi.mocked(conversationCreate).mockResolvedValue(created);
     const onEvent = vi.fn();
     const callbacks = handlers();
 
     await startRequest(
-      { kind: "new" },
+      { kind: "new", projectId: null },
       { ...request, settings: finnish },
       onEvent,
       callbacks
     );
 
-    expect(conversationCreate).toHaveBeenCalledWith("Hi", "m", finnish);
+    expect(conversationCreate).toHaveBeenCalledWith("Hi", "m", finnish, null);
     expect(chatSend).toHaveBeenCalledWith(
       { conversationId: "c1", model: "m", prompt: "Hi" },
       onEvent
     );
     expect(callbacks.onCreated).toHaveBeenCalledWith(created);
+  });
+
+  it("creates a new chat in its project", async () => {
+    vi.mocked(conversationCreate).mockResolvedValue({
+      id: "c2",
+      title: "Hi",
+      model: "m",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      settings: DEFAULT_SETTINGS,
+      projectId: "p1",
+    });
+
+    await startRequest(
+      { kind: "new", projectId: "p1" },
+      request,
+      vi.fn(),
+      handlers()
+    );
+
+    expect(conversationCreate).toHaveBeenCalledWith(
+      "Hi",
+      "m",
+      DEFAULT_SETTINGS,
+      "p1"
+    );
   });
 });
 
@@ -210,10 +237,18 @@ describe("temporary chat requests", () => {
     vi.mocked(tempChatStart).mockResolvedValue("t1");
     const session = tempSession();
 
-    expect(await session.id(finnish)).toBe("t1");
-    expect(await session.id(DEFAULT_SETTINGS)).toBe("t1");
+    expect(await session.id(finnish, null)).toBe("t1");
+    expect(await session.id(DEFAULT_SETTINGS, null)).toBe("t1");
     expect(tempChatStart).toHaveBeenCalledTimes(1);
-    expect(tempChatStart).toHaveBeenCalledWith(finnish);
+    expect(tempChatStart).toHaveBeenCalledWith(finnish, null);
+  });
+
+  it("starts a session in its project", async () => {
+    vi.mocked(tempChatStart).mockResolvedValue("t1");
+
+    await tempSession().id(DEFAULT_SETTINGS, "p1");
+
+    expect(tempChatStart).toHaveBeenCalledWith(DEFAULT_SETTINGS, "p1");
   });
 
   it("discards a session still being created, then starts a fresh one", async () => {
@@ -226,10 +261,10 @@ describe("temporary chat requests", () => {
       )
       .mockResolvedValueOnce("t2");
     const session = tempSession();
-    void session.id(DEFAULT_SETTINGS);
+    void session.id(DEFAULT_SETTINGS, null);
 
     session.discard();
-    const next = session.id(DEFAULT_SETTINGS);
+    const next = session.id(DEFAULT_SETTINGS, null);
     resolveFirst("t1");
 
     expect(await next).toBe("t2");
@@ -244,9 +279,9 @@ describe("temporary chat requests", () => {
       .mockResolvedValueOnce("t2");
     const session = tempSession();
 
-    await expect(session.id(DEFAULT_SETTINGS)).rejects.toThrow("busy");
-    expect(await session.id(finnish)).toBe("t2");
-    expect(tempChatStart).toHaveBeenLastCalledWith(finnish);
+    await expect(session.id(DEFAULT_SETTINGS, null)).rejects.toThrow("busy");
+    expect(await session.id(finnish, null)).toBe("t2");
+    expect(tempChatStart).toHaveBeenLastCalledWith(finnish, null);
   });
 
   it("does nothing on discard before any send", () => {

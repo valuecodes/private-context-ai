@@ -23,6 +23,8 @@ type ChatSettingsProps = {
   caps: ModelCapabilities | undefined;
   /** While the chat loads, its saved settings are not known yet. */
   disabled: boolean;
+  /** The chat's project, whose instructions come before the system prompt. */
+  project?: { name: string; onOpen: () => void };
 };
 
 /**
@@ -34,6 +36,7 @@ const ChatSettingsPanel = ({
   onChange,
   caps,
   disabled,
+  project,
 }: ChatSettingsProps) => {
   const { temperature, num_ctx: numCtx } = settings.options;
   // A size saved outside the list still shows as selected.
@@ -48,6 +51,18 @@ const ChatSettingsPanel = ({
 
   return (
     <fieldset disabled={disabled} className="flex flex-col gap-4 text-sm">
+      {project !== undefined && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Project instructions apply, before this chat&apos;s system prompt.{" "}
+          <button
+            type="button"
+            onClick={project.onOpen}
+            className="underline hover:text-zinc-900 dark:hover:text-zinc-100"
+          >
+            {`Open ${project.name}`}
+          </button>
+        </p>
+      )}
       <div className="flex flex-col gap-1">
         <label htmlFor="system-prompt" className="font-medium">
           System prompt

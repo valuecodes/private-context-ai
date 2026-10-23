@@ -1,14 +1,18 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
-import type { Conversation } from "~/lib/types";
+import type { Conversation, Project } from "~/lib/types";
 
-import { Sidebar, SidebarItem } from "./sidebar";
+import { listedConversations, Sidebar, SidebarItem } from "./sidebar";
 import type { ConversationsState } from "./use-conversations";
 
 vi.mock("~/lib/ipc");
 
-const conversation = (id: string, title: string): Conversation => ({
+const conversation = (
+  id: string,
+  title: string,
+  projectId: string | null = null
+): Conversation => ({
   id,
   title,
   model: "m",
@@ -20,13 +24,24 @@ const conversation = (id: string, title: string): Conversation => ({
     think: { kind: "off" },
     charts: false,
   },
+  projectId,
+});
+
+const project = (id: string, name: string): Project => ({
+  id,
+  name,
+  instructions: "",
+  createdAt: "x",
+  updatedAt: "x",
 });
 
 const noop = () => undefined;
 
 const renderSidebar = (
   state: Partial<ConversationsState>,
-  disabled = false
+  disabled = false,
+  projects: Project[] = [],
+  selectedProjectId: string | null = null
 ): string =>
   renderToString(
     <Sidebar
@@ -37,9 +52,13 @@ const renderSidebar = (
         error: null,
         ...state,
       }}
+      projects={projects}
+      selectedProjectId={selectedProjectId}
       disabled={disabled}
       version="0.1.0"
       onNew={noop}
+      onNewProject={() => Promise.resolve(true)}
+      onOpenProject={noop}
       onSelect={noop}
       onRename={() => Promise.resolve(true)}
       onDelete={noop}
@@ -103,11 +122,64 @@ describe("Sidebar", () => {
     expect(html).toContain('maxLength="200"');
   });
 
+  it("lists projects, with the open chat's group expanded", () => {
+    const html = renderSidebar(
+      {
+        conversations: [
+          conversation("a", "Loose chat"),
+          conversation("b", "Thesis chat", "p1"),
+          conversation("c", "Tax chat", "p2"),
+        ],
+        selectedId: "b",
+      },
+      false,
+      [project("p1", "Thesis"), project("p2", "Taxes")],
+      "p2"
+    );
+    expect(html).toContain('aria-label="New project"');
+    expect(html).toMatch(
+      /aria-expanded="true"[^>]*aria-label="Chats in Thesis"/
+    );
+    expect(html).toMatch(
+      /aria-expanded="false"[^>]*aria-label="Chats in Taxes"/
+    );
+    expect(html).toContain('aria-label="Thesis chats"');
+    expect(html).toContain("Thesis chat");
+    // A collapsed group does not list its chats.
+    expect(html).not.toContain("Tax chat");
+    expect(html).toMatch(/aria-current="true"[^>]*>.*Taxes</);
+    // The ungrouped list holds only chats outside projects.
+    const ungrouped = html.slice(html.indexOf('aria-label="Conversations"'));
+    expect(ungrouped).toContain("Loose chat");
+    expect(ungrouped).not.toContain("Thesis chat");
+  });
+
   it("shows an error", () => {
     const html = renderSidebar({
       error: { kind: "database", message: "disk full" },
     });
     expect(html).toMatch(/role="alert"[^>]*>disk full</);
+  });
+});
+
+const titles = (list: Conversation[]) => list.map(({ title }) => title);
+
+describe("listedConversations", () => {
+  const all = [
+    conversation("a", "Trip plan"),
+    conversation("b", "Trip budget", "p1"),
+    conversation("c", "Taxes", "p1"),
+  ];
+
+  it("lists only chats outside projects without a query", () => {
+    expect(titles(listedConversations(all, " ", null))).toEqual(["Trip plan"]);
+  });
+
+  it("searches every chat, in a project or not", () => {
+    expect(titles(listedConversations(all, "trip", null))).toEqual([
+      "Trip plan",
+      "Trip budget",
+    ]);
   });
 });
 

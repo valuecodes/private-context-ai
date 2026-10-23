@@ -131,6 +131,17 @@ type Conversation = {
   createdAt: string;
   updatedAt: string;
   settings: ConversationSettings;
+  /** The project it belongs to; `null` outside any project. */
+  projectId: string | null;
+};
+
+/** A project: its instructions are sent ahead of every chat's own prompt. */
+type Project = {
+  id: string;
+  name: string;
+  instructions: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 /** `pending`: still streaming, or the app stopped while it was. */
@@ -265,6 +276,7 @@ export type {
   ModelCapabilities,
   ModelInfo,
   OllamaStatus,
+  Project,
   RequestId,
   SendStarted,
   Settings,

@@ -12,7 +12,11 @@ import {
 
 vi.mock("~/lib/ipc");
 
-const conversation = (id: string, title = id): Conversation => ({
+const conversation = (
+  id: string,
+  title = id,
+  projectId: string | null = null
+): Conversation => ({
   id,
   title,
   model: "llama3.2",
@@ -24,6 +28,7 @@ const conversation = (id: string, title = id): Conversation => ({
     think: { kind: "off" },
     charts: false,
   },
+  projectId,
 });
 
 const loaded = (...ids: string[]): ConversationsState =>
@@ -96,6 +101,32 @@ describe("conversationsReducer", () => {
     state = conversationsReducer(state, { type: "deleted", id: "a" });
     expect(state.selectedId).toBeNull();
     expect(ids(state)).toEqual([]);
+  });
+
+  it("drops a deleted project's chats and clears their selection", () => {
+    let state = conversationsReducer(initialConversations, {
+      type: "loaded",
+      conversations: [
+        conversation("a", "a", "p1"),
+        conversation("b", "b", "p2"),
+        conversation("c"),
+        conversation("d", "d", "p1"),
+      ],
+    });
+    state = conversationsReducer(state, { type: "selected", id: "b" });
+    state = conversationsReducer(state, {
+      type: "projectDeleted",
+      projectId: "p1",
+    });
+    expect(ids(state)).toEqual(["b", "c"]);
+    expect(state.selectedId).toBe("b");
+
+    state = conversationsReducer(state, {
+      type: "projectDeleted",
+      projectId: "p2",
+    });
+    expect(ids(state)).toEqual(["c"]);
+    expect(state.selectedId).toBeNull();
   });
 
   it("moves a used conversation to the top with the model it used", () => {

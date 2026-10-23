@@ -10,6 +10,7 @@ pub mod key;
 pub mod lock;
 pub mod messages;
 mod migrations;
+pub mod projects;
 pub mod settings;
 
 use std::path::Path;

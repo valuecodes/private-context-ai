@@ -14,6 +14,7 @@ const STEPS: &[M<'static>] = &[
     M::up(include_str!("migrations/0005_eval_ms.sql")),
     M::up(include_str!("migrations/0006_message_model_compare.sql")),
     M::up(include_str!("migrations/0007_charts.sql")),
+    M::up(include_str!("migrations/0008_projects.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(STEPS);
 

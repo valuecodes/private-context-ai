@@ -18,6 +18,7 @@ const conversation = (id: string, title: string): Conversation => ({
     think: { kind: "off" },
     charts: false,
   },
+  projectId: null,
 });
 
 const list = [

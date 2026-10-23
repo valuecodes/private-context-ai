@@ -4,10 +4,12 @@ use rusqlite::{OptionalExtension, params};
 use uuid::Uuid;
 
 use super::Storage;
-use super::conversations::{ConversationSettings, NOW, load_settings, not_found};
+use super::conversations::{
+    ConversationSettings, NOW, load_project_instructions, load_settings, not_found,
+};
 use super::messages::{
     check_no_comparison, insert_pending_reply, insert_prompt, load_history, next_created_at,
-    with_system_prompt,
+    with_system_message,
 };
 use crate::error::AppError;
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
@@ -46,10 +48,11 @@ impl Storage {
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
+        let instructions = load_project_instructions(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
         let mut history = load_history(&tx, &id, None)?;
         history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
-        let history = with_system_prompt(&settings, history);
+        let history = with_system_message(&instructions, &settings, history);
         check(&history, &settings)?;
 
         let group = Uuid::new_v4();
@@ -238,6 +241,27 @@ mod tests {
         assert_eq!(rows[0].model, None);
         assert_eq!(rows[1].model.as_deref(), Some("m"));
         assert_eq!(rows[1].compare_group, None);
+    }
+
+    #[test]
+    fn compare_in_project_sends_instructions() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        storage
+            .update_project_instructions(project, &Redacted::new("Cite sources."))
+            .unwrap();
+        let id = storage
+            .create_conversation_with(None, "m", &ConversationSettings::default(), Some(project))
+            .unwrap()
+            .id;
+
+        let turn = compare(&storage, id, "Hi");
+
+        assert_eq!(
+            texts(&turn.history),
+            ["## Project instructions\n\nCite sources.", "Hi"]
+        );
+        assert_eq!(turn.history[0].role, ChatRole::System);
     }
 
     #[test]
