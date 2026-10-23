@@ -254,11 +254,8 @@ pub async fn refresh(
         return Ok(vec![result(chat, Ok(outcome))]);
     }
     let chats = storage.project_chats(project_id)?;
-    if ollama.summary_running(project_id) {
-        return Err(AppError::Busy(
-            "project memory is already being refreshed".into(),
-        ));
-    }
+    // Held for the whole loop: each chat's slot is let go between chats.
+    let _reservation = ollama.reserve_refresh(project_id)?;
     let mut results = Vec::with_capacity(chats.len());
     for chat in chats {
         let outcome = summarize(ollama, storage, project_id, chat).await;
@@ -960,6 +957,28 @@ mod tests {
 
         assert_eq!(count_rows(&setup.storage, "audit_events"), rows);
         assert_eq!(setup.fake.accepted.load(Ordering::SeqCst), accepted);
+    }
+
+    #[tokio::test]
+    async fn whole_refresh_reserves_the_project() {
+        let setup = setup().await;
+        let a = chat(&setup, "Alpha");
+        say(&setup, a, "One");
+        let reservation = setup.ollama.reserve_refresh(setup.project).unwrap();
+
+        assert!(matches!(
+            refresh(&setup.ollama, &setup.storage, setup.project, None).await,
+            Err(AppError::Busy(_))
+        ));
+        assert!(summary_bodies(&setup.fake).is_empty());
+
+        drop(reservation);
+        let results = refresh(&setup.ollama, &setup.storage, setup.project, None)
+            .await
+            .unwrap();
+        assert_eq!(results[0].outcome, RefreshOutcome::Updated);
+        // Released once the refresh ended.
+        assert!(setup.ollama.reserve_refresh(setup.project).is_ok());
     }
 
     #[test]
