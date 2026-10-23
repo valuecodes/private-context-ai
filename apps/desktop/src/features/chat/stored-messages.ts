@@ -25,6 +25,7 @@ const fromStored = (messages: StoredMessage[]): UiMessage[] =>
           }
         : {}),
       ...(message.model === null ? {} : { model: message.model }),
+      ...(message.charts.length === 0 ? {} : { charts: message.charts }),
     };
     return message.thinking === null || message.thinking === ""
       ? [bubble]

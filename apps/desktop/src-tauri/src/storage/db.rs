@@ -69,7 +69,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -179,6 +179,8 @@ mod tests {
              ALTER TABLE conversations DROP COLUMN temperature;
              ALTER TABLE conversations DROP COLUMN num_ctx;
              ALTER TABLE conversations DROP COLUMN think;
+             ALTER TABLE conversations DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN charts;
              ALTER TABLE messages DROP COLUMN superseded_by;
              ALTER TABLE messages DROP COLUMN thinking;
              ALTER TABLE messages DROP COLUMN thinking_ms;
@@ -216,6 +218,8 @@ mod tests {
              ALTER TABLE conversations DROP COLUMN temperature;
              ALTER TABLE conversations DROP COLUMN num_ctx;
              ALTER TABLE conversations DROP COLUMN think;
+             ALTER TABLE conversations DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN charts;
              ALTER TABLE messages DROP COLUMN eval_ms;
              ALTER TABLE messages DROP COLUMN model;
              ALTER TABLE messages DROP COLUMN compare_group;
@@ -245,7 +249,9 @@ mod tests {
         let conn = open(&path, &key).unwrap();
         // Back to what the previous release wrote.
         conn.execute_batch(
-            "ALTER TABLE messages DROP COLUMN eval_ms;
+            "ALTER TABLE conversations DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN eval_ms;
              ALTER TABLE messages DROP COLUMN model;
              ALTER TABLE messages DROP COLUMN compare_group;
              PRAGMA user_version = 4;
@@ -277,7 +283,9 @@ mod tests {
         let conn = open(&path, &key).unwrap();
         // Back to what the previous release wrote.
         conn.execute_batch(
-            "ALTER TABLE messages DROP COLUMN model;
+            "ALTER TABLE conversations DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN model;
              ALTER TABLE messages DROP COLUMN compare_group;
              PRAGMA user_version = 5;
              INSERT INTO conversations (id, title, model, created_at, updated_at)
@@ -297,6 +305,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, ("old".to_owned(), None, None));
+    }
+
+    #[test]
+    fn version_six_db_leaves_charts_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        conn.execute_batch(
+            "ALTER TABLE conversations DROP COLUMN charts;
+             ALTER TABLE messages DROP COLUMN charts;
+             PRAGMA user_version = 6;
+             INSERT INTO conversations (id, title, model, created_at, updated_at)
+               VALUES ('c', 't', 'm', 'x', 'x');
+             INSERT INTO messages (id, conversation_id, role, content, created_at, status)
+               VALUES ('a', 'c', 'assistant', 'old', 'x', 'complete');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let row: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT c.charts, m.charts FROM conversations c JOIN messages m
+                 ON m.conversation_id = c.id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (0, None));
     }
 
     #[test]

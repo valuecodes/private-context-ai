@@ -17,6 +17,7 @@ import {
 } from "~/features/chat/compare-state";
 import {
   updateMessage,
+  withChart,
   withChunk,
   withStats,
 } from "~/features/chat/ui-message";
@@ -96,6 +97,9 @@ const applyEvent = (
   });
   if (event.type === "thinking" || event.type === "token") {
     return update((message) => withChunk(message, event, at));
+  }
+  if (event.type === "chart" || event.type === "chartError") {
+    return update((message) => withChart(message, event));
   }
   if (event.type === "done") {
     return finishStream(

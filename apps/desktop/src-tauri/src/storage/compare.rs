@@ -48,10 +48,7 @@ impl Storage {
         let settings = load_settings(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
         let mut history = load_history(&tx, &id, None)?;
-        history.push(ChatMessage {
-            role: ChatRole::User,
-            content: prompt.clone(),
-        });
+        history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
         let history = with_system_prompt(&settings, history);
         check(&history, &settings)?;
 

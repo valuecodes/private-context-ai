@@ -22,6 +22,7 @@ const finnish: ConversationSettings = {
   systemPrompt: "Answer only in Finnish",
   options: { temperature: 0.7, num_ctx: 8192 },
   think: { kind: "level", level: "high" },
+  charts: false,
 };
 
 const sent = (text = "Hi", streamId = "s1"): ChatState =>
@@ -46,6 +47,7 @@ const stored = (
   evalMs: null,
   model: null,
   compareGroup: null,
+  charts: [],
 });
 
 const event = (

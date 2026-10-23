@@ -1,7 +1,11 @@
 //! Wire types for Ollama's HTTP API and for the chat IPC.
 
-use serde::{Deserialize, Serialize};
+use std::fmt;
 
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+use super::chart_tool::{ChartSpec, ToolCall};
 use crate::error::AppError;
 use crate::redacted::Redacted;
 
@@ -14,6 +18,10 @@ pub enum ChatRole {
     System,
     User,
     Assistant,
+    /// A tool result. Built only in Rust and never read from input or from
+    /// the `messages.role` column.
+    #[serde(skip_deserializing)]
+    Tool,
 }
 
 impl ChatRole {
@@ -23,6 +31,7 @@ impl ChatRole {
             Self::System => "system",
             Self::User => "user",
             Self::Assistant => "assistant",
+            Self::Tool => "tool",
         }
     }
 
@@ -36,13 +45,39 @@ impl ChatRole {
     }
 }
 
-/// One turn of the conversation, as the frontend sends it and as Ollama
-/// receives it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One turn of the conversation, as Ollama receives it. The tool fields are
+/// never read from input: with `deny_unknown_fields` a message carrying one,
+/// or a `tool` role, is refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: Redacted,
+    /// The `render_chart` calls an assistant message made.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub tool_calls: Option<Vec<ToolCall>>,
+    /// The tool a `tool` message answers for.
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<&'static str>,
+}
+
+impl ChatMessage {
+    pub fn new(role: ChatRole, content: Redacted) -> Self {
+        Self {
+            role,
+            content,
+            tool_calls: None,
+            tool_name: None,
+        }
+    }
+
+    /// The text sent: the content plus any call arguments.
+    pub fn len_bytes(&self) -> usize {
+        let calls = self.tool_calls.as_ref().map_or(0, |calls| {
+            serde_json::to_vec(calls).map_or(0, |json| json.len())
+        });
+        self.content.len_bytes() + calls
+    }
 }
 
 /// Sampling options. Field names are Ollama's, on both sides of the IPC.
@@ -133,9 +168,10 @@ fn is_level_name(name: &str) -> bool {
         && !name.chars().any(char::is_control)
 }
 
-/// The `/api/chat` request body. Deliberately has no `tools` or `format`
-/// field: the model gets no tools and no structured-output hooks. `think` is
-/// only ever what [`resolve_think`] allowed for the model.
+/// The `/api/chat` request body. Deliberately has no `format` field: no
+/// structured-output hooks. `tools` is only ever the fixed display-only
+/// `render_chart` definition, sent only when the user turned Charts on. `think`
+/// is only ever what [`resolve_think`] allowed for the model.
 #[derive(Debug, Serialize)]
 pub struct ChatRequest<'a> {
     pub model: &'a str,
@@ -149,6 +185,9 @@ pub struct ChatRequest<'a> {
     /// once. Unset leaves Ollama's default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<u32>,
+    /// `chart_tool::CHART_TOOLS`, or nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<&'static Value>,
 }
 
 /// One NDJSON line of a streamed `/api/chat` response. Unknown fields are
@@ -173,10 +212,33 @@ pub struct ChatLineMessage {
     pub content: Option<Redacted>,
     /// Reasoning from thinking models; shown, stored, never sent back.
     pub thinking: Option<Redacted>,
+    /// Read only when tools were offered.
+    pub tool_calls: Option<Vec<ToolCallLine>>,
+}
+
+/// A tool call as Ollama streams it. `Debug` hides the model's text.
+#[derive(Default, Deserialize)]
+pub struct ToolCallLine {
+    #[serde(default)]
+    pub function: ToolCallLineFunction,
+}
+
+#[derive(Default, Deserialize)]
+pub struct ToolCallLineFunction {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+impl fmt::Debug for ToolCallLine {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ToolCallLine { .. }")
+    }
 }
 
 /// Streamed to the frontend over a Tauri channel.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -188,6 +250,17 @@ pub enum ChatEvent {
     },
     Thinking {
         content: Redacted,
+    },
+    /// A validated `render_chart` call, drawn at `offset` (UTF-16 units of
+    /// the reply text).
+    Chart {
+        offset: u64,
+        spec: ChartSpec,
+    },
+    /// A call that was refused; `reason` is fixed text.
+    ChartError {
+        offset: u64,
+        reason: String,
     },
     Done {
         prompt_tokens: Option<u64>,
@@ -452,7 +525,7 @@ pub fn validate_chat_input(
     if messages.len() > max_messages {
         return Err(invalid(&format!("at most {max_messages} messages")));
     }
-    let prompt_bytes: usize = messages.iter().map(|m| m.content.len_bytes()).sum();
+    let prompt_bytes: usize = messages.iter().map(ChatMessage::len_bytes).sum();
     if prompt_bytes > max_prompt_bytes {
         return Err(AppError::TooLarge(format!(
             "prompt is over {max_prompt_bytes} bytes"
@@ -473,10 +546,45 @@ mod tests {
     use super::*;
 
     fn user(text: &str) -> ChatMessage {
-        ChatMessage {
-            role: ChatRole::User,
-            content: Redacted::new(text),
-        }
+        ChatMessage::new(ChatRole::User, Redacted::new(text))
+    }
+
+    #[test]
+    fn tools_sent_only_when_offered() {
+        let messages = [user("Chart it")];
+        let body = serde_json::to_value(ChatRequest {
+            model: "qwen3",
+            messages: &messages,
+            stream: true,
+            options: None,
+            think: Some(Think::Enabled(false)),
+            keep_alive: None,
+            tools: Some(&super::super::chart_tool::CHART_TOOLS),
+        })
+        .unwrap();
+        assert_eq!(body["tools"][0]["function"]["name"], "render_chart");
+        assert!(body.get("format").is_none());
+    }
+
+    #[test]
+    fn tool_messages_serialize_for_ollama() {
+        use super::super::chart_tool::{ChartEntry, follow_up_history};
+        let history = follow_up_history(
+            Vec::new(),
+            "",
+            &[ChartEntry {
+                offset: 0,
+                spec: None,
+                error: Some("x".into()),
+            }],
+        );
+        let tool = serde_json::to_value(&history[1]).unwrap();
+        assert_eq!(tool["role"], "tool");
+        assert_eq!(tool["tool_name"], "render_chart");
+        // Built in Rust only: the same shape is refused as input.
+        assert!(serde_json::from_value::<ChatMessage>(tool).is_err());
+        let call = serde_json::to_value(&history[0]).unwrap();
+        assert!(serde_json::from_value::<ChatMessage>(call).is_err());
     }
 
     #[test]
@@ -494,6 +602,7 @@ mod tests {
                 options,
                 think: None,
                 keep_alive: None,
+                tools: None,
             })
             .unwrap();
             let object = body.as_object().unwrap();
@@ -527,6 +636,7 @@ mod tests {
                 options: None,
                 think: Some(think),
                 keep_alive: None,
+                tools: None,
             })
             .unwrap();
             let object = body.as_object().unwrap();
@@ -542,6 +652,7 @@ mod tests {
             options: None,
             think: None,
             keep_alive: Some(0),
+            tools: None,
         })
         .unwrap();
         assert_eq!(body["keep_alive"], serde_json::json!(0));
@@ -946,12 +1057,51 @@ mod tests {
     }
 
     #[test]
+    fn chart_events_serialize() {
+        use super::super::chart_tool::ChartKind;
+        let chart = ChatEvent::Chart {
+            offset: 3,
+            spec: ChartSpec {
+                title: "t".into(),
+                kind: ChartKind::Pie,
+                labels: vec!["a".into()],
+                values: vec![2.5],
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&chart).unwrap(),
+            serde_json::json!({
+                "type": "chart",
+                "offset": 3,
+                "spec": { "title": "t", "type": "pie", "labels": ["a"], "values": [2.5] }
+            })
+        );
+        let failed = ChatEvent::ChartError {
+            offset: 0,
+            reason: "why".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap(),
+            serde_json::json!({ "type": "chartError", "offset": 0, "reason": "why" })
+        );
+    }
+
+    #[test]
     fn chat_message_rejects_unknown_role_and_fields() {
         assert!(serde_json::from_str::<ChatMessage>(r#"{"role":"tool","content":"x"}"#).is_err());
         assert!(
             serde_json::from_str::<ChatMessage>(r#"{"role":"user","content":"x","tools":[]}"#)
                 .is_err()
         );
+        for field in [r#""tool_calls":[]"#, r#""tool_name":"render_chart""#] {
+            assert!(
+                serde_json::from_str::<ChatMessage>(&format!(
+                    r#"{{"role":"assistant","content":"x",{field}}}"#
+                ))
+                .is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

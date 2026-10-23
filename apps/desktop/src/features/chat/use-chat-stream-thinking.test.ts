@@ -50,6 +50,7 @@ const stored = (
   evalMs: null,
   model: null,
   compareGroup: null,
+  charts: [],
 });
 
 const noStats = { completionTokens: null, durationMs: null, evalMs: null };

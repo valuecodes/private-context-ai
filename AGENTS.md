@@ -113,7 +113,11 @@ discussion first.
 - **No egress except Ollama on loopback.** The webview has no network (strict CSP, no
   Tauri plugins). Only Rust talks to Ollama, through `ollama/client.rs`, which refuses
   non-loopback hosts, proxies and redirects; `reqwest` has no TLS feature.
-- **The model gets no tools.** `/api/chat` is called without `tools` or `format`;
+- **The model gets one display-only `render_chart` tool, only when the user turns
+  Charts on, never with `format`.** The tool definition is fixed in
+  `ollama/chart_tool.rs`, offered only on a turn's first request to models whose audited
+  `/api/show` lists `tools`; Rust validates every call and the follow-up has no `tools`.
+  Charts are drawn as SVG by local React code, with model text only as text nodes;
   `think` is sent only as a boolean or an advertised level, only to models whose
   audited `/api/show` lists `thinking`, and is `false` unless the user turns it on.
   Thinking text is stored encrypted, shown collapsed, never sent back to the model.

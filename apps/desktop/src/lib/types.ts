@@ -74,6 +74,30 @@ type ConversationSettings = {
   systemPrompt: string;
   options: ChatOptions;
   think: ThinkChoice;
+  /**
+   * Offers the display-only `render_chart` tool to models that list `tools`.
+   * Off unless the user turns it on.
+   */
+  charts: boolean;
+};
+
+/** A chart the model asked for, validated by Rust. Its text is the model's. */
+type ChartSpec = {
+  title: string;
+  type: "bar" | "line" | "pie";
+  /** As many as `values`, 1 to 100. */
+  labels: string[];
+  /** Finite; a pie's are not negative. */
+  values: number[];
+};
+
+/** One `render_chart` call of a reply: drawn, or a note saying why not. */
+type ChartEntry = {
+  /** Where it goes in the reply text, in UTF-16 code units. */
+  offset: number;
+  spec: ChartSpec | null;
+  /** Why it was not shown; fixed text from Rust. */
+  error?: string;
 };
 
 /** How a thinking model is switched. */
@@ -130,6 +154,8 @@ type StoredMessage = {
   model: string | null;
   /** A compared prompt and its candidate replies, until one is picked. */
   compareGroup: string | null;
+  /** A reply's `render_chart` calls; empty for most. */
+  charts: ChartEntry[];
 };
 
 /** What the `conversation_get` command returns. */
@@ -142,6 +168,8 @@ type ConversationWithMessages = {
 type ChatEvent =
   | { type: "token"; content: string }
   | { type: "thinking"; content: string }
+  | { type: "chart"; offset: number; spec: ChartSpec }
+  | { type: "chartError"; offset: number; reason: string }
   | {
       type: "done";
       promptTokens: number | null;
@@ -224,6 +252,8 @@ export type {
   AppInfo,
   AuditEvent,
   AuditStatus,
+  ChartEntry,
+  ChartSpec,
   ChatEvent,
   ChatOptions,
   CompareEvent,

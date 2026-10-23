@@ -1,6 +1,7 @@
 import { Check, Copy, Info, Pencil, RefreshCw } from "lucide-react";
 import type { KeyboardEvent, SubmitEvent } from "react";
 import {
+  Fragment,
   memo,
   useCallback,
   useDeferredValue,
@@ -10,6 +11,7 @@ import {
   useState,
 } from "react";
 
+import { ChartBlock, ChartFailed } from "~/features/chat/chart-block";
 import { sendsMessage } from "~/features/chat/chat-keys";
 import type { UiMessage } from "~/features/chat/chat-reducer";
 import { Markdown } from "~/features/chat/markdown";
@@ -17,6 +19,7 @@ import { formatStats } from "~/features/chat/message-stats";
 import { ThinkingBlock } from "~/features/chat/thinking-block";
 import { TypingIndicator } from "~/features/chat/typing-indicator";
 import { copyText } from "~/lib/clipboard";
+import type { ChartEntry } from "~/lib/types";
 
 const STATUS_NOTE: Record<UiMessage["status"], string> = {
   complete: "",
@@ -79,19 +82,68 @@ const ReplyText = ({ message }: { message: UiMessage }) => {
   return <Markdown text={text} highlight={!streaming} />;
 };
 
+/** `content` cut at each chart's offset, in offset order: the text before each. */
+const chartSegments = (content: string, charts: ChartEntry[]) => {
+  const sorted = charts.toSorted((a, b) => a.offset - b.offset);
+  const segments: { text: string; entry: ChartEntry }[] = [];
+  let from = 0;
+  for (const entry of sorted) {
+    const to = Math.max(from, entry.offset);
+    segments.push({ text: content.slice(from, to), entry });
+    from = to;
+  }
+  return { segments, rest: content.slice(from) };
+};
+
+/**
+ * A reply that called `render_chart`: the text before each chart, the chart
+ * (or a note when Rust refused it), then the rest, which may still stream.
+ */
+const ChartedReply = ({
+  message,
+  charts,
+}: {
+  message: UiMessage;
+  charts: ChartEntry[];
+}) => {
+  const highlight = message.status !== "streaming";
+  const { segments, rest } = chartSegments(message.content, charts);
+  return (
+    <>
+      {segments.map(({ text, entry }, index) => (
+        // Offsets can repeat; the order is fixed once a chart arrives.
+        <Fragment key={index}>
+          {text !== "" && <Markdown text={text} highlight={highlight} />}
+          {entry.spec === null ? (
+            <ChartFailed reason={entry.error} />
+          ) : (
+            <ChartBlock spec={entry.spec} />
+          )}
+        </Fragment>
+      ))}
+      <ReplyText message={{ ...message, content: rest }} />
+    </>
+  );
+};
+
 const AssistantReply = ({ message }: { message: UiMessage }) => {
   const thinking = message.thinking ?? "";
   const streaming = message.status === "streaming";
+  const charts = message.charts ?? [];
   return (
     <>
       {thinking !== "" && (
         <ThinkingBlock
           text={thinking}
           ms={message.thinkingMs ?? null}
-          active={streaming && message.content === ""}
+          active={streaming && message.content === "" && charts.length === 0}
         />
       )}
-      <ReplyText message={message} />
+      {charts.length === 0 ? (
+        <ReplyText message={message} />
+      ) : (
+        <ChartedReply message={message} charts={charts} />
+      )}
     </>
   );
 };

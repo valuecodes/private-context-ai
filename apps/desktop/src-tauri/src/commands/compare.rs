@@ -47,7 +47,7 @@ pub struct CompareStarted {
 
 /// Streamed by `chat_compare`; mirrored by `CompareEvent` in
 /// `src/lib/types.ts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "type",
     rename_all = "camelCase",
@@ -278,6 +278,8 @@ where
             think,
             // Only one model sits in memory: each but the last unloads.
             keep_alive: (index != last).then_some(0),
+            // Compared answers stay tool-free.
+            tools: false,
         };
         ollama
             .run(&admission, call, &sink, |end| {
@@ -553,6 +555,70 @@ mod tests {
         assert_eq!(bodies.len(), 1);
         assert!(bodies[0].get("keep_alive").is_none());
         assert_eq!(rows(&setup)[1].model.as_deref(), Some("a"));
+    }
+
+    #[tokio::test]
+    async fn send_offers_tools_only_with_charts_and_capable_model() {
+        use crate::commands::ollama::{SendRequest, send_turn};
+        use crate::storage::conversations::ConversationSettings;
+        use crate::storage::messages::TurnInput;
+
+        let route = Reply::Route(Arc::new(|path, body| {
+            if path == "/api/show" {
+                return if body["model"] == "tooled" {
+                    Reply::Json(r#"{"capabilities":["completion","tools"]}"#)
+                } else {
+                    Reply::Json(PLAIN)
+                };
+            }
+            Reply::Lines(vec![token_line("a"), DONE], Duration::ZERO)
+        }));
+        for (charts, model, offered) in [
+            (true, "tooled", true),
+            (false, "tooled", false),
+            (true, "a", false),
+        ] {
+            let setup = setup(route.clone()).await;
+            setup
+                .storage
+                .update_settings(
+                    setup.conversation,
+                    &ConversationSettings {
+                        charts,
+                        ..ConversationSettings::default()
+                    },
+                )
+                .unwrap();
+            let think = setup.ollama.chat_think(model, None).await.unwrap();
+            send_turn(
+                &setup.ollama,
+                Arc::clone(&setup.storage),
+                SendRequest {
+                    conversation_id: setup.conversation,
+                    model: model.into(),
+                    input: TurnInput::New(Redacted::new("Hi")),
+                    think_choice: ThinkChoice::Off,
+                    think,
+                },
+                FlushPolicy::default(),
+                |_| true,
+            )
+            .unwrap();
+            for _ in 0..500 {
+                if setup.ollama.inflight_len() == 0 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let bodies = chat_bodies(&setup.fake);
+            assert_eq!(bodies.len(), 1);
+            assert_eq!(
+                bodies[0].get("tools").is_some(),
+                offered,
+                "{charts} {model}"
+            );
+            assert!(bodies[0].get("format").is_none());
+        }
     }
 
     #[tokio::test]

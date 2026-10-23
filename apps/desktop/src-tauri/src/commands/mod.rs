@@ -30,11 +30,12 @@ pub(crate) mod testing {
         (Arc::new(Ollama::new(base, audit)), listener)
     }
 
-    /// What `chat_think` gives a model that cannot think.
+    /// What `chat_think` gives a model that cannot think or use tools.
     pub fn no_think(ollama: &Ollama) -> ChatThink {
         ChatThink {
             think: None,
             connection: ollama.connection_id(),
+            tools: false,
         }
     }
 }

@@ -11,6 +11,7 @@ const finnish: ConversationSettings = {
   systemPrompt: "Answer only in Finnish",
   options: { temperature: 0.7, num_ctx: 8192 },
   think: { kind: "level", level: "high" },
+  charts: false,
 };
 
 describe("chat settings in the reducer", () => {

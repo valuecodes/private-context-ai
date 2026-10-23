@@ -10,11 +10,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::ollama::chart_tool::{ChartEntry, follow_up_history};
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{
     ChatEvent, ChatMessage, ModelCapabilities, ModelInfo, OllamaStatus, ThinkChoice, validate_model,
 };
-use crate::ollama::{ChatThink, Ollama};
+use crate::ollama::{ChatCall, ChatThink, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnInput, TurnRecorder};
@@ -211,6 +212,9 @@ pub async fn chat_cancel(ollama: State<'_, Arc<Ollama>>, request_id: Uuid) -> Re
 pub trait ReplyRecorder: Send + 'static {
     fn push(&mut self, token: &Redacted) -> Result<(), AppError>;
     fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError>;
+    fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError>;
+    /// The answer so far, which a follow-up request sends back.
+    fn text(&self) -> String;
     fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError>;
     fn finish(&mut self, status: MessageStatus) -> Result<(), AppError>;
 }
@@ -222,6 +226,14 @@ impl ReplyRecorder for TurnRecorder {
 
     fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError> {
         Self::push_thinking(self, chunk)
+    }
+
+    fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError> {
+        Self::push_chart(self, entry)
+    }
+
+    fn text(&self) -> String {
+        Self::text(self)
     }
 
     fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError> {
@@ -238,6 +250,22 @@ pub(crate) type SharedRecorder = Shared<TurnRecorder>;
 
 pub(crate) fn lock<R>(recorder: &Shared<R>) -> MutexGuard<'_, R> {
     recorder.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// What a reply that called `render_chart` continues with: `history`, the
+/// answer so far with its calls, and their results. `history` is only
+/// cloned when tools are offered.
+pub(crate) fn chart_follow_up<R: ReplyRecorder>(
+    recorder: &Shared<R>,
+    history: &[ChatMessage],
+    tools: bool,
+) -> impl FnOnce(&[ChartEntry]) -> Vec<ChatMessage> + Send + 'static {
+    let recorder = Arc::clone(recorder);
+    let history = if tools { history.to_vec() } else { Vec::new() };
+    move |charts| {
+        let text = lock(&recorder).text();
+        follow_up_history(history, &text, charts)
+    }
 }
 
 /// The body of the send commands, without Tauri. Order matters: the slot is
@@ -279,13 +307,21 @@ where
     let stop_ticker = CancellationToken::new();
     spawn_ticker(Arc::clone(&recorder), policy.every, stop_ticker.clone());
     let sink = recording_sink(Arc::clone(&recorder), send);
+    // Only when the user turned Charts on and the model lists `tools`.
+    let tools = turn.charts && think.tools;
+    let follow_up = chart_follow_up(&recorder, &turn.history, tools);
     let request_id = ollama.start(
         admission,
-        &model,
-        &turn.history,
-        turn.options.as_ref(),
-        think,
+        ChatCall {
+            model: &model,
+            messages: &turn.history,
+            options: turn.options.as_ref(),
+            think,
+            keep_alive: None,
+            tools,
+        },
         sink,
+        follow_up,
         move |end| {
             stop_ticker.cancel();
             finish_turn(&recorder, end);
@@ -315,6 +351,16 @@ where
         let saved = match &event {
             ChatEvent::Token { content } => lock(&recorder).push(content),
             ChatEvent::Thinking { content } => lock(&recorder).push_thinking(content),
+            ChatEvent::Chart { offset, spec } => lock(&recorder).push_chart(&ChartEntry {
+                offset: *offset,
+                spec: Some(spec.clone()),
+                error: None,
+            }),
+            ChatEvent::ChartError { offset, reason } => lock(&recorder).push_chart(&ChartEntry {
+                offset: *offset,
+                spec: None,
+                error: Some(reason.clone()),
+            }),
             ChatEvent::Done {
                 prompt_tokens,
                 completion_tokens,
@@ -355,6 +401,7 @@ pub(crate) fn finish_turn<R: ReplyRecorder>(recorder: &Shared<R>, end: &ChatEnd)
             duration_ms,
             thinking_ms,
             eval_ms,
+            ..
         } => recorder.complete(ReplyStats {
             prompt_tokens: *prompt_tokens,
             completion_tokens: *completion_tokens,
@@ -827,6 +874,7 @@ mod tests {
         let think = ChatThink {
             think: Some(Think::Enabled(false)),
             connection: ollama.connection_id(),
+            tools: false,
         };
         // Settings switch the URL between the lookup and the send.
         ollama.set_base_url(OllamaBaseUrl::parse(&format!(

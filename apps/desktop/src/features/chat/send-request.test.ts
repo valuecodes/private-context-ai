@@ -22,6 +22,7 @@ const finnish: ConversationSettings = {
   systemPrompt: "Answer only in Finnish",
   options: { temperature: 0.7 },
   think: { kind: "on" },
+  charts: true,
 };
 
 const request = {

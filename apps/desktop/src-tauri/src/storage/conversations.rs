@@ -30,6 +30,10 @@ pub struct ConversationSettings {
     /// Only `temperature` and `num_ctx` are kept.
     pub options: ChatOptions,
     pub think: ThinkChoice,
+    /// Offers the display-only `render_chart` tool to models that list
+    /// `tools`. Off unless the user turns it on.
+    #[serde(default)]
+    pub charts: bool,
 }
 
 impl ConversationSettings {
@@ -77,8 +81,8 @@ pub struct ConversationWithMessages {
 }
 
 const COLUMNS: &str =
-    "id, title, model, created_at, updated_at, system_prompt, temperature, num_ctx, think";
-const SETTINGS_COLUMNS: &str = "system_prompt, temperature, num_ctx, think";
+    "id, title, model, created_at, updated_at, system_prompt, temperature, num_ctx, think, charts";
+const SETTINGS_COLUMNS: &str = "system_prompt, temperature, num_ctx, think, charts";
 
 /// The `think` column: `off`, `on` or `level:<name>`.
 fn think_column(think: &ThinkChoice) -> String {
@@ -99,7 +103,7 @@ fn parse_think(value: &str) -> Option<ThinkChoice> {
     }
 }
 
-/// The four settings columns, starting at `first`.
+/// The five settings columns, starting at `first`.
 fn settings_row(row: &Row<'_>, first: usize) -> rusqlite::Result<ConversationSettings> {
     let think: String = row.get(first + 3)?;
     // Saved from an `f32`, so it converts back exactly.
@@ -114,6 +118,7 @@ fn settings_row(row: &Row<'_>, first: usize) -> rusqlite::Result<ConversationSet
             ..ChatOptions::default()
         },
         think: parse_think(&think).ok_or_else(|| bad_text(first + 3, "think"))?,
+        charts: row.get::<_, i64>(first + 4)? != 0,
     })
 }
 
@@ -196,7 +201,7 @@ impl Storage {
         let conversation = conn.query_row(
             &format!(
                 "INSERT INTO conversations ({COLUMNS})
-                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7)
+                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7, ?8)
                  RETURNING {COLUMNS}"
             ),
             params![
@@ -206,7 +211,8 @@ impl Storage {
                 settings.system_prompt.expose(),
                 settings.options.temperature.map(f64::from),
                 settings.options.num_ctx,
-                think_column(&settings.think)
+                think_column(&settings.think),
+                settings.charts
             ],
             conversation_row,
         )?;
@@ -228,7 +234,8 @@ impl Storage {
         conn.query_row(
             &format!(
                 "UPDATE conversations
-                 SET system_prompt = ?2, temperature = ?3, num_ctx = ?4, think = ?5
+                 SET system_prompt = ?2, temperature = ?3, num_ctx = ?4, think = ?5,
+                     charts = ?6
                  WHERE id = ?1 RETURNING {COLUMNS}"
             ),
             params![
@@ -236,7 +243,8 @@ impl Storage {
                 settings.system_prompt.expose(),
                 settings.options.temperature.map(f64::from),
                 settings.options.num_ctx,
-                think_column(&settings.think)
+                think_column(&settings.think),
+                settings.charts
             ],
             conversation_row,
         )
@@ -431,6 +439,7 @@ mod tests {
                 ..ChatOptions::default()
             },
             think,
+            charts: false,
         }
     }
 
@@ -451,7 +460,10 @@ mod tests {
             created
         );
 
-        let second = settings("", None, ThinkChoice::Level("high".into()));
+        let second = ConversationSettings {
+            charts: true,
+            ..settings("", None, ThinkChoice::Level("high".into()))
+        };
         let updated = storage.update_settings(created.id, &second).unwrap();
         assert_eq!(updated.settings, second);
         assert_eq!(updated.updated_at, created.updated_at);
@@ -546,7 +558,9 @@ mod tests {
             )
             .unwrap();
         let saved = storage.conversation_settings(Uuid::nil()).unwrap();
+        // Charts too start off.
         assert_eq!(saved, ConversationSettings::default());
+        assert!(!saved.charts);
 
         let qwen3 = ModelCapabilities {
             thinking: true,
