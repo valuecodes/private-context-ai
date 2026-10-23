@@ -348,7 +348,9 @@ impl ReplyRecorder for MemoryRecorder {
     }
 
     fn finish(&mut self, status: MessageStatus) -> Result<(), AppError> {
-        self.end(status == MessageStatus::Cancelled && !self.revision && !self.content.is_empty());
+        // A chart the user can still see counts as visible content.
+        let visible = !self.content.is_empty() || !self.charts.is_empty();
+        self.end(status == MessageStatus::Cancelled && !self.revision && visible);
         Ok(())
     }
 }
@@ -682,6 +684,29 @@ mod tests {
             ]
         );
         assert!(next.history[1].tool_calls.is_some());
+
+        // Stopped after a chart but before any text: the chart is kept.
+        chats.rollback(id);
+        let mut stopped = MemoryRecorder::new(&chats, id, Uuid::new_v4(), false);
+        stopped
+            .push_chart(&ChartEntry {
+                offset: 0,
+                spec: None,
+                error: Some("why".into()),
+            })
+            .unwrap();
+        stopped.finish(MessageStatus::Cancelled).unwrap();
+        let roles: Vec<ChatRole> = chats
+            .begin(id, &new("Once more"), |_, _| Ok(()))
+            .unwrap()
+            .history
+            .iter()
+            .map(|message| message.role)
+            .collect();
+        assert_eq!(
+            roles[roles.len() - 3..],
+            [ChatRole::Assistant, ChatRole::Tool, ChatRole::User]
+        );
     }
 
     #[test]
