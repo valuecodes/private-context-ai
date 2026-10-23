@@ -8,6 +8,7 @@
     "dev:web": "vite",
     "build": "vite build",
     "build:app": "tauri build",
+    "build:windows": "sh scripts/build-windows.sh",
     "typecheck": "tsc",
     "test": "vitest run",
     "rust:fmt": "cd src-tauri && cargo fmt --check",
