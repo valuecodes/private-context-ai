@@ -172,6 +172,21 @@ On Windows this writes an MSI and an NSIS setup program under
 `apps/desktop/src-tauri/target/release/bundle/` (`msi/` and `nsis/`). The installers
 are not code-signed, so Windows SmartScreen warns before the first run.
 
+From WSL, one command builds the Windows installer without a separate Windows checkout:
+
+```bash
+pnpm --filter desktop build:windows
+```
+
+It exports the committed `HEAD` (uncommitted changes are left out) to
+`%LOCALAPPDATA%\pcai-build`, then runs the build there through Windows PowerShell:
+a fresh `src\`, `pnpm install --frozen-lockfile` and `build:app --bundles nsis`, with
+`target\` kept between runs so SQLCipher compiles only once. It prints the path of the
+setup program it copies to `out\`. Windows needs Node, pnpm (`corepack enable`),
+rustup, Strawberry Perl and the MSVC Build Tools; the script names any that are
+missing, with the `winget` commands to install them. Only the NSIS installer is
+built, so the VBSCRIPT feature is not needed.
+
 Only a bundled app enforces the production CSP, and release builds have no devtools.
 To check for CSP violations, build a debug bundle with
 `pnpm --filter desktop build:app --debug` (written under `target/debug/bundle/`), run

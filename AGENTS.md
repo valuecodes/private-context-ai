@@ -45,6 +45,7 @@ and inside an app use the `~/` alias (`src/*`) to go up the tree.
 pnpm install                     # Install all dependencies
 pnpm --filter desktop dev        # Tauri dev window (Vite on port 1420)
 pnpm --filter desktop build:app  # Rust release build + installers
+pnpm --filter desktop build:windows # From WSL: Windows installer of HEAD, built on Windows
 pnpm --filter desktop rust:fmt   # cargo fmt --check
 pnpm --filter desktop rust:check # cargo clippy --all-targets --locked -D warnings
 pnpm --filter desktop rust:test  # cargo test --locked
@@ -103,7 +104,7 @@ WSL2 runs `tauri dev` (through WSLg), clippy and the tests once webkit2gtk 4.1, 
 SQLCipher build tools and a Secret Service (such as GNOME Keyring) are installed, with
 Ollama on WSL's own loopback. A WSL2 setup without them can only run `rust:fmt`; say
 which checks ran in the PR description. `build:app` for the Windows installer always
-runs on Windows.
+runs on Windows; from WSL, `build:windows` runs it there on an export of HEAD.
 
 ### Security invariants
 
