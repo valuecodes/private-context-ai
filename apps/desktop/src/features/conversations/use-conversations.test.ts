@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { conversationMarkdown } from "~/lib/ipc";
 import type { Conversation } from "~/lib/types";
 
+import { groupByDate } from "./date-groups";
 import type { ConversationsState } from "./use-conversations";
 import {
   conversationsReducer,
@@ -134,17 +135,40 @@ describe("conversationsReducer", () => {
       type: "touched",
       id: "c",
       model: "qwen3",
+      at: "2026-02-01T00:00:00.000Z",
     });
     expect(ids(state)).toEqual(["c", "a", "b"]);
     expect(state.conversations[0]?.model).toBe("qwen3");
+    expect(state.conversations[0]?.updatedAt).toBe("2026-02-01T00:00:00.000Z");
     expect(state.conversations[1]?.model).toBe("llama3.2");
     expect(
       conversationsReducer(state, {
         type: "touched",
         id: "missing",
         model: "x",
+        at: "2026-02-02T00:00:00.000Z",
       })
     ).toEqual(state);
+  });
+
+  it("moves a chat from last week under Today once it is used", () => {
+    const now = new Date(2026, 0, 10, 12);
+    const state = conversationsReducer(loaded("a", "b"), {
+      type: "touched",
+      id: "b",
+      model: "llama3.2",
+      at: now.toISOString(),
+    });
+    // `loaded` dates both chats 2026-01-01, more than a week before `now`.
+    expect(
+      groupByDate(state.conversations, now).map(({ label, conversations }) => [
+        label,
+        conversations.map(({ id }) => id),
+      ])
+    ).toEqual([
+      ["Today", ["b"]],
+      ["Previous 30 days", ["a"]],
+    ]);
   });
 
   it("keeps the list on a failure and clears the error on success", () => {

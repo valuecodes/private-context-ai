@@ -2,6 +2,7 @@ import { Check, Copy, Pencil, Search, SquarePen, Trash } from "lucide-react";
 import type { KeyboardEvent, SubmitEvent } from "react";
 import { useState } from "react";
 
+import { ConversationList } from "~/features/conversations/conversation-list";
 import {
   NewProject,
   ProjectGroups,
@@ -130,7 +131,7 @@ const SidebarItem = ({
 
   return (
     <li
-      className={`group flex items-center gap-1 rounded ${selected ? "bg-zinc-200 dark:bg-zinc-800" : "hover:bg-zinc-100 dark:hover:bg-zinc-900"}`}
+      className={`group flex items-center gap-1 rounded ${selected ? "bg-zinc-200 font-medium text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50" : "hover:bg-zinc-100 dark:hover:bg-zinc-900"}`}
     >
       <button
         type="button"
@@ -315,9 +316,13 @@ const Sidebar = ({
     );
   } else if (shown.length > 0) {
     list = (
-      <ul aria-label="Conversations" className="mt-2 flex flex-col gap-0.5">
-        {shown.map(item)}
-      </ul>
+      <ConversationList
+        shown={shown}
+        searching={searching}
+        // Read per render: an open sidebar regroups on its next update.
+        now={new Date()}
+        item={item}
+      />
     );
   }
 
@@ -380,7 +385,12 @@ const Sidebar = ({
       )}
       {/* `relative`: an unpositioned scroller leaves its sr-only labels
           (absolute) to the page, which then scrolls with them. */}
-      <nav className="relative min-h-0 flex-1 overflow-y-auto">{list}</nav>
+      <nav
+        aria-label="Conversations"
+        className="relative min-h-0 flex-1 overflow-y-auto"
+      >
+        {list}
+      </nav>
       <p className="text-xs text-zinc-400 dark:text-zinc-500">
         {version === "" ? "" : `v${version}`}
       </p>
