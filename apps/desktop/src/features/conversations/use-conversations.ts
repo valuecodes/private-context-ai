@@ -32,8 +32,11 @@ type ConversationsAction =
   | { type: "deleted"; id: string }
   /** Rust deleted the project and, with it, its chats. */
   | { type: "projectDeleted"; projectId: string }
-  /** `at`: when the send started, as an ISO string like Rust's. */
-  | { type: "touched"; id: string; model: string; at: string }
+  /**
+   * `at`: when the send started, as an ISO string like Rust's. No `model`
+   * keeps the chat's own.
+   */
+  | { type: "touched"; id: string; model?: string; at: string }
   | { type: "failed"; error: AppError };
 
 const initialConversations: ConversationsState = {
@@ -125,7 +128,11 @@ const conversationsReducer = (
     // in step, so the chat moves under Today without a reload.
     const updated = state.conversations.map((conversation) =>
       conversation.id === action.id
-        ? { ...conversation, model: action.model, updatedAt: action.at }
+        ? {
+            ...conversation,
+            model: action.model ?? conversation.model,
+            updatedAt: action.at,
+          }
         : conversation
     );
     return { ...state, conversations: moveToTop(updated, action.id) };
@@ -196,7 +203,7 @@ const useConversations = () => {
     dispatch({ type: "created", conversation });
   };
 
-  const touched = (id: string, model: string) => {
+  const touched = (id: string, model?: string) => {
     dispatch({ type: "touched", id, model, at: new Date().toISOString() });
   };
 

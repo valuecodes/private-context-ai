@@ -358,6 +358,8 @@ const useChatStream = ({ onCreated, onStarted }: ChatCallbacks) => {
         (started) => {
           dispatch({ type: "compareStarted", streamId, started });
           events.release();
+          // Rust saved the chat as just used; its model changes on a pick.
+          onStarted(conversationId);
           return started.requestId;
         },
         (error: unknown) => {

@@ -37,8 +37,11 @@ const titleFromPrompt = (prompt: string): string | null => {
 type ChatCallbacks = {
   /** The first send of a new chat saved it as this conversation. */
   onCreated: (conversation: Conversation) => void;
-  /** Rust admitted a send, so the conversation was just used with `model`. */
-  onStarted: (conversationId: string, model: string) => void;
+  /**
+   * Rust admitted a send, so the conversation was just used with `model`; no
+   * `model` for a comparison, which leaves the chat's own unchanged.
+   */
+  onStarted: (conversationId: string, model?: string) => void;
 };
 
 /**
