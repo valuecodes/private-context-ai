@@ -240,6 +240,8 @@ fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
             duration_ms: d,
             thinking_ms: t,
             eval_ms: e,
+            prompt_eval_ms: pe,
+            load_ms: l,
             charts,
         },
         ChatEnd::Done {
@@ -248,6 +250,8 @@ fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
             duration_ms,
             thinking_ms,
             eval_ms,
+            prompt_eval_ms,
+            load_ms,
             ..
         },
     ) = (first, &end)
@@ -260,6 +264,8 @@ fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
         duration_ms: plus(*d, *duration_ms),
         thinking_ms: plus(*t, *thinking_ms),
         eval_ms: plus(*e, *eval_ms),
+        prompt_eval_ms: plus(*pe, *prompt_eval_ms),
+        load_ms: plus(*l, *load_ms),
         charts: charts.clone(),
     }
 }
@@ -343,6 +349,9 @@ impl Tracked {
                 duration_ms,
                 prompt_tokens = outcome.prompt_tokens,
                 completion_tokens = outcome.completion_tokens,
+                eval_ms = outcome.eval_ms,
+                prompt_eval_ms = outcome.prompt_eval_ms,
+                load_ms = outcome.load_ms,
                 detail = outcome.detail.as_deref(),
                 "request finished"
             );
@@ -757,13 +766,20 @@ impl Ollama {
             });
         }
         let outcome = match &run.end {
+            // This request's own timings: a follow-up has its own row.
             ChatEnd::Done {
                 prompt_tokens,
                 completion_tokens,
+                eval_ms,
+                prompt_eval_ms,
+                load_ms,
                 ..
             } => AuditOutcome {
                 prompt_tokens: *prompt_tokens,
                 completion_tokens: *completion_tokens,
+                eval_ms: *eval_ms,
+                prompt_eval_ms: *prompt_eval_ms,
+                load_ms: *load_ms,
                 ..AuditOutcome::new(AuditStatus::Ok)
             },
             ChatEnd::Cancelled => AuditOutcome::new(AuditStatus::Cancelled),
@@ -1248,7 +1264,24 @@ mod tests {
 
     const HEL: &str = r#"{"message":{"role":"assistant","content":"Hel"},"done":false}"#;
     const LO: &str = r#"{"message":{"role":"assistant","content":"lo"},"done":false}"#;
-    const DONE: &str = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":5000000,"prompt_eval_count":3,"eval_count":2,"eval_duration":2000000000}"#;
+    const DONE: &str = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":5000000,"load_duration":300000000,"prompt_eval_count":3,"prompt_eval_duration":1000000000,"eval_count":2,"eval_duration":2000000000}"#;
+
+    #[tokio::test]
+    async fn chat_audit_row_has_timings() {
+        let fake = fake_ollama(Reply::Lines(vec![HEL, DONE], Duration::ZERO)).await;
+        let (ollama, log) = ollama_at(fake.addr, test_limits());
+
+        send(&ollama, Uuid::new_v4(), |_| true).unwrap();
+        wait_idle(&ollama).await;
+
+        let [row] = log.all().try_into().unwrap();
+        assert_eq!(row.kind, "ollama.chat");
+        assert_eq!(row.status, AuditStatus::Ok);
+        assert_eq!(
+            (row.eval_ms, row.prompt_eval_ms, row.load_ms),
+            (Some(2000), Some(1000), Some(300))
+        );
+    }
 
     #[tokio::test]
     async fn streams_tokens_then_done() {
@@ -1965,6 +1998,8 @@ mod tests {
                 duration_ms: Some(5),
                 thinking_ms: None,
                 eval_ms: Some(2000),
+                prompt_eval_ms: Some(1000),
+                load_ms: Some(300),
                 ..
             }]
         ));

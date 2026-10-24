@@ -20,6 +20,15 @@ const formatDuration = (ms: number | null): string => {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(1)} s`;
 };
 
+/**
+ * Generation speed from Ollama's own timing, or an em dash for rows without
+ * one (older rows, failures and non-chat kinds).
+ */
+const formatTokensPerSecond = (event: AuditEvent): string =>
+  event.evalMs === null || event.evalMs <= 0 || event.completionTokens === null
+    ? "—"
+    : `${((event.completionTokens * 1000) / event.evalMs).toFixed(1)} tok/s`;
+
 /** Local date and time, to the second. */
 const formatTime = (at: string): string => {
   const date = new Date(at);
@@ -50,6 +59,7 @@ export {
   formatDuration,
   formatTime,
   formatTokens,
+  formatTokensPerSecond,
   hostsSummary,
   kindLabel,
   statusLabel,

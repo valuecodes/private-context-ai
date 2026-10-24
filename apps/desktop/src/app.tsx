@@ -1,4 +1,4 @@
-import { Activity, MessageSquare, Settings } from "lucide-react";
+import { Activity, Gauge, MessageSquare, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
@@ -9,6 +9,7 @@ import { ChatView } from "~/features/chat/chat-view";
 import { useChatStream } from "~/features/chat/use-chat-stream";
 import { Sidebar } from "~/features/conversations/sidebar";
 import { useConversations } from "~/features/conversations/use-conversations";
+import { ModelsPanel } from "~/features/models/models-panel";
 import { MemoryPreview } from "~/features/projects/memory-preview";
 import { ProjectView } from "~/features/projects/project-view";
 import { useMemoryStatus } from "~/features/projects/use-memory-status";
@@ -23,7 +24,7 @@ import { settingsGet, storageStatus } from "~/lib/ipc";
 import type { StorageStatus } from "~/lib/types";
 
 /** `project`: a project's view, opened from the sidebar; not a tab. */
-type View = "chat" | "activity" | "settings" | "project";
+type View = "chat" | "activity" | "models" | "settings" | "project";
 
 const VIEWS: {
   id: Exclude<View, "project">;
@@ -32,10 +33,11 @@ const VIEWS: {
 }[] = [
   { id: "chat", label: "Chat", Icon: MessageSquare },
   { id: "activity", label: "Activity", Icon: Activity },
+  { id: "models", label: "Models", Icon: Gauge },
   { id: "settings", label: "Settings", Icon: Settings },
 ];
 
-/** The sidebar and the chat, activity and settings views, shown once
+/** The sidebar and the chat, activity, models and settings views, shown once
  * storage is open. Chat state lives here, so switching views keeps it. */
 const Workspace = () => {
   const [version, setVersion] = useState("");
@@ -350,6 +352,7 @@ const Workspace = () => {
             />
           )}
           {view === "activity" && <ActivityPanel />}
+          {view === "models" && <ModelsPanel />}
           {view === "settings" && (
             <SettingsView
               onSaved={(settings) => {

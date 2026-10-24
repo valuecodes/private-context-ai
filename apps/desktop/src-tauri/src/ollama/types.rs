@@ -204,6 +204,10 @@ pub struct ChatLine {
     pub total_duration: Option<u64>,
     /// Nanoseconds spent generating `eval_count` tokens.
     pub eval_duration: Option<u64>,
+    /// Nanoseconds spent processing `prompt_eval_count` prompt tokens.
+    pub prompt_eval_duration: Option<u64>,
+    /// Nanoseconds spent loading the model.
+    pub load_duration: Option<u64>,
     pub error: Option<String>,
 }
 

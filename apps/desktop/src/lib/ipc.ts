@@ -18,6 +18,7 @@ import type {
   MemoryStatus,
   ModelCapabilities,
   ModelInfo,
+  ModelStats,
   OllamaStatus,
   PendingCount,
   Project,
@@ -352,6 +353,10 @@ const activityList = (
 const activityHosts = (): Promise<string[]> =>
   invoke<string[]>("activity_hosts");
 
+/** Per-model speed from the retained chat and memory audit rows. */
+const activityModelStats = (): Promise<ModelStats[]> =>
+  invoke<ModelStats[]>("activity_model_stats");
+
 const settingsGet = (): Promise<Settings> => invoke<Settings>("settings_get");
 
 const settingsSet = (patch: SettingsPatch): Promise<Settings> =>
@@ -360,6 +365,7 @@ const settingsSet = (patch: SettingsPatch): Promise<Settings> =>
 export {
   activityHosts,
   activityList,
+  activityModelStats,
   appInfo,
   chatCancel,
   chatCompare,
