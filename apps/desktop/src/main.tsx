@@ -14,7 +14,7 @@ import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/jetbrains-mono/wght.css";
 import "./globals.css";
 
-// `theme-init.js` already set the theme; this keeps it following the OS.
+// `theme-init.ts` already set the theme; this keeps it following the OS.
 applyTheme();
 
 const rootElement = document.getElementById("root");

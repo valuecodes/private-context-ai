@@ -1,7 +1,7 @@
 /**
  * The Appearance setting. Stored in `localStorage`, not the encrypted
  * settings: it is a non-sensitive UI preference that must apply before the
- * database unlocks. `public/theme-init.js` applies it before first paint with
+ * database unlocks. `src/theme-init.ts` applies it before first paint with
  * the same key and rules; this module keeps it applied afterwards.
  */
 type Theme = "system" | "light" | "dark";

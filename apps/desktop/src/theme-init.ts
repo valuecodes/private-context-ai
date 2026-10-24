@@ -1,9 +1,11 @@
 // Applies the saved Appearance choice before first paint, so the app never
-// flashes the wrong theme. A classic same-origin script loaded from <head>:
-// the CSP allows it (`script-src 'self'`) and it runs before any stylesheet
-// or the body. Keep the key and rules in step with `src/lib/theme.ts`.
+// flashes the wrong theme. The `theme-init` plugin in `vite.config.ts` serves
+// and emits this file as `/theme-init.js`, a classic same-origin script loaded
+// from <head>: the CSP allows it (`script-src 'self'`) and it runs before any
+// stylesheet or the body. It has no imports or exports, so it compiles to a
+// plain script. Keep the key and rules in step with `src/lib/theme.ts`.
 {
-  let theme = "system";
+  let theme: "system" | "light" | "dark" = "system";
   try {
     const stored = globalThis.localStorage.getItem("theme");
     if (stored === "light" || stored === "dark") {

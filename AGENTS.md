@@ -139,6 +139,9 @@ discussion first.
 
 - Keep diffs tight and focused; no drive-by refactors or new tooling without discussion.
 - Never commit secrets, credentials, or `.env` files. All code must be public-safe.
+- TypeScript only: no `.js`, `.jsx`, `.cjs` or `.mjs` files, config files included
+  (`*.config.ts`). A browser script that must stay a classic script, such as
+  `apps/desktop/src/theme-init.ts`, is compiled by a Vite plugin, not committed as JS.
 - Add dependencies to the correct workspace with `pnpm --filter <package> add <dep>`.
   Versions shared by more than one package go in the `catalog:` block of
   `pnpm-workspace.yaml`; single-consumer deps are pinned inline.
