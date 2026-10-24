@@ -1,4 +1,4 @@
-import { Ghost } from "lucide-react";
+import { ArrowDown, Ghost } from "lucide-react";
 import type { Dispatch, SetStateAction, UIEvent } from "react";
 import { useEffect, useRef, useState } from "react";
 
@@ -11,6 +11,7 @@ import { Composer } from "~/features/chat/composer";
 import { ComposerControls } from "~/features/chat/composer-controls";
 import { MessageList } from "~/features/chat/message-list";
 import { pickModel } from "~/features/chat/pick-model";
+import { followsAfterScroll, isAtBottom } from "~/features/chat/scroll";
 import { useModelCapabilities } from "~/features/chat/use-model-capabilities";
 import { MemoryIndicator } from "~/features/projects/memory-indicator";
 import type { ProjectMemoryStatus } from "~/features/projects/use-memory-status";
@@ -91,8 +92,28 @@ const ChatView = ({
   const content = useRef<HTMLDivElement>(null);
   // Follow new tokens unless the user has scrolled up to read.
   const followBottom = useRef(true);
+  // Whether the view is at the end, which hides the scroll-down button. Not
+  // the same as following: a jump down follows before it arrives.
+  const [atBottom, setAtBottom] = useState(true);
+  // A jump to the newest message is under way.
+  const jumping = useRef(false);
+  const lastScrollTop = useRef(0);
   const empty =
     state.messages.length === 0 && state.compare === null && !state.loading;
+
+  // Another chat starts at its end. `empty` too: a new chat unmounts the
+  // scroller, and the next one mounts at the top.
+  const chatKey = `${String(state.temporary)}:${state.conversationId ?? ""}:${String(empty)}`;
+  const [shownChat, setShownChat] = useState(chatKey);
+  if (shownChat !== chatKey) {
+    setShownChat(chatKey);
+    setAtBottom(true);
+  }
+  useEffect(() => {
+    followBottom.current = true;
+    jumping.current = false;
+    lastScrollTop.current = 0;
+  }, [chatKey]);
 
   // Follows the content's height rather than `state.messages`: a reply's
   // Markdown renders deferred, after the message state has changed.
@@ -114,9 +135,55 @@ const ChatView = ({
   }, [empty]);
 
   const onScroll = (event: UIEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    followBottom.current =
-      element.scrollHeight - element.scrollTop - element.clientHeight < 32;
+    const { scrollHeight, scrollTop, clientHeight } = event.currentTarget;
+    const at = isAtBottom(scrollHeight, scrollTop, clientHeight);
+    followBottom.current = followsAfterScroll({
+      atBottom: at,
+      jumping: jumping.current,
+      scrollTop,
+      lastScrollTop: lastScrollTop.current,
+    });
+    if (at || !followBottom.current) {
+      jumping.current = false;
+    }
+    lastScrollTop.current = scrollTop;
+    setAtBottom(at);
+  };
+
+  // The user's own wheel, touch, pointer or keys take over from a jump.
+  useEffect(() => {
+    const element = scroller.current;
+    if (empty || element === null) {
+      return undefined;
+    }
+    const endJump = () => {
+      jumping.current = false;
+    };
+    const events = ["wheel", "touchstart", "pointerdown", "keydown"] as const;
+    for (const name of events) {
+      element.addEventListener(name, endJump, { passive: true });
+    }
+    return () => {
+      for (const name of events) {
+        element.removeEventListener(name, endJump);
+      }
+    };
+  }, [empty]);
+
+  const jumpToBottom = () => {
+    const element = scroller.current;
+    if (element === null) {
+      return;
+    }
+    followBottom.current = true;
+    jumping.current = true;
+    const still = globalThis.matchMedia(
+      "(prefers-reduced-motion: reduce)"
+    ).matches;
+    element.scrollTo({
+      top: element.scrollHeight,
+      behavior: still ? "auto" : "smooth",
+    });
   };
 
   // (Re)load the model list whenever Ollama becomes reachable, or on retry.
@@ -307,7 +374,22 @@ const ChatView = ({
           {state.error.message}
         </p>
       )}
-      <div className={`mx-auto w-full max-w-3xl ${empty ? "flex-1" : ""}`}>
+      {/* `relative`: the scroll-down button sits just above the composer,
+          outside the scroller so scrolling never moves it. */}
+      <div
+        className={`relative mx-auto w-full max-w-3xl ${empty ? "flex-1" : ""}`}
+      >
+        {!empty && !atBottom && (
+          <button
+            type="button"
+            onClick={jumpToBottom}
+            aria-label="Scroll to newest message"
+            title="Scroll to newest message"
+            className="absolute -top-12 left-1/2 z-10 -translate-x-1/2 rounded-full border border-zinc-300 bg-white p-2 text-zinc-600 shadow-sm hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+          >
+            <ArrowDown aria-hidden="true" className="size-4" />
+          </button>
+        )}
         <Composer
           streaming={streaming}
           canSend={selected !== "" && !state.loading && comparison === null}

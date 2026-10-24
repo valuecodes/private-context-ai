@@ -159,6 +159,26 @@ describe("Sidebar", () => {
     expect(ungrouped).not.toContain("Thesis chat");
   });
 
+  it("groups the chats under date headings, newest group first", () => {
+    const today = {
+      ...conversation("a", "Fresh"),
+      updatedAt: new Date().toISOString(),
+    };
+    const html = renderSidebar({
+      conversations: [today, conversation("b", "Ancient")],
+      selectedId: "a",
+    });
+    expect(html).toMatch(/>Today<\/h3><ul[^>]*>.*Fresh.*<\/ul>.*>Older</);
+    expect(html).toMatch(/>Older<\/h3><ul[^>]*>.*Ancient/);
+    expect(html).not.toContain("Yesterday");
+    // The selected chat stands out by weight, not only its background.
+    const itemClass = (title: string) =>
+      new RegExp(`<li class="([^"]*)"><button[^>]*>${title}<`).exec(html)?.[1];
+    expect(itemClass("Fresh")).toContain("font-medium");
+    expect(itemClass("Ancient")).toBeDefined();
+    expect(itemClass("Ancient")).not.toContain("font-medium");
+  });
+
   it("shows an error", () => {
     const html = renderSidebar({
       error: { kind: "database", message: "disk full" },
