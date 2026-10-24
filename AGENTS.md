@@ -108,7 +108,7 @@ runs on Windows; from WSL, `build:windows` runs it there on an export of HEAD.
 
 ### Security invariants
 
-The README's "Security model" section explains these; a change that breaks one needs
+`docs/security.md` explains these; a change that breaks one needs
 discussion first.
 
 - **No egress except Ollama on loopback.** The webview has no network (strict CSP, no
