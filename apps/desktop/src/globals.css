@@ -2,6 +2,16 @@
 
 @source "./**/*.{js,jsx,ts,tsx}";
 
+/* `dark:` follows the Appearance setting (`lib/theme.ts`), not the OS. */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
 /* The bundled fonts, imported in `main.tsx`. */
 @theme {
   --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
@@ -75,7 +85,8 @@
   }
 }
 
-/* Code highlighting by lowlight (highlight.js classes), light then dark. */
+/* Code highlighting by lowlight (highlight.js classes), light then dark
+   (nested under `[data-theme="dark"]`, the same switch as `dark:`). */
 .hljs-comment,
 .hljs-quote {
   color: #6a737d;
@@ -126,7 +137,7 @@
   font-weight: 600;
 }
 
-@media (prefers-color-scheme: dark) {
+[data-theme="dark"] {
   .hljs-comment,
   .hljs-quote {
     color: #8b949e;

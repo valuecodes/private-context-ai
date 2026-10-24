@@ -3,9 +3,17 @@ import { useEffect, useState } from "react";
 
 import { toAppError } from "~/lib/app-error";
 import { appInfo, ollamaListModels, settingsGet, settingsSet } from "~/lib/ipc";
+import type { Theme } from "~/lib/theme";
+import { getTheme, setTheme as applyChoice, THEMES } from "~/lib/theme";
 import type { LogLevel, Settings } from "~/lib/types";
 
 const LOG_LEVELS: LogLevel[] = ["error", "warn", "info", "debug", "trace"];
+
+const THEME_LABELS: Record<Theme, string> = {
+  system: "System",
+  light: "Light",
+  dark: "Dark",
+};
 
 const input =
   "rounded border border-zinc-300 bg-white px-2 py-1 text-sm dark:border-zinc-700 dark:bg-zinc-900";
@@ -163,6 +171,34 @@ const SettingsForm = ({
   );
 };
 
+type AppearanceSettingsProps = {
+  theme: Theme;
+  onChange: (theme: Theme) => void;
+};
+
+/** Applies at once: a UI preference, not part of the saved settings. */
+const AppearanceSettings = ({ theme, onChange }: AppearanceSettingsProps) => (
+  <fieldset className="flex max-w-lg flex-col gap-1">
+    <legend className={label}>Appearance</legend>
+    <div className="flex gap-4 pt-1">
+      {THEMES.map((value) => (
+        <label key={value} className="flex items-center gap-1.5 text-sm">
+          <input
+            type="radio"
+            name="theme"
+            value={value}
+            checked={theme === value}
+            onChange={() => {
+              onChange(value);
+            }}
+          />
+          {THEME_LABELS[value]}
+        </label>
+      ))}
+    </div>
+  </fieldset>
+);
+
 type SettingsViewProps = {
   /** Called with what was stored, after a successful save. */
   onSaved: (settings: Settings) => void;
@@ -180,6 +216,7 @@ const SettingsView = ({ onSaved }: SettingsViewProps) => {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [errors, setErrors] = useState<Errors>(NO_ERRORS);
+  const [theme, setTheme] = useState(getTheme);
   // Bumped after each save, so a new base URL lists its own models.
   const [modelsAttempt, setModelsAttempt] = useState(0);
 
@@ -296,9 +333,16 @@ const SettingsView = ({ onSaved }: SettingsViewProps) => {
       <h2 id="settings-heading" className="text-sm font-semibold">
         Settings
       </h2>
+      <AppearanceSettings
+        theme={theme}
+        onChange={(next) => {
+          applyChoice(next);
+          setTheme(next);
+        }}
+      />
       {body}
     </section>
   );
 };
 
-export { SettingsForm, SettingsView };
+export { AppearanceSettings, SettingsForm, SettingsView };

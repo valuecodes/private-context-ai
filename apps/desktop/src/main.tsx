@@ -1,6 +1,8 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { applyTheme } from "~/lib/theme";
+
 import { App } from "./app";
 
 // Bundled fonts, so text looks the same on every OS. Imported here, not from
@@ -11,6 +13,9 @@ import { App } from "./app";
 import "@fontsource-variable/inter/wght.css";
 import "@fontsource-variable/jetbrains-mono/wght.css";
 import "./globals.css";
+
+// `theme-init.js` already set the theme; this keeps it following the OS.
+applyTheme();
 
 const rootElement = document.getElementById("root");
 if (rootElement) {
