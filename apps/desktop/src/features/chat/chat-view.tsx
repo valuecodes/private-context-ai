@@ -321,47 +321,62 @@ const ChatView = ({
           )}
         </div>
       ) : (
-        <div
-          ref={scroller}
-          onScroll={onScroll}
-          role="region"
-          aria-label="Conversation"
-          className="relative flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
-        >
-          <div ref={content} className="mx-auto w-full max-w-3xl">
-            <MessageList
-              messages={state.messages}
-              busy={
-                streaming ||
-                state.loading ||
-                selected === "" ||
-                comparison !== null
-              }
-              onRegenerate={() => {
-                regenerate(selected);
-              }}
-              onEdit={(messageId, text) => edit(selected, messageId, text)}
-            />
-            {comparison !== null && (
-              <div className={state.messages.length === 0 ? "" : "mt-4"}>
-                <CompareView
-                  compare={comparison}
-                  comparing={state.phase === "comparing"}
-                  onPick={(messageId) => {
-                    const model = comparison.candidates.find(
-                      ({ id }) => id === messageId
-                    )?.model;
-                    void pick(messageId).then((kept) => {
-                      if (kept && model !== undefined) {
-                        setModel(model);
-                      }
-                    });
-                  }}
-                  onDiscard={discard}
-                />
-              </div>
-            )}
+        // `relative` and not scrolling: the scroll-down button stays at the
+        // bottom of the messages, clear of the notices below them.
+        <div className="relative flex min-h-0 flex-1 flex-col">
+          <div
+            ref={scroller}
+            onScroll={onScroll}
+            role="region"
+            aria-label="Conversation"
+            className="relative flex min-h-0 flex-1 flex-col overflow-y-auto rounded focus-visible:outline-2 focus-visible:outline-zinc-400"
+          >
+            <div ref={content} className="mx-auto w-full max-w-3xl">
+              <MessageList
+                messages={state.messages}
+                busy={
+                  streaming ||
+                  state.loading ||
+                  selected === "" ||
+                  comparison !== null
+                }
+                onRegenerate={() => {
+                  regenerate(selected);
+                }}
+                onEdit={(messageId, text) => edit(selected, messageId, text)}
+              />
+              {comparison !== null && (
+                <div className={state.messages.length === 0 ? "" : "mt-4"}>
+                  <CompareView
+                    compare={comparison}
+                    comparing={state.phase === "comparing"}
+                    onPick={(messageId) => {
+                      const model = comparison.candidates.find(
+                        ({ id }) => id === messageId
+                      )?.model;
+                      void pick(messageId).then((kept) => {
+                        if (kept && model !== undefined) {
+                          setModel(model);
+                        }
+                      });
+                    }}
+                    onDiscard={discard}
+                  />
+                </div>
+              )}
+            </div>
           </div>
+          {!atBottom && (
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              aria-label="Scroll to newest message"
+              title="Scroll to newest message"
+              className="absolute bottom-3 left-1/2 z-10 -translate-x-1/2 rounded-full border border-zinc-300 bg-white p-2 text-zinc-600 shadow-sm hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
+            >
+              <ArrowDown aria-hidden="true" className="size-4" />
+            </button>
+          )}
         </div>
       )}
       {state.notice !== null && (
@@ -374,22 +389,7 @@ const ChatView = ({
           {state.error.message}
         </p>
       )}
-      {/* `relative`: the scroll-down button sits just above the composer,
-          outside the scroller so scrolling never moves it. */}
-      <div
-        className={`relative mx-auto w-full max-w-3xl ${empty ? "flex-1" : ""}`}
-      >
-        {!empty && !atBottom && (
-          <button
-            type="button"
-            onClick={jumpToBottom}
-            aria-label="Scroll to newest message"
-            title="Scroll to newest message"
-            className="absolute -top-12 left-1/2 z-10 -translate-x-1/2 rounded-full border border-zinc-300 bg-white p-2 text-zinc-600 shadow-sm hover:bg-zinc-100 focus-visible:outline-2 focus-visible:outline-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            <ArrowDown aria-hidden="true" className="size-4" />
-          </button>
-        )}
+      <div className={`mx-auto w-full max-w-3xl ${empty ? "flex-1" : ""}`}>
         <Composer
           streaming={streaming}
           canSend={selected !== "" && !state.loading && comparison === null}

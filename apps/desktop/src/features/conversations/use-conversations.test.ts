@@ -151,6 +151,17 @@ describe("conversationsReducer", () => {
     ).toEqual(state);
   });
 
+  it("keeps the model when a comparison uses the chat", () => {
+    const state = conversationsReducer(loaded("a", "b"), {
+      type: "touched",
+      id: "b",
+      at: "2026-02-01T00:00:00.000Z",
+    });
+    expect(ids(state)).toEqual(["b", "a"]);
+    expect(state.conversations[0]?.model).toBe("llama3.2");
+    expect(state.conversations[0]?.updatedAt).toBe("2026-02-01T00:00:00.000Z");
+  });
+
   it("moves a chat from last week under Today once it is used", () => {
     const now = new Date(2026, 0, 10, 12);
     const state = conversationsReducer(loaded("a", "b"), {
