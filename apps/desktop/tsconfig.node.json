@@ -1,0 +1,7 @@
+{
+  // The Vite and Vitest configs run in Node, not the browser, so they get the
+  // node preset (no DOM lib) and are checked separately from `src/`. oxlint's
+  // type-aware rules also resolve them through this file.
+  "extends": "@repo/typescript/node.json",
+  "include": ["*.config.ts"]
+}
