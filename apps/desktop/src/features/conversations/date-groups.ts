@@ -16,6 +16,10 @@ type DateGroup = { label: DateLabel; conversations: Conversation[] };
 const daysBefore = (now: Date, days: number): number =>
   new Date(now.getFullYear(), now.getMonth(), now.getDate() - days).getTime();
 
+/** Milliseconds from `now` to the next local midnight, when Today rolls over. */
+const msUntilNextDay = (now: Date): number =>
+  daysBefore(now, -1) - now.getTime();
+
 /**
  * Buckets conversations by `updatedAt` on local calendar days, keeping their
  * order within each group and dropping empty groups. A future time counts as
@@ -38,4 +42,4 @@ const groupByDate = (conversations: Conversation[], now: Date): DateGroup[] => {
   return groups.filter((group) => group.conversations.length > 0);
 };
 
-export { groupByDate };
+export { groupByDate, msUntilNextDay };

@@ -72,7 +72,7 @@ and threat notes.
 
 ## Quick start
 
-You need Node.js 24.22.1, pnpm 12.6.0, Rust (rustup) and [Ollama](https://ollama.com).
+You need Node.js 24.22.1, pnpm 12.11.2, Rust (rustup) and [Ollama](https://ollama.com).
 Start Ollama first: open the Ollama app, or run `ollama serve` in its own terminal.
 
 ```bash

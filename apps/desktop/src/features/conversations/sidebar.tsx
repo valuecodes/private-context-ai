@@ -12,6 +12,7 @@ import {
   useConversationSearch,
 } from "~/features/conversations/use-conversation-search";
 import type { ConversationsState } from "~/features/conversations/use-conversations";
+import { useNow } from "~/features/conversations/use-now";
 import type { MemoryStatuses } from "~/features/projects/use-memory-status";
 import type { Conversation, Project } from "~/lib/types";
 
@@ -264,6 +265,7 @@ const Sidebar = ({
   const matches = useConversationSearch(query, state.conversations, disabled);
   const searching = query.trim() !== "";
   const shown = listedConversations(state.conversations, query, matches);
+  const now = useNow();
 
   const modeOf = (id: string): ItemMode =>
     editing?.id === id ? editing.mode : "view";
@@ -319,8 +321,7 @@ const Sidebar = ({
       <ConversationList
         shown={shown}
         searching={searching}
-        // Read per render: an open sidebar regroups on its next update.
-        now={new Date()}
+        now={now}
         item={item}
       />
     );

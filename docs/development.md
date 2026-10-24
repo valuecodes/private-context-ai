@@ -12,15 +12,16 @@
 ```text
 apps/desktop           Tauri 2 app: React frontend in src/, Rust in src-tauri/
 packages/logger        pino logger, Cloud Logging shaped JSON
-tooling/typescript     shared tsconfig presets (base, node, react)
-tooling/github         composite action: pnpm + Node + install; secrets-scan script
+packages/typescript    shared tsconfig presets (base, node, react)
+.github/actions/setup  composite action: pnpm + Node + install
+.github/scripts        secrets-scan script (gitleaks, version pinned)
 .oxlintrc.json         single root lint config for the whole repo
 .oxfmtrc.jsonc         single root format config for the whole repo
 ```
 
 ## Getting started
 
-Requires Node.js 24.22.1 (`.nvmrc`) and pnpm 12.6.0 (`packageManager` in `package.json`).
+Requires Node.js 24.22.1 (`.nvmrc`) and pnpm 12.11.2 (`packageManager` in `package.json`).
 
 ```bash
 pnpm install
@@ -102,9 +103,15 @@ CI does not build or check Rust. Run the three `rust:*` scripts, the dev window 
 
 oxlint prints nothing when there are no findings, so silent output means clean.
 
-CI runs typecheck, lint, knip, format-check, test, build and a gitleaks secret scan on
-push to `main` and on PRs, plus CodeQL code scanning. `secrets:scan` needs either
-`gitleaks` v8.19+ on PATH or a running Docker daemon.
+CI runs typecheck, lint, knip, format:check, test, build and a gitleaks secret scan on
+PRs and on push to `main`, plus CodeQL code scanning. The `all-passed` job fans them in:
+require only that check in branch protection. `secrets:scan` needs either `gitleaks`
+v8.19+ on PATH or a running Docker daemon.
+
+Two scheduled workflows call `valuecodes/automation` daily: `node-update.yml` opens a PR
+when a newer Node.js release is out on the `.nvmrc` major, and
+`maintenance-dashboard.yml` keeps one issue listing due catalog, pnpm, gitleaks, Node.js
+and `pnpm audit` updates.
 
 ## Repository settings
 
@@ -113,5 +120,8 @@ push to `main` and on PRs, plus CodeQL code scanning. `secrets:scan` needs eithe
   GitHub rejects the workflow's uploads while it is on.
 - Under Settings → Code security, turn on **Dependabot alerts** and leave **Dependabot
   security updates** off: you get notified about vulnerable dependencies without
-  automatic PRs. There is deliberately no `.github/dependabot.yml`, so no version-update
-  PRs either.
+  automatic PRs. `.github/dependabot.yml` only bumps the SHA-pinned GitHub Actions,
+  monthly in one grouped PR; npm and Cargo dependencies are updated by hand.
+- Under Settings → Actions → General, turn on **Allow GitHub Actions to create and
+  approve pull requests**, or `node-update.yml` cannot open its PR. Its PRs start CI
+  only after someone clicks **Approve workflows to run**.

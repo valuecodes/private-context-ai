@@ -26,10 +26,17 @@
   "options": { "typeAware": true },
   "env": { "builtin": true },
 
-  // `.gitignore` is read natively. Config files sit outside every tsconfig
-  // `include`, so type-aware rules cannot resolve them; they also need a
-  // default export.
-  "ignorePatterns": ["**/*.config.*"],
+  // `.gitignore` is read natively.
+
+  // Vite and Vitest load their config through a default export, so that one
+  // rule is off for config files. They are type-checked (and resolved for the
+  // type-aware rules) through the app's `tsconfig.node.json`.
+  "overrides": [
+    {
+      "files": ["**/*.config.*"],
+      "rules": { "import/no-default-export": "off" }
+    }
+  ],
 
   "rules": {
     // eslint core -- eslint:recommended, minus the rules typescript-eslint
@@ -221,8 +228,8 @@
     "import/no-cycle": "error",
     "import/no-duplicates": "error",
     "import/no-self-import": "error",
-    // Named exports only. Config files that need a default export are
-    // already excluded by `ignorePatterns`.
+    // Named exports only. The `overrides` entry above turns this off for the
+    // config files, which Vite and Vitest load through a default export.
     "import/no-default-export": "error",
     // Declarations first, one export list at the bottom, as in `@repo/logger`.
     "import/exports-last": "error",

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { Conversation } from "~/lib/types";
 
-import { groupByDate } from "./date-groups";
+import { groupByDate, msUntilNextDay } from "./date-groups";
 
 const at = (id: string, updatedAt: string): Conversation => ({
   id,
@@ -75,5 +75,16 @@ describe("groupByDate", () => {
       ["Older", ["old"]],
     ]);
     expect(groupByDate([], NOW)).toEqual([]);
+  });
+});
+
+describe("msUntilNextDay", () => {
+  it("counts down to the next local midnight", () => {
+    expect(msUntilNextDay(NOW)).toBe(
+      new Date(2026, 9, 25).getTime() - NOW.getTime()
+    );
+    expect(msUntilNextDay(new Date(2026, 9, 24))).toBe(
+      new Date(2026, 9, 25).getTime() - new Date(2026, 9, 24).getTime()
+    );
   });
 });
