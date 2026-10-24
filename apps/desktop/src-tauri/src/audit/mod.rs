@@ -71,6 +71,11 @@ pub struct AuditEvent {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub duration_ms: Option<u64>,
+    /// Ollama's own timings of a finished chat or memory request: generating
+    /// the completion, processing the prompt, loading the model.
+    pub eval_ms: Option<u64>,
+    pub prompt_eval_ms: Option<u64>,
+    pub load_ms: Option<u64>,
     /// The error kind (plus `HTTP <code>`) of a failed request, or the
     /// storage state of a failed `db.open`.
     pub detail: Option<String>,
@@ -83,6 +88,9 @@ pub struct AuditOutcome {
     pub prompt_tokens: Option<u64>,
     pub completion_tokens: Option<u64>,
     pub duration_ms: Option<u64>,
+    pub eval_ms: Option<u64>,
+    pub prompt_eval_ms: Option<u64>,
+    pub load_ms: Option<u64>,
     pub detail: Option<String>,
 }
 
@@ -93,6 +101,9 @@ impl AuditOutcome {
             prompt_tokens: None,
             completion_tokens: None,
             duration_ms: None,
+            eval_ms: None,
+            prompt_eval_ms: None,
+            load_ms: None,
             detail: None,
         }
     }

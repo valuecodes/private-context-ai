@@ -184,6 +184,7 @@ pub fn run() {
             commands::projects::project_context_preview,
             commands::activity::activity_list,
             commands::activity::activity_hosts,
+            commands::activity::activity_model_stats,
             commands::settings::settings_get,
             commands::settings::settings_set,
         ])

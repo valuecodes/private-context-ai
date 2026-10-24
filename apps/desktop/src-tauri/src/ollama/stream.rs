@@ -83,6 +83,10 @@ pub enum ChatEnd {
         duration_ms: Option<u64>,
         thinking_ms: Option<u64>,
         eval_ms: Option<u64>,
+        /// Processing the prompt tokens only.
+        prompt_eval_ms: Option<u64>,
+        /// Loading the model, when it was not loaded yet.
+        load_ms: Option<u64>,
         /// The reply's `render_chart` calls. When there are any, no `Done`
         /// event was emitted: a follow-up request continues the reply.
         charts: Vec<ChartEntry>,
@@ -340,6 +344,8 @@ async fn stream_reply(
             if line.done {
                 let duration_ms = line.total_duration.map(|nanos| nanos / 1_000_000);
                 let eval_ms = line.eval_duration.map(|nanos| nanos / 1_000_000);
+                let prompt_eval_ms = line.prompt_eval_duration.map(|nanos| nanos / 1_000_000);
+                let load_ms = line.load_duration.map(|nanos| nanos / 1_000_000);
                 thinking.answered();
                 let thinking_ms = thinking.ms();
                 let Some(charts) =
@@ -366,6 +372,8 @@ async fn stream_reply(
                     duration_ms,
                     thinking_ms,
                     eval_ms,
+                    prompt_eval_ms,
+                    load_ms,
                     charts,
                 });
             }
@@ -404,7 +412,7 @@ mod tests {
         let mut decoder = NdjsonDecoder::new(1024);
         let lines = decoder
             .push(
-                br#"{"model":"m","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","total_duration":2500000000,"prompt_eval_count":12,"eval_count":34,"eval_duration":2000000000}
+                br#"{"model":"m","message":{"role":"assistant","content":""},"done":true,"done_reason":"length","total_duration":2500000000,"load_duration":300000000,"prompt_eval_count":12,"prompt_eval_duration":150000000,"eval_count":34,"eval_duration":2000000000}
 "#,
             )
             .unwrap();
@@ -417,6 +425,8 @@ mod tests {
         assert_eq!(line.eval_count, Some(34));
         assert_eq!(line.total_duration, Some(2_500_000_000));
         assert_eq!(line.eval_duration, Some(2_000_000_000));
+        assert_eq!(line.prompt_eval_duration, Some(150_000_000));
+        assert_eq!(line.load_duration, Some(300_000_000));
     }
 
     #[test]

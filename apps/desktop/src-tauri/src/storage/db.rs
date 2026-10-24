@@ -67,8 +67,19 @@ mod tests {
     use super::*;
     use crate::storage::key::new_key;
 
-    /// Undoes migration 0009.
+    /// Undoes migration 0010.
+    fn undo_audit_timings(conn: &Connection) {
+        conn.execute_batch(
+            "ALTER TABLE audit_events DROP COLUMN eval_ms;
+             ALTER TABLE audit_events DROP COLUMN prompt_eval_ms;
+             ALTER TABLE audit_events DROP COLUMN load_ms;",
+        )
+        .unwrap();
+    }
+
+    /// Undoes migrations 0010 and 0009.
     fn undo_memory(conn: &Connection) {
+        undo_audit_timings(conn);
         conn.execute_batch(
             "DROP TABLE project_memories;
              ALTER TABLE projects DROP COLUMN auto_memory;",
@@ -96,7 +107,17 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
+        let audit_columns: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('audit_events')")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for column in ["eval_ms", "prompt_eval_ms", "load_ms"] {
+            assert!(audit_columns.iter().any(|name| name == column), "{column}");
+        }
         let mut tables: Vec<String> = conn
             .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
             .unwrap()
@@ -450,6 +471,33 @@ mod tests {
             })
             .unwrap();
         assert_eq!(memories, 0);
+    }
+
+    #[test]
+    fn version_nine_db_keeps_audit_rows_without_timings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        undo_audit_timings(&conn);
+        conn.execute_batch(
+            "PRAGMA user_version = 9;
+             INSERT INTO audit_events (at, kind, model, status, completion_tokens, duration_ms)
+               VALUES ('x', 'ollama.chat', 'm', 'ok', 5, 40);",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let row: (i64, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT duration_ms, eval_ms, prompt_eval_ms, load_ms FROM audit_events",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(row, (40, None, None, None));
     }
 
     #[test]

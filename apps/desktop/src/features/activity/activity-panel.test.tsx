@@ -16,6 +16,9 @@ const event = (id: number, overrides: Partial<AuditEvent>): AuditEvent => ({
   promptTokens: null,
   completionTokens: null,
   durationMs: null,
+  evalMs: null,
+  promptEvalMs: null,
+  loadMs: null,
   detail: null,
   ...overrides,
 });
@@ -29,6 +32,7 @@ describe("ActivityTable", () => {
             kind: "ollama.chat",
             promptTokens: 3,
             completionTokens: 2,
+            evalMs: 400,
           }),
           event(2, { kind: "ollama.tags", model: null }),
           event(1, { kind: "app.start", host: null, model: null }),
@@ -43,6 +47,8 @@ describe("ActivityTable", () => {
     expect(chat).toBeLessThan(tags);
     expect(tags).toBeLessThan(start);
     expect(html).toContain("3 / 2");
+    expect(html).toContain("Speed");
+    expect(html).toContain("5.0 tok/s");
   });
 
   it("takes the summary from the hosts it is given, not the rows", () => {

@@ -4,6 +4,7 @@ import {
   formatDuration,
   formatTime,
   formatTokens,
+  formatTokensPerSecond,
   hostsSummary,
   kindLabel,
   statusLabel,
@@ -46,6 +47,7 @@ const ActivityTable = ({ events, hosts }: ActivityTableProps) => (
               <th className={cell}>Model</th>
               <th className={cell}>Tokens</th>
               <th className={cell}>Duration</th>
+              <th className={cell}>Speed</th>
               <th className={cell}>Status</th>
             </tr>
           </thead>
@@ -63,6 +65,9 @@ const ActivityTable = ({ events, hosts }: ActivityTableProps) => (
                 <td className={cell}>{event.model ?? "—"}</td>
                 <td className={cell}>{formatTokens(event)}</td>
                 <td className={cell}>{formatDuration(event.durationMs)}</td>
+                <td className={`${cell} whitespace-nowrap`}>
+                  {formatTokensPerSecond(event)}
+                </td>
                 <td
                   className={`${cell} ${event.status === "ok" ? "" : "text-amber-700 dark:text-amber-400"}`}
                 >

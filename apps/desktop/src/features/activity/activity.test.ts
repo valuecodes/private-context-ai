@@ -5,6 +5,7 @@ import type { AuditEvent } from "~/lib/types";
 import {
   formatDuration,
   formatTokens,
+  formatTokensPerSecond,
   hostsSummary,
   kindLabel,
   statusLabel,
@@ -28,8 +29,27 @@ const event = (overrides: Partial<AuditEvent>): AuditEvent => ({
   promptTokens: null,
   completionTokens: null,
   durationMs: null,
+  evalMs: null,
+  promptEvalMs: null,
+  loadMs: null,
   detail: null,
   ...overrides,
+});
+
+describe("formatTokensPerSecond", () => {
+  it("divides completion tokens by Ollama's generation time", () => {
+    expect(
+      formatTokensPerSecond(event({ completionTokens: 50, evalMs: 2000 }))
+    ).toBe("25.0 tok/s");
+  });
+
+  it("shows an em dash without a usable timing", () => {
+    expect(formatTokensPerSecond(event({ completionTokens: 50 }))).toBe("—");
+    expect(
+      formatTokensPerSecond(event({ completionTokens: 50, evalMs: 0 }))
+    ).toBe("—");
+    expect(formatTokensPerSecond(event({ evalMs: 2000 }))).toBe("—");
+  });
 });
 
 describe("hostsSummary", () => {

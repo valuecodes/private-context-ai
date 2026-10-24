@@ -323,7 +323,30 @@ type AuditEvent = {
   promptTokens: number | null;
   completionTokens: number | null;
   durationMs: number | null;
+  /**
+   * Ollama's own timings of a finished chat or memory request: generating
+   * the completion, processing the prompt, loading the model.
+   */
+  evalMs: number | null;
+  promptEvalMs: number | null;
+  loadMs: number | null;
   detail: string | null;
+};
+
+/**
+ * One model's speed over its retained `ok` chat and memory requests with
+ * timings, from `activity_model_stats`. Speeds are tokens per second.
+ */
+type ModelStats = {
+  model: string;
+  /** Requests, not replies: a charted reply makes two. */
+  runs: number;
+  /** ISO-8601 UTC of the newest request. */
+  lastAt: string;
+  genTpsMedian: number;
+  genTpsP90: number;
+  promptTpsMedian: number | null;
+  loadMsMedian: number | null;
 };
 
 type LogLevel = "error" | "warn" | "info" | "debug" | "trace";
@@ -360,6 +383,7 @@ export type {
   MemoryStatus,
   ModelCapabilities,
   ModelInfo,
+  ModelStats,
   OllamaStatus,
   PendingCount,
   Project,
