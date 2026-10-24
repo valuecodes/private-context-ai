@@ -75,7 +75,6 @@ const setTheme = (theme: Theme) => {
 export type { Theme };
 export {
   applyTheme,
-  DARK_QUERY,
   getTheme,
   resolveTheme,
   setTheme,
