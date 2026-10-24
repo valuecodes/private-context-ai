@@ -2,7 +2,7 @@ import type { ComponentProps } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
-import { SettingsForm } from "./settings-view";
+import { AppearanceSettings, SettingsForm } from "./settings-view";
 
 type Props = ComponentProps<typeof SettingsForm>;
 
@@ -72,5 +72,21 @@ describe("SettingsForm", () => {
     const html = render({ formError: "database error: disk full" });
     expect(html).toContain('role="alert"');
     expect(html).toContain("database error: disk full");
+  });
+});
+
+describe("AppearanceSettings", () => {
+  it("offers System, Light and Dark with the current choice checked", () => {
+    const html = renderToString(
+      <AppearanceSettings theme="dark" onChange={() => undefined} />
+    );
+    expect(html).toMatch(/<fieldset[^>]*><legend[^>]*>Appearance<\/legend>/);
+    expect(html.match(/type="radio"/g)).toHaveLength(3);
+    for (const label of ["System", "Light", "Dark"]) {
+      expect(html).toContain(label);
+    }
+    expect(html.match(/<input[^>]*checked=""[^>]*>/g)).toEqual([
+      expect.stringContaining('value="dark"'),
+    ]);
   });
 });
