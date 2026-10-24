@@ -57,7 +57,7 @@ check for updates, but that traffic is Ollama's, not this app's.
 
 - **No network but Ollama on loopback.** A strict CSP blocks the window from the
   network. Rust refuses non-loopback hosts, proxies and redirects, and it is built
-  without TLS, so it cannot reach the internet.
+  without TLS, so it cannot speak HTTPS at all.
 - **Encrypted at rest.** Chats live in a SQLCipher database. Its key is kept in the
   OS keychain and never reaches the window.
 - **Every request is audited.** A row is written to the audit log before each request
@@ -73,10 +73,10 @@ and threat notes.
 ## Quick start
 
 You need Node.js 24.22.1, pnpm 12.6.0, Rust (rustup) and [Ollama](https://ollama.com).
+Start Ollama first: open the Ollama app, or run `ollama serve` in its own terminal.
 
 ```bash
 pnpm install
-ollama serve                     # or start the Ollama app
 ollama pull llama3.2             # any model works
 pnpm --filter desktop dev        # open the app
 pnpm --filter desktop build:app  # build installers
@@ -93,11 +93,16 @@ command are in [docs/development.md](docs/development.md).
 | Shift+Enter | New line                       |
 | Esc         | Stop the reply being generated |
 
+Esc works wherever focus is in the chat, except in the sidebar's rename field and in a
+message being edited, where it cancels the rename or the edit. In the message editor,
+Enter saves and resends.
+
 ## Your data
 
-Everything is stored in one encrypted file in the app data folder, with its key in
-the OS keychain. [docs/data.md](docs/data.md) lists the folders and log files, and
-explains how to wipe everything.
+Saved chats, the audit log and settings live in one encrypted database in the app data
+folder, with its key in the OS keychain. Log files hold metadata only.
+[docs/data.md](docs/data.md) lists the folders and files, and explains how to wipe
+everything.
 
 ## Docs
 
