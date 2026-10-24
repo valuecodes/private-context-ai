@@ -65,7 +65,8 @@ const loadTheme = async () => {
 // The pre-paint script, run as the webview would run it.
 const runInitScript = async () => {
   vi.resetModules();
-  const path = "/public/theme-init.js";
+  // A plain script has no exports, so tsc refuses a static specifier.
+  const path = "/src/theme-init.ts";
   await import(/* @vite-ignore */ path);
 };
 
@@ -144,7 +145,7 @@ describe("setTheme", () => {
   });
 });
 
-describe("theme-init.js", () => {
+describe("theme-init", () => {
   it.each([
     { stored: "light", prefersDark: true, expected: "light" },
     { stored: "dark", prefersDark: false, expected: "dark" },
