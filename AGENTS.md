@@ -65,39 +65,50 @@ configured by the root `knip.jsonc` and exits 0 when clean. Formatting is oxfmt
 (Prettier-compatible), configured by the root `.oxfmtrc.jsonc`, which also sorts
 imports and Tailwind classes.
 
-There is no post-edit formatting hook: run `pnpm format` yourself before committing.
+Nothing formats on edit, and the pre-commit hook only checks formatting: run
+`pnpm format` yourself before committing.
+
+Git hooks live in `.githooks/` and are plain shell scripts, with no hook manager.
+`pnpm install` enables them through the root `prepare` script. The setting goes in
+the clone's shared git config, so it covers every worktree, and a branch without
+`.githooks/` simply runs no hooks. If you cloned before the hooks existed and have
+not run `pnpm install` since, run `git config core.hooksPath .githooks` once.
+`pre-commit` runs `format:check`, `lint` and `secrets:scan --staged`. The secrets
+scan fails closed, so the commit is refused when neither gitleaks nor Docker is
+available. `pre-push` runs `typecheck`, `test` and `knip`. CI still runs every
+check, and neither hook runs the `rust:*` scripts. `format:check` and `lint` read
+the working tree, not the staged snapshot, so stage everything you mean to commit.
 
 `secrets:scan` runs gitleaks (`.github/scripts/secrets-scan.sh`, version pinned
 there) using a local `gitleaks` v8.19+ if one is on PATH, otherwise the pinned Docker image.
 It exits 0 when clean and 1 when it finds a leak.
 
-CI (`.github/workflows/ci.yml`) runs typecheck, lint, knip, format:check, test, build,
-secrets-scan and CodeQL code scanning (`javascript-typescript` and `actions`) on PRs and
-on push to `main`. `all-passed` fans those in and is the one check to require in branch
-protection. The typecheck, test and build jobs restore Turbo's `.turbo` cache from the
-previous run of the same task, so unchanged packages replay instead of rerunning. CI
-covers the frontend only; see Rust below.
+CI checks are defined once in the reusable `.github/workflows/checks.yml`: typecheck,
+lint, knip, format:check, test, build, secrets-scan, CodeQL code scanning
+(`javascript-typescript`) and workflow-lint. `feature.yml` calls it on PRs and
+`main.yml` on push to `main`. workflow-lint calls the reusable workflow from
+`valuecodes/automation`: actionlint (with shellcheck) and zizmor over the workflow and
+action files. Each tool reads `.github/actionlint.yaml` / `zizmor.yml` if added.
+`all-passed` in `feature.yml` fans the checks in and is the one check to require in
+branch protection. The typecheck, test and build jobs restore Turbo's `.turbo` cache
+from the previous run of the same task, so unchanged packages replay instead of
+rerunning. CI covers the frontend only; see Rust below.
 
 Dependabot (`.github/dependabot.yml`) bumps the SHA-pinned actions and reusable workflows
 monthly in one grouped PR; npm and Cargo dependencies are updated by hand.
-
-`node-update.yml` calls the reusable workflow from `valuecodes/automation` (pinned to a
-commit SHA) daily: when a newer Node.js release is out on the `.nvmrc` major, it opens a
-`chore: bump Node.js to …` PR. Security releases open one right away; others wait 14
-days. Its PRs start CI only after someone clicks **Approve workflows to run** (if no
-runs show up, close and reopen the PR). Keep the exact Node version only in `.nvmrc`,
-so that PR is the whole bump. A newer release closes the older PR and deletes its
-branch, so push any follow-up commits just before merging.
 
 `maintenance-dashboard.yml` calls the maintenance dashboard workflow from
 `valuecodes/automation` daily.
 It keeps one issue, **Maintenance dashboard** (label `maintenance-dashboard`), listing
 what is due: `catalog:` updates, pnpm (`packageManager`), gitleaks (`GITLEAKS_VERSION`
 in the secrets-scan script), Node.js (`.nvmrc`) and `pnpm audit` findings. Like
-`minimumReleaseAge`, a release shows up only once it is 14 days old. It never opens
-PRs or commits; doing the updates stays manual. If `GITLEAKS_VERSION` moves out of
+`minimumReleaseAge`, a release shows up only once it is 14 days old; a Node.js security
+release shows up right away and is flagged. It never opens PRs or commits; doing the
+updates stays manual. For a Node.js bump, change only `.nvmrc` (the one place that
+holds the exact version). If `GITLEAKS_VERSION` moves out of
 `.github/scripts/secrets-scan.sh`, pass the new path as the `gitleaks-script` input.
-Both callers pin the same `valuecodes/automation` commit, so bump them together.
+The dashboard and workflow-lint callers pin the same `valuecodes/automation` commit,
+so bump them together.
 
 ### Rust (`apps/desktop/src-tauri`)
 
@@ -160,6 +171,7 @@ discussion first.
 
 - Keep diffs tight and focused; no drive-by refactors or new tooling without discussion.
 - Never commit secrets, credentials, or `.env` files. All code must be public-safe.
+- Never bypass the git hooks with `--no-verify`; fix the failure instead.
 - TypeScript only: no `.js`, `.jsx`, `.cjs` or `.mjs` files, config files included
   (`*.config.ts`). A browser script that must stay a classic script, such as
   `apps/desktop/src/theme-init.ts`, is compiled by a Vite plugin, not committed as JS.

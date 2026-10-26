@@ -1,0 +1,36 @@
+name: Feature branch CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A newer push to the PR supersedes the running checks.
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/checks.yml # zizmor: ignore[self-repository]
+
+  # The one check to require in branch protection. `if: always()` makes it run
+  # even when a check failed, so it reports a failure instead of skipping.
+  all-passed:
+    name: all-passed
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    if: always()
+    needs: [checks]
+    permissions: {}
+    steps:
+      - name: Check results
+        env:
+          RESULT: ${{ needs.checks.result }}
+        run: |
+          [ "$RESULT" = success ] || { echo "checks ended with: $RESULT"; exit 1; }

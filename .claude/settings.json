@@ -26,6 +26,9 @@
       "Bash(wget:*)",
       "Bash(nc:*)",
       "Bash(ssh:*)",
+      "Bash(git commit --no-verify:*)",
+      "Bash(git commit -n:*)",
+      "Bash(git push --no-verify:*)",
       "Read(**/.env*)",
       "Read(**/secrets/**)"
     ],

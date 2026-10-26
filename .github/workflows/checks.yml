@@ -1,18 +1,12 @@
-name: CI
+name: Checks
 
+# Every check, defined once. `feature.yml` (PRs) and `main.yml` (push to main)
+# call it; a called workflow cannot raise the caller's token, so each caller job
+# grants the permissions the jobs below ask for.
 on:
-  pull_request:
-    branches: [main]
-  push:
-    branches: [main]
+  workflow_call:
 
 permissions: {}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  # PR runs are superseded by a newer push. A *running* main run is never
-  # cancelled; a *pending* one is still replaced by a newer push.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   check:
@@ -32,8 +26,10 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      # zizmor prefers the `$/` self-repository syntax, but actionlint 1.7.12
+      # rejects it; switch once actionlint accepts `$/`.
       - name: Setup
-        uses: ./.github/actions/setup
+        uses: ./.github/actions/setup # zizmor: ignore[self-repository]
 
       # Turbo's local cache, restored from the latest run of the same task so an
       # unchanged package replays instead of rerunning. Only typecheck, test and
@@ -81,9 +77,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # `actions` scans the workflow files themselves (injection, unpinned
-        # third-party actions, over-broad permissions).
-        language: [javascript-typescript, actions]
+        # The workflow files are checked by the `workflow-lint` job instead.
+        language: [javascript-typescript]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,7 +86,7 @@ jobs:
           fetch-depth: 1
 
       # Advanced setup: turn OFF "default setup" under Settings → Code security,
-      # or GitHub rejects these uploads. Neither language needs a build step.
+      # or GitHub rejects these uploads. No build step is needed.
       - name: Initialize CodeQL
         uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
@@ -104,20 +99,9 @@ jobs:
         with:
           category: "/language:${{ matrix.language }}"
 
-  # The one check to require in branch protection. `if: always()` makes it run
-  # even when a needed job failed, so it reports a failure instead of skipping.
-  all-passed:
-    name: all-passed
-    runs-on: ubuntu-latest
-    timeout-minutes: 1
-    if: always()
-    needs: [check, secrets-scan, codeql]
-    permissions: {}
-    steps:
-      - name: Check results
-        env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
-        run: |
-          for r in $RESULTS; do
-            [ "$r" = success ] || { echo "a required job ended with: $r"; exit 1; }
-          done
+  # actionlint (with shellcheck on `run:` scripts) and zizmor over the workflow
+  # and action files.
+  workflow-lint:
+    permissions:
+      contents: read
+    uses: valuecodes/automation/.github/workflows/workflow-lint.yml@faff74cb5d78478b0bd271db840916706dc2cce0 # v0.3.1

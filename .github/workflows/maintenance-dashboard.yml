@@ -2,8 +2,7 @@ name: Maintenance dashboard
 
 on:
   schedule:
-    # Daily, after the Node.js update run. An off-peak minute avoids the
-    # top-of-the-hour queue.
+    # Daily. An off-peak minute avoids the top-of-the-hour queue.
     - cron: "41 5 * * *"
   workflow_dispatch:
 
@@ -17,4 +16,4 @@ jobs:
     permissions:
       contents: read
       issues: write
-    uses: valuecodes/automation/.github/workflows/maintenance-dashboard.yml@53132eebb05a206f7ecf60ab0add5dcf5470f4b6 # v0.2.2
+    uses: valuecodes/automation/.github/workflows/maintenance-dashboard.yml@faff74cb5d78478b0bd271db840916706dc2cce0 # v0.3.1
