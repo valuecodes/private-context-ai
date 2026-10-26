@@ -27,6 +27,10 @@ Requires Node.js 24.22.1 (`.nvmrc`) and pnpm 12.11.2 (`packageManager` in `packa
 pnpm install
 ```
 
+`pnpm install` also turns on the git hooks in `.githooks/`: format, lint and a staged
+secrets scan before each commit; typecheck, test and Knip before each push. Committing
+needs `gitleaks` v8.19+ on PATH or a running Docker daemon for the secrets scan.
+
 The desktop app also needs Rust via rustup; `rust-toolchain.toml` pins the version.
 On Windows install the MSVC Build Tools and WebView2, plus the VBSCRIPT optional
 feature to build the MSI installer. On Linux install webkit2gtk 4.1. Under WSL2 the
@@ -104,24 +108,22 @@ CI does not build or check Rust. Run the three `rust:*` scripts, the dev window 
 oxlint prints nothing when there are no findings, so silent output means clean.
 
 CI runs typecheck, lint, knip, format:check, test, build and a gitleaks secret scan on
-PRs and on push to `main`, plus CodeQL code scanning. The `all-passed` job fans them in:
-require only that check in branch protection. `secrets:scan` needs either `gitleaks`
-v8.19+ on PATH or a running Docker daemon.
+PRs and on push to `main`, plus CodeQL code scanning and actionlint + zizmor over the
+workflow files. The checks live once in `checks.yml`, called by `feature.yml` (PRs) and
+`main.yml` (push to `main`). The `all-passed` job in `feature.yml` fans them in: require
+only that check in branch protection. `secrets:scan` needs either `gitleaks` v8.19+ on
+PATH or a running Docker daemon.
 
-Two scheduled workflows call `valuecodes/automation` daily: `node-update.yml` opens a PR
-when a newer Node.js release is out on the `.nvmrc` major, and
-`maintenance-dashboard.yml` keeps one issue listing due catalog, pnpm, gitleaks, Node.js
-and `pnpm audit` updates.
+A scheduled workflow, `maintenance-dashboard.yml`, calls `valuecodes/automation` daily
+and keeps one issue listing due catalog, pnpm, gitleaks, Node.js and `pnpm audit`
+updates. A Node.js security release shows up there right away and is flagged.
 
 ## Repository settings
 
-- CodeQL (the `codeql` CI job) is free on public repos; private repos need GitHub Code
+- CodeQL (the `codeql` job in `checks.yml`) is free on public repos; private repos need GitHub Code
   Security. If "default setup" is enabled under Settings → Code security, turn it off —
   GitHub rejects the workflow's uploads while it is on.
 - Under Settings → Code security, turn on **Dependabot alerts** and leave **Dependabot
   security updates** off: you get notified about vulnerable dependencies without
   automatic PRs. `.github/dependabot.yml` only bumps the SHA-pinned GitHub Actions,
   monthly in one grouped PR; npm and Cargo dependencies are updated by hand.
-- Under Settings → Actions → General, turn on **Allow GitHub Actions to create and
-  approve pull requests**, or `node-update.yml` cannot open its PR. Its PRs start CI
-  only after someone clicks **Approve workflows to run**.

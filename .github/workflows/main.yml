@@ -1,0 +1,21 @@
+name: Main branch CI
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # A *running* main run is never cancelled; a *pending* one is still replaced
+  # by a newer push.
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: ./.github/workflows/checks.yml # zizmor: ignore[self-repository]
