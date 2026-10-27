@@ -17,6 +17,7 @@ const conversation = (id: string, title: string): Conversation => ({
     options: {},
     think: { kind: "off" },
     charts: false,
+    files: true,
   },
   projectId: null,
 });

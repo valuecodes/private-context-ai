@@ -27,6 +27,7 @@ const chat = (id: string, title: string): Conversation => ({
     options: {},
     think: { kind: "off" },
     charts: false,
+    files: true,
   },
   projectId: "p1",
 });

@@ -80,6 +80,16 @@ What the app guarantees, and what enforces it:
   opened. They run one at a time, only while no other request is in flight, and any new
   request cancels them. Each is audited like a manual refresh, and "Automatic memory"
   turns them off per project ("Refresh memory" still works).
+- **Project files are searched locally and read as data.** In a project with files,
+  Rust searches the encrypted full-text index for the prompt of each turn and adds up
+  to six of the best passages to that turn's one `system` message, after project
+  memory, within a byte budget that never takes the request over its size limit. This
+  adds no request: each message is still one audited `ollama.chat` request. Each
+  passage sits inside one delimited, escaped block, named by file and lines, under a
+  line saying it is reference data, not instructions. Like memory, that lowers the
+  risk of a file steering the model but cannot rule it out. The chat's Files switch
+  (on by default, shown in projects with files) turns this off, and "What this chat
+  sees" shows the exact passages sending the current draft would add.
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random
   32-byte key lives in the OS keychain and never reaches the webview. Without a working
   keychain the app stores nothing. Temporary chats are kept only in process memory,
@@ -125,6 +135,10 @@ What this does **not** protect against:
 - **Project memory, on purpose.** With Auto memory on, a summary of each chat in a
   project is sent to the project's other chats, temporary ones included. Keep a chat out
   of a project, or turn Auto memory off, when its summary must not travel.
+- **Project files, on purpose.** A file added to a project can reach every chat in it,
+  temporary ones included, as passages in the system message. A file's text can try to
+  steer the model like any pasted text. Add only files whose text may go to the
+  project's chats, or turn Files off in a chat.
 - **What the model says.** Replies can be wrong, made up or harmful. The model cannot
   act, but you can be misled.
 - **Debug builds.** A development build reads `PRIVATE_CONTEXT_OLLAMA_URL` to override

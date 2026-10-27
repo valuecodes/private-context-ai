@@ -31,7 +31,8 @@ const levels = (canDisable: boolean): ThinkStyle => ({
 
 const controls = (
   modelCaps: ModelCapabilities | undefined,
-  settings: ConversationSettings = DEFAULT_SETTINGS
+  settings: ConversationSettings = DEFAULT_SETTINGS,
+  hasFiles?: boolean | null
 ) =>
   renderToString(
     <ComposerControls
@@ -43,6 +44,7 @@ const controls = (
       settings={settings}
       onSettings={vi.fn()}
       disabled={false}
+      hasFiles={hasFiles}
     />
   );
 
@@ -94,6 +96,24 @@ describe("ComposerControls", () => {
     const on = controls(caps({}), { ...DEFAULT_SETTINGS, charts: true });
     expect(on).toMatch(/aria-label="Charts" aria-pressed="true"/);
     expect(on).not.toMatch(/aria-label="Charts"[^>]*disabled=""/);
+  });
+
+  it("shows Files, on by default, unless the project has no files", () => {
+    expect(controls(caps({}))).not.toContain('aria-label="Files"');
+    expect(controls(caps({}), DEFAULT_SETTINGS, false)).not.toContain(
+      'aria-label="Files"'
+    );
+    // Whatever the model: the passages go into the system message.
+    expect(controls(caps({ tools: false }), DEFAULT_SETTINGS, true)).toMatch(
+      /aria-label="Files" aria-pressed="true"/
+    );
+    // Not known yet, or the lookup failed: still reachable.
+    expect(controls(caps({}), DEFAULT_SETTINGS, null)).toMatch(
+      /aria-label="Files" aria-pressed="true"/
+    );
+    const off = controls(caps({}), { ...DEFAULT_SETTINGS, files: false }, true);
+    expect(off).toMatch(/aria-label="Files" aria-pressed="false"/);
+    expect(off).not.toMatch(/aria-label="Files"[^>]*disabled=""/);
   });
 });
 

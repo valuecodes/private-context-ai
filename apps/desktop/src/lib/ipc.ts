@@ -169,15 +169,18 @@ const projectMemoryRefresh = (
 
 /**
  * The exact `system` message the project's chats get, or with
- * `conversationId` what that chat gets. Sends nothing to Ollama.
+ * `conversationId` what that chat gets; with `draft` too, the passages of the
+ * project's files found for it. Sends nothing to Ollama.
  */
 const projectContextPreview = (
   projectId: string,
-  conversationId: string | null
+  conversationId: string | null,
+  draft: string | null
 ): Promise<ContextPreview> =>
   invoke<ContextPreview>("project_context_preview", {
     projectId,
     conversationId,
+    draft,
   });
 
 /**

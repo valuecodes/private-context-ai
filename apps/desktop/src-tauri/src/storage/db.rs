@@ -67,8 +67,15 @@ mod tests {
     use super::*;
     use crate::storage::key::new_key;
 
-    /// Undoes migration 0011.
+    /// Undoes migration 0012.
+    fn undo_conversation_files(conn: &Connection) {
+        conn.execute_batch("ALTER TABLE conversations DROP COLUMN files;")
+            .unwrap();
+    }
+
+    /// Undoes migrations 0012 and 0011.
     fn undo_files(conn: &Connection) {
+        undo_conversation_files(conn);
         conn.execute_batch(
             "DROP TABLE file_chunks_fts;
              DROP TABLE file_chunks;
@@ -77,7 +84,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Undoes migrations 0011 and 0010.
+    /// Undoes migrations 0012 to 0010.
     fn undo_audit_timings(conn: &Connection) {
         undo_files(conn);
         conn.execute_batch(
@@ -88,7 +95,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Undoes migrations 0011 to 0009.
+    /// Undoes migrations 0012 to 0009.
     fn undo_memory(conn: &Connection) {
         undo_audit_timings(conn);
         conn.execute_batch(
@@ -118,7 +125,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         let audit_columns: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('audit_events')")
             .unwrap()
@@ -551,6 +558,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(found, 1);
+    }
+
+    #[test]
+    fn version_eleven_db_turns_files_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        undo_conversation_files(&conn);
+        conn.execute_batch(
+            "PRAGMA user_version = 11;
+             INSERT INTO conversations (id, title, model, created_at, updated_at)
+               VALUES ('c', 't', 'm', 'x', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let files: i64 = conn
+            .query_row(
+                "SELECT files FROM conversations WHERE id = 'c'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(files, 1);
     }
 
     #[test]

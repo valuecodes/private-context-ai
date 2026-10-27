@@ -17,6 +17,7 @@ use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
 use crate::ollama::{ChatCall, ChatThink, Ollama};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
+use crate::storage::files::TURN_PASSAGES;
 use crate::storage::memory::ProjectContext;
 use crate::storage::messages::TurnInput;
 use crate::storage::{Storage, StorageState};
@@ -68,17 +69,29 @@ pub(crate) fn confirm_project(
     Ok(id)
 }
 
-/// What the temporary chat's project currently instructs and remembers;
-/// empty outside a project, which needs no storage.
+/// What the temporary chat's project currently instructs and remembers,
+/// and with Files on the passages of its files that best match the prompt
+/// `input` sends; empty outside a project, which needs no storage. Searched
+/// before [`TempChats::begin`] takes the session, which sends the passages
+/// only if that prompt is still the one it sends.
 fn session_context(
     storage: &StorageState,
     chats: &TempChats,
     session_id: Uuid,
+    input: &TurnInput,
 ) -> Result<ProjectContext, AppError> {
-    match chats.project(session_id)? {
-        None => Ok(ProjectContext::default()),
-        Some(project) => storage.get()?.project_context(project),
+    let Some(project) = chats.project(session_id)? else {
+        return Ok(ProjectContext::default());
+    };
+    let storage = storage.get()?;
+    let mut context = storage.project_context(project)?;
+    if chats.settings(session_id)?.files
+        && let Some(prompt) = chats.turn_prompt(session_id, input)?
+    {
+        context.files = storage.search(project, prompt.expose(), TURN_PASSAGES)?;
+        context.files_query = prompt;
     }
+    Ok(context)
 }
 
 /// Applies from the temporary chat's next send.
@@ -115,14 +128,15 @@ pub async fn temp_chat_send(
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
     let (think_choice, think) = session_think(&ollama, &chats, session_id, &model).await?;
+    let input = TurnInput::New(prompt);
     send_temp_turn(
         &ollama,
         &chats,
-        session_context(&storage, &chats, session_id)?,
+        session_context(&storage, &chats, session_id, &input)?,
         SendRequest {
             conversation_id: session_id,
             model,
-            input: TurnInput::New(prompt),
+            input,
             think_choice,
             think,
         },
@@ -144,7 +158,7 @@ pub async fn temp_chat_regenerate(
     send_temp_turn(
         &ollama,
         &chats,
-        session_context(&storage, &chats, session_id)?,
+        session_context(&storage, &chats, session_id, &TurnInput::Regenerate)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -173,14 +187,15 @@ pub async fn temp_chat_edit(
     on_event: Channel<ChatEvent>,
 ) -> Result<SendStarted, AppError> {
     let (think_choice, think) = session_think(&ollama, &chats, session_id, &model).await?;
+    let input = TurnInput::Edit { message_id, prompt };
     send_temp_turn(
         &ollama,
         &chats,
-        session_context(&storage, &chats, session_id)?,
+        session_context(&storage, &chats, session_id, &input)?,
         SendRequest {
             conversation_id: session_id,
             model,
-            input: TurnInput::Edit { message_id, prompt },
+            input,
             think_choice,
             think,
         },
@@ -359,6 +374,55 @@ mod tests {
             .count();
         assert_eq!(chats_audited, 3);
         assert_eq!(prompts(&chats, session), ["One", "Two", "Three"]);
+    }
+
+    #[test]
+    fn session_context_searches_project_files() {
+        use crate::storage::key::testing::MemoryKeySource;
+
+        let dir = tempfile::tempdir().unwrap();
+        let state = StorageState::open(dir.path(), &MemoryKeySource::default());
+        let storage = state.get().unwrap();
+        let project = storage.create_project("p").unwrap().id;
+        storage
+            .add_file(
+                project,
+                &Redacted::new("a.txt"),
+                &Redacted::new("the word is plover"),
+            )
+            .unwrap();
+        let chats = TempChats::default();
+        let id = start_temp(
+            &state,
+            &chats,
+            ConversationSettings::default(),
+            Some(project),
+        )
+        .unwrap();
+        let ask = TurnInput::New(Redacted::new("word?"));
+
+        let context = session_context(&state, &chats, id, &ask).unwrap();
+        assert_eq!(context.files.len(), 1);
+        assert_eq!(context.files_query.expose(), "word?");
+        // Nothing to regenerate yet: nothing searched.
+        let regenerate = session_context(&state, &chats, id, &TurnInput::Regenerate).unwrap();
+        assert!(regenerate.files.is_empty());
+
+        chats
+            .update_settings(
+                id,
+                ConversationSettings {
+                    files: false,
+                    ..ConversationSettings::default()
+                },
+            )
+            .unwrap();
+        assert!(
+            session_context(&state, &chats, id, &ask)
+                .unwrap()
+                .files
+                .is_empty()
+        );
     }
 
     #[tokio::test]

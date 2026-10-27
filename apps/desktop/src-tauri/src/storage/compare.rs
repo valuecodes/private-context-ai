@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::Storage;
 use super::conversations::{ConversationSettings, NOW, load_settings, not_found};
-use super::memory::load_conversation_context;
+use super::memory::{load_conversation_context, search_turn_files};
 use super::messages::{
     check_no_comparison, insert_pending_reply, insert_prompt, load_history, next_created_at,
     with_system_message,
@@ -48,10 +48,13 @@ impl Storage {
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
-        let context = load_conversation_context(&tx, &id)?;
+        let mut context = load_conversation_context(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
         let mut history = load_history(&tx, &id, None)?;
         history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
+        if settings.files {
+            search_turn_files(&tx, &id, prompt, &mut context)?;
+        }
         let history = with_system_message(&context, &settings, history, max_prompt_bytes);
         check(&history, &settings)?;
 

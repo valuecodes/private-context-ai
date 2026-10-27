@@ -16,6 +16,7 @@ const conversation = (id: string, updatedAt: string): Conversation => ({
     options: {},
     think: { kind: "off" },
     charts: false,
+    files: true,
   },
   projectId: null,
 });

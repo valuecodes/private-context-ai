@@ -218,17 +218,22 @@ pub async fn project_memory_refresh(
 }
 
 /// The exact `system` message the project's chats get now, or with
-/// `conversation_id` what that chat gets. Sends nothing.
+/// `conversation_id` what that chat gets, with `draft` the passages found
+/// for it included. Sends nothing.
 #[tauri::command]
 pub async fn project_context_preview(
     storage: State<'_, StorageState>,
     ollama: State<'_, Arc<Ollama>>,
     project_id: Uuid,
     conversation_id: Option<Uuid>,
+    draft: Option<Redacted>,
 ) -> Result<ContextPreview, AppError> {
-    storage
-        .get()?
-        .context_preview(project_id, conversation_id, ollama.max_prompt_bytes())
+    storage.get()?.context_preview(
+        project_id,
+        conversation_id,
+        draft.as_ref(),
+        ollama.max_prompt_bytes(),
+    )
 }
 
 /// Deletes the project with its saved chats and temporary chats; returns how

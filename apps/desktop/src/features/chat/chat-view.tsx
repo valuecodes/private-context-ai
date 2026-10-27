@@ -53,6 +53,13 @@ type ChatViewProps = {
   defaultModel: string;
   /** The open chat's project, if it is in one. */
   project?: ChatSettingsProps["project"];
+  /**
+   * Whether the open chat's project has files; `null` while not known.
+   * `undefined` outside a project.
+   */
+  hasFiles?: boolean | null;
+  /** The composer's draft changed: the trimmed text a send would submit. */
+  onDraft?: (text: string) => void;
   /** The open saved chat's background memory, shown in the header. */
   memory?: {
     state: ProjectMemoryStatus["state"];
@@ -76,6 +83,8 @@ const ChatView = ({
   setModel,
   defaultModel,
   project,
+  hasFiles,
+  onDraft,
   memory,
 }: ChatViewProps) => {
   const [models, setModels] = useState<Models>({ phase: "idle" });
@@ -396,6 +405,7 @@ const ChatView = ({
           onSend={(text) => send(selected, text)}
           onStop={stop}
           temporary={state.temporary}
+          onDraft={onDraft}
           toolbar={
             <ComposerControls
               models={modelList}
@@ -408,6 +418,7 @@ const ChatView = ({
               settings={state.settings}
               onSettings={onSettings}
               disabled={state.loading}
+              hasFiles={hasFiles}
             />
           }
           compare={
