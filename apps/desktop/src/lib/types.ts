@@ -146,6 +146,23 @@ type Project = {
   autoMemory: boolean;
 };
 
+/** One file of a project's library, without its content. */
+type ProjectFile = {
+  id: string;
+  /** The file's name, or its path inside the folder it was added with. */
+  name: string;
+  bytes: number;
+  lineCount: number;
+  createdAt: string;
+};
+
+/** One page of a project's files, by name. */
+type FilePage = {
+  files: ProjectFile[];
+  /** How many files the project has in all. */
+  total: number;
+};
+
 /**
  * `pending`: newer messages are not in it yet. `stale`: the chat was edited,
  * so it is not sent until it is rebuilt.
@@ -377,6 +394,7 @@ export type {
   Conversation,
   ConversationSettings,
   ConversationWithMessages,
+  FilePage,
   LogLevel,
   MemoryEntry,
   MemoryList,
@@ -387,6 +405,7 @@ export type {
   OllamaStatus,
   PendingCount,
   Project,
+  ProjectFile,
   RefreshResult,
   RequestId,
   SendStarted,

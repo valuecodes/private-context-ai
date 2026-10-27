@@ -25,9 +25,11 @@ Internet
 - **Rust ↔ Ollama.** Only Rust talks to Ollama: `/api/version`, `/api/tags`,
   `/api/show` (a model's capabilities, looked up once per model) and a streamed
   `/api/chat`, over plain HTTP to a loopback address.
-- **Rust ↔ disk.** Chats, the audit log and settings live in one SQLCipher database.
-  Its key comes from the OS keychain and stays in Rust. Logs go to a separate folder
-  and hold metadata only.
+- **Rust ↔ disk.** Chats, the audit log, settings and project files live in one
+  SQLCipher database. Its key comes from the OS keychain and stays in Rust. Logs go to
+  a separate folder and hold metadata only. Project files reach Rust as text: the
+  webview reads only the files you pick or drop, with the HTML File API, and no Rust
+  command takes or reads a disk path.
 
 ## Security model
 

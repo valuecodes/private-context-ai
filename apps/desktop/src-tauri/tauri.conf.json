@@ -19,6 +19,7 @@
         "height": 720,
         "minWidth": 720,
         "minHeight": 480,
+        "dragDropEnabled": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-breakpad --disable-crash-reporter --disable-component-update --disable-background-networking --metrics-recording-only"
       }
     ],

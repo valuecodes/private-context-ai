@@ -67,8 +67,19 @@ mod tests {
     use super::*;
     use crate::storage::key::new_key;
 
-    /// Undoes migration 0010.
+    /// Undoes migration 0011.
+    fn undo_files(conn: &Connection) {
+        conn.execute_batch(
+            "DROP TABLE file_chunks_fts;
+             DROP TABLE file_chunks;
+             DROP TABLE project_files;",
+        )
+        .unwrap();
+    }
+
+    /// Undoes migrations 0011 and 0010.
     fn undo_audit_timings(conn: &Connection) {
+        undo_files(conn);
         conn.execute_batch(
             "ALTER TABLE audit_events DROP COLUMN eval_ms;
              ALTER TABLE audit_events DROP COLUMN prompt_eval_ms;
@@ -77,7 +88,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Undoes migrations 0010 and 0009.
+    /// Undoes migrations 0011 to 0009.
     fn undo_memory(conn: &Connection) {
         undo_audit_timings(conn);
         conn.execute_batch(
@@ -107,7 +118,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         let audit_columns: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('audit_events')")
             .unwrap()
@@ -131,7 +142,14 @@ mod tests {
             [
                 "audit_events",
                 "conversations",
+                "file_chunks",
+                "file_chunks_fts",
+                "file_chunks_fts_config",
+                "file_chunks_fts_data",
+                "file_chunks_fts_docsize",
+                "file_chunks_fts_idx",
                 "messages",
+                "project_files",
                 "project_memories",
                 "projects",
                 "settings"
@@ -498,6 +516,41 @@ mod tests {
             )
             .unwrap();
         assert_eq!(row, (40, None, None, None));
+    }
+
+    #[test]
+    fn version_ten_db_gains_project_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        undo_files(&conn);
+        conn.execute_batch(
+            "PRAGMA user_version = 10;
+             INSERT INTO projects (id, name, created_at, updated_at)
+               VALUES ('p', 'n', 'x', 'x');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        conn.execute_batch(
+            "INSERT INTO project_files (id, project_id, name, content, bytes, line_count,
+                                        created_at)
+               VALUES ('f', 'p', 'a.txt', 'hello', 5, 1, 'x');
+             INSERT INTO file_chunks (file_id, start_line, end_line, text)
+               VALUES ('f', 1, 1, 'hello');",
+        )
+        .unwrap();
+        let found: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM file_chunks_fts WHERE file_chunks_fts MATCH 'hello'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(found, 1);
     }
 
     #[test]

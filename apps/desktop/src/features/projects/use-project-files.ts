@@ -1,0 +1,183 @@
+import { useCallback, useEffect, useReducer } from "react";
+
+import { toAppError } from "~/lib/app-error";
+import { projectFileAdd, projectFileDelete, projectFileList } from "~/lib/ipc";
+import type { AppError, FilePage, ProjectFile } from "~/lib/types";
+
+import type { DropEntry, PickedFile } from "./read-files";
+import { collectDropped, prepareFile } from "./read-files";
+
+/** Files loaded per page. */
+const PAGE_SIZE = 200;
+
+type SkippedFile = { name: string; reason: string };
+
+type FilesState = {
+  phase: "loading" | "ready";
+  /** The first pages of the project's files, by name, as Rust lists them. */
+  files: ProjectFile[];
+  /** How many files the project has in all. */
+  total: number;
+  /** While files are being added: how many are done, of how many. */
+  adding: { done: number; of: number } | null;
+  /** The file being deleted. */
+  deleting: string | null;
+  /** The files the last add left out, with why. */
+  skipped: SkippedFile[];
+  error: AppError | null;
+};
+
+type FilesAction =
+  | { type: "loaded"; page: FilePage; append: boolean }
+  | { type: "adding"; of: number }
+  | { type: "progress"; done: number }
+  | { type: "skipped"; file: SkippedFile }
+  | { type: "added" }
+  | { type: "deleting"; id: string }
+  | { type: "deleted"; id: string }
+  | { type: "failed"; error: AppError };
+
+const initialFiles: FilesState = {
+  phase: "loading",
+  files: [],
+  total: 0,
+  adding: null,
+  deleting: null,
+  skipped: [],
+  error: null,
+};
+
+/** An add or a delete is running: the controls wait for it. */
+const isBusy = (state: FilesState): boolean =>
+  state.adding !== null || state.deleting !== null;
+
+const filesReducer = (state: FilesState, action: FilesAction): FilesState => {
+  if (action.type === "loaded") {
+    return {
+      ...state,
+      phase: "ready",
+      files: action.append
+        ? [...state.files, ...action.page.files]
+        : action.page.files,
+      total: action.page.total,
+    };
+  }
+  if (action.type === "adding") {
+    return {
+      ...state,
+      adding: { done: 0, of: action.of },
+      skipped: [],
+      error: null,
+    };
+  }
+  if (action.type === "progress") {
+    return state.adding === null
+      ? state
+      : { ...state, adding: { ...state.adding, done: action.done } };
+  }
+  if (action.type === "skipped") {
+    return { ...state, skipped: [...state.skipped, action.file] };
+  }
+  if (action.type === "added") {
+    return { ...state, adding: null };
+  }
+  if (action.type === "deleting") {
+    return { ...state, deleting: action.id, error: null };
+  }
+  if (action.type === "deleted") {
+    // Rust's list loses the same row, so the next page's offset still holds.
+    const files = state.files.filter(({ id }) => id !== action.id);
+    return {
+      ...state,
+      files,
+      total: state.total - (state.files.length - files.length),
+      deleting: null,
+    };
+  }
+  return { ...state, phase: "ready", deleting: null, error: action.error };
+};
+
+/**
+ * One project's files: loading them page by page, adding and deleting.
+ * Files are added one at a time, in order; afterwards the list reloads from
+ * the first page, since new names can land anywhere in it.
+ */
+const useProjectFiles = (projectId: string) => {
+  const [state, dispatch] = useReducer(filesReducer, initialFiles);
+
+  const load = useCallback(
+    (offset: number): Promise<void> =>
+      projectFileList(projectId, offset, PAGE_SIZE).then(
+        (page) => {
+          dispatch({ type: "loaded", page, append: offset > 0 });
+        },
+        (error: unknown) => {
+          dispatch({ type: "failed", error: toAppError(error) });
+        }
+      ),
+    [projectId]
+  );
+
+  useEffect(() => {
+    void load(0);
+  }, [load]);
+
+  const more = () => {
+    void load(state.files.length);
+  };
+
+  const add = async (picked: PickedFile[]): Promise<void> => {
+    if (picked.length === 0) {
+      return;
+    }
+    dispatch({ type: "adding", of: picked.length });
+    for (const [index, file] of picked.entries()) {
+      const prepared = await prepareFile(file);
+      if (prepared.kind === "skipped") {
+        dispatch({ type: "skipped", file: prepared });
+      } else {
+        await projectFileAdd(projectId, prepared.name, prepared.content).catch(
+          (error: unknown) => {
+            const reason = toAppError(error).message;
+            dispatch({ type: "skipped", file: { name: file.name, reason } });
+          }
+        );
+      }
+      dispatch({ type: "progress", done: index + 1 });
+    }
+    dispatch({ type: "added" });
+    await load(0);
+  };
+
+  /** A drop's folders are walked first, then added like picked files. */
+  const addDropped = (entries: DropEntry[]) => {
+    void collectDropped(entries).then(add, (error: unknown) => {
+      dispatch({ type: "failed", error: toAppError(error) });
+    });
+  };
+
+  const remove = (id: string) => {
+    dispatch({ type: "deleting", id });
+    void projectFileDelete(projectId, id).then(
+      () => {
+        dispatch({ type: "deleted", id });
+      },
+      (error: unknown) => {
+        dispatch({ type: "failed", error: toAppError(error) });
+      }
+    );
+  };
+
+  return {
+    state,
+    more,
+    add: (picked: PickedFile[]) => {
+      void add(picked);
+    },
+    addDropped,
+    remove,
+  };
+};
+
+export type { FilesState };
+export { filesReducer, initialFiles, isBusy, useProjectFiles };

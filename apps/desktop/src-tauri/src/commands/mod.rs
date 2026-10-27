@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod compare;
 pub mod conversations;
+pub mod files;
 pub mod ollama;
 pub mod projects;
 pub mod settings;
