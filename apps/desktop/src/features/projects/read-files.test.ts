@@ -125,7 +125,7 @@ describe("collectDropped", () => {
     );
   });
 
-  it("rejects when a folder cannot be read", async () => {
+  it("keeps going past a folder or file that cannot be opened", async () => {
     const broken = {
       fullPath: "/broken",
       isFile: false,
@@ -139,6 +139,31 @@ describe("collectDropped", () => {
         },
       }),
     };
-    await expect(collectDropped([broken])).rejects.toThrow("denied");
+    const gone = {
+      fullPath: "/gone.md",
+      isFile: true,
+      isDirectory: false,
+      file: (
+        _success: (file: File) => void,
+        error?: (error: DOMException) => void
+      ) => {
+        error?.(new DOMException("not found"));
+      },
+    };
+
+    const dropped = await collectDropped([broken, gone, fileEntry("/ok.md")]);
+
+    expect(dropped.map(({ name }) => name)).toEqual([
+      "broken",
+      "gone.md",
+      "ok.md",
+    ]);
+    const prepared = await Promise.all(dropped.map(prepareFile));
+    expect(prepared.map((file) => file.kind)).toEqual([
+      "skipped",
+      "skipped",
+      "ok",
+    ]);
+    expect(prepared[0]).toMatchObject({ reason: "could not be read" });
   });
 });

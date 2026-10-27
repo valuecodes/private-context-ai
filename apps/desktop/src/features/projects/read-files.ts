@@ -101,19 +101,32 @@ const entryFile = (entry: DropFileEntry): Promise<File> =>
     entry.file(resolve, reject);
   });
 
+/** A file or folder that could not be opened: reading it fails in turn. */
+const unreadable = (error: unknown): Readable => ({
+  size: 0,
+  arrayBuffer: () =>
+    Promise.reject(error instanceof Error ? error : new Error(String(error))),
+});
+
 /**
  * The files of dropped entries, folders walked in full, each named by its
  * path without the leading `/`. Entries are read one at a time, in order.
+ * One that cannot be opened is still listed, so `prepareFile` reports it as
+ * skipped while the rest are added.
  */
 const collectDropped = async (entries: DropEntry[]): Promise<PickedFile[]> => {
   const picked: PickedFile[] = [];
   const queue = [...entries];
   for (let entry = queue.shift(); entry !== undefined; entry = queue.shift()) {
     const name = entry.fullPath.replace(/^\//, "");
-    if (isFileEntry(entry)) {
-      picked.push({ name, file: await entryFile(entry) });
-    } else if (isDirectoryEntry(entry)) {
-      queue.unshift(...(await readAll(entry)));
+    try {
+      if (isFileEntry(entry)) {
+        picked.push({ name, file: await entryFile(entry) });
+      } else if (isDirectoryEntry(entry)) {
+        queue.unshift(...(await readAll(entry)));
+      }
+    } catch (error) {
+      picked.push({ name, file: unreadable(error) });
     }
   }
   return picked;
