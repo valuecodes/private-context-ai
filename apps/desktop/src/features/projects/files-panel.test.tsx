@@ -93,6 +93,9 @@ describe("FilesList", () => {
     expect(html).toContain("Skipped 2 files:");
     expect(html).toContain("x.png: a binary file");
     expect(html).toContain("big.log: larger than 4 MiB");
+    expect(list({ adding: { done: 0, of: 0 } })).toContain(
+      "Reading the dropped files…"
+    );
   });
 
   it("disables adding, deleting and more while busy", () => {
