@@ -17,6 +17,15 @@ import "./globals.css";
 // `theme-init.ts` already set the theme; this keeps it following the OS.
 applyTheme();
 
+// Tauri's own drag and drop is off (`dragDropEnabled`), so the project files
+// panel receives HTML5 drops. A file dropped anywhere else would otherwise
+// be opened by the webview in place of the app.
+for (const type of ["dragover", "drop"]) {
+  globalThis.addEventListener(type, (event) => {
+    event.preventDefault();
+  });
+}
+
 const rootElement = document.getElementById("root");
 if (rootElement) {
   const root = createRoot(rootElement);

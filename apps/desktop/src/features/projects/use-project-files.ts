@@ -28,7 +28,7 @@ type FilesState = {
 };
 
 type FilesAction =
-  | { type: "loaded"; page: FilePage; append: boolean }
+  | { type: "loaded"; page: FilePage; offset: number }
   | { type: "adding"; of: number }
   | { type: "progress"; done: number }
   | { type: "skipped"; file: SkippedFile }
@@ -53,12 +53,18 @@ const isBusy = (state: FilesState): boolean =>
 
 const filesReducer = (state: FilesState, action: FilesAction): FilesState => {
   if (action.type === "loaded") {
+    // A later page counts only if it starts where the list ends: a second
+    // "Show more" for the same offset, or one from before a reload, is dropped.
+    if (action.offset > 0 && action.offset !== state.files.length) {
+      return state;
+    }
     return {
       ...state,
       phase: "ready",
-      files: action.append
-        ? [...state.files, ...action.page.files]
-        : action.page.files,
+      files:
+        action.offset === 0
+          ? action.page.files
+          : [...state.files, ...action.page.files],
       total: action.page.total,
     };
   }
@@ -109,7 +115,7 @@ const useProjectFiles = (projectId: string) => {
     (offset: number): Promise<void> =>
       projectFileList(projectId, offset, PAGE_SIZE).then(
         (page) => {
-          dispatch({ type: "loaded", page, append: offset > 0 });
+          dispatch({ type: "loaded", page, offset });
         },
         (error: unknown) => {
           dispatch({ type: "failed", error: toAppError(error) });
@@ -128,6 +134,7 @@ const useProjectFiles = (projectId: string) => {
 
   const add = async (picked: PickedFile[]): Promise<void> => {
     if (picked.length === 0) {
+      dispatch({ type: "added" });
       return;
     }
     dispatch({ type: "adding", of: picked.length });
@@ -149,9 +156,14 @@ const useProjectFiles = (projectId: string) => {
     await load(0);
   };
 
-  /** A drop's folders are walked first, then added like picked files. */
+  /**
+   * A drop's folders are walked first, then added like picked files. The
+   * panel is busy from the start, with nothing to count yet.
+   */
   const addDropped = (entries: DropEntry[]) => {
+    dispatch({ type: "adding", of: 0 });
     void collectDropped(entries).then(add, (error: unknown) => {
+      dispatch({ type: "added" });
       dispatch({ type: "failed", error: toAppError(error) });
     });
   };

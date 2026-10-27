@@ -21,7 +21,7 @@ const loaded = (files: ProjectFile[], total: number): FilesState =>
   filesReducer(initialFiles, {
     type: "loaded",
     page: { files, total },
-    append: false,
+    offset: 0,
   });
 
 describe("filesReducer", () => {
@@ -36,17 +36,26 @@ describe("filesReducer", () => {
     const next = filesReducer(first, {
       type: "loaded",
       page: { files: [file("c")], total: 3 },
-      append: true,
+      offset: 2,
     });
     expect(ids(next)).toEqual(["a", "b", "c"]);
 
     const reloaded = filesReducer(next, {
       type: "loaded",
       page: { files: [file("z")], total: 1 },
-      append: false,
+      offset: 0,
     });
     expect(ids(reloaded)).toEqual(["z"]);
     expect(reloaded.total).toBe(1);
+  });
+
+  it("drops a page that does not start where the list ends", () => {
+    const first = loaded([file("a"), file("b")], 4);
+    const page = { files: [file("c"), file("d")], total: 4 };
+    const next = filesReducer(first, { type: "loaded", page, offset: 2 });
+    // A second "Show more" for the same offset answers after the first.
+    expect(filesReducer(next, { type: "loaded", page, offset: 2 })).toBe(next);
+    expect(ids(next)).toEqual(["a", "b", "c", "d"]);
   });
 
   it("counts a delete in the total, so the next page offset holds", () => {

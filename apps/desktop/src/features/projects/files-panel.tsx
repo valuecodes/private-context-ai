@@ -113,7 +113,9 @@ const FilesList = ({
       </p>
       {state.adding !== null && (
         <p role="status" className="text-sm">
-          {`Adding ${state.adding.done} of ${state.adding.of}…`}
+          {state.adding.of === 0
+            ? "Reading the dropped files…"
+            : `Adding ${state.adding.done} of ${state.adding.of}…`}
         </p>
       )}
       {state.error !== null && (
