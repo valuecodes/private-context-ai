@@ -24,6 +24,7 @@ const conversation = (
     options: {},
     think: { kind: "off" },
     charts: false,
+    files: true,
   },
   projectId,
 });

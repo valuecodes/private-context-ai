@@ -12,6 +12,7 @@ use super::Storage;
 use super::conversations::{ConversationSettings, NOW, load_settings, uuid_column};
 use super::memory::{
     ProjectContext, build_system_message, history_bytes, load_conversation_context,
+    search_turn_files,
 };
 use crate::error::AppError;
 use crate::ollama::chart_tool::{ChartEntry, replay};
@@ -303,16 +304,25 @@ pub struct Turn {
 }
 
 /// The history with the chat's one `system` message first, when there is
-/// one: see [`build_system_message`], which fits the project's memory into
-/// what `max_prompt_bytes` leaves. Never saved as a row.
+/// one: see [`build_system_message`], which fits the project's memory and
+/// file passages into what `max_prompt_bytes` leaves. Never saved as a row.
+/// The passages go in only with Files on and when they were searched for
+/// the prompt this turn sends, its last message.
 pub(crate) fn with_system_message(
     context: &ProjectContext,
     settings: &ConversationSettings,
     history: Vec<ChatMessage>,
     max_prompt_bytes: usize,
 ) -> Vec<ChatMessage> {
+    let prompt = history.last().map(|message| &message.content);
+    let files = if settings.files && prompt == Some(&context.files_query) {
+        context.files.as_slice()
+    } else {
+        &[]
+    };
     build_system_message(
         context,
+        files,
         &settings.system_prompt,
         settings.options.num_ctx,
         history_bytes(&history),
@@ -415,7 +425,7 @@ impl Storage {
         let tx = conn.transaction()?;
         let id = conversation_id.to_string();
         let settings = load_settings(&tx, &id)?;
-        let context = load_conversation_context(&tx, &id)?;
+        let mut context = load_conversation_context(&tx, &id)?;
         check_no_comparison(&tx, &id)?;
 
         // `replaced`: the first row this turn replaces is after (`>`) or at
@@ -459,6 +469,12 @@ impl Storage {
         };
         if let Some(prompt) = input.prompt() {
             history.push(ChatMessage::new(ChatRole::User, prompt.clone()));
+        }
+        // The prompt this turn answers: new, edited or regenerated.
+        if settings.files
+            && let Some(prompt) = history.last()
+        {
+            search_turn_files(&tx, &id, &prompt.content, &mut context)?;
         }
         let history = with_system_message(&context, &settings, history, max_prompt_bytes);
         check(&history, &settings)?;
@@ -958,9 +974,9 @@ mod tests {
     fn system_text(instructions: &str, prompt: &str) -> Option<String> {
         let context = ProjectContext {
             instructions: Redacted::new(instructions),
-            memories: Vec::new(),
+            ..ProjectContext::default()
         };
-        build_system_message(&context, &Redacted::new(prompt), None, 0, PROMPT_LIMIT)
+        build_system_message(&context, &[], &Redacted::new(prompt), None, 0, PROMPT_LIMIT)
             .message
             .map(|message| message.content.expose().to_owned())
     }

@@ -12,6 +12,7 @@ const finnish: ConversationSettings = {
   options: { temperature: 0.7, num_ctx: 8192 },
   think: { kind: "level", level: "high" },
   charts: false,
+  files: false,
 };
 
 describe("chat settings in the reducer", () => {
@@ -22,6 +23,8 @@ describe("chat settings in the reducer", () => {
     });
     expect(changed.settings).toEqual(finnish);
     expect(DEFAULT_SETTINGS.think).toEqual({ kind: "off" });
+    // Project files are on, as Rust's default.
+    expect(DEFAULT_SETTINGS.files).toBe(true);
 
     for (const next of [
       chatReducer(changed, { type: "open", conversationId: null }),

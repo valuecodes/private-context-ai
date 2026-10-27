@@ -22,7 +22,7 @@ const SEARCH_LIMIT: usize = 100;
 
 /// How a conversation is sent, applied from its next send. Saved chats keep
 /// it in their row, temporary ones in memory.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ConversationSettings {
     /// Sent first as a `system` message when not blank; never a message row.
@@ -34,6 +34,26 @@ pub struct ConversationSettings {
     /// `tools`. Off unless the user turns it on.
     #[serde(default)]
     pub charts: bool,
+    /// In a project with files, adds the passages that best match each
+    /// prompt to the `system` message. On unless the user turns it off.
+    #[serde(default = "files_on")]
+    pub files: bool,
+}
+
+fn files_on() -> bool {
+    true
+}
+
+impl Default for ConversationSettings {
+    fn default() -> Self {
+        Self {
+            system_prompt: Redacted::default(),
+            options: ChatOptions::default(),
+            think: ThinkChoice::default(),
+            charts: false,
+            files: files_on(),
+        }
+    }
 }
 
 /// At most [`MAX_SYSTEM_PROMPT_BYTES`] of text: a system prompt or a
@@ -88,8 +108,8 @@ pub struct ConversationWithMessages {
 }
 
 const COLUMNS: &str = "id, title, model, created_at, updated_at, system_prompt, temperature, \
-                       num_ctx, think, charts, project_id";
-const SETTINGS_COLUMNS: &str = "system_prompt, temperature, num_ctx, think, charts";
+                       num_ctx, think, charts, files, project_id";
+const SETTINGS_COLUMNS: &str = "system_prompt, temperature, num_ctx, think, charts, files";
 
 /// The `think` column: `off`, `on` or `level:<name>`.
 fn think_column(think: &ThinkChoice) -> String {
@@ -110,7 +130,7 @@ fn parse_think(value: &str) -> Option<ThinkChoice> {
     }
 }
 
-/// The five settings columns, starting at `first`.
+/// The six settings columns, starting at `first`.
 fn settings_row(row: &Row<'_>, first: usize) -> rusqlite::Result<ConversationSettings> {
     let think: String = row.get(first + 3)?;
     // Saved from an `f32`, so it converts back exactly.
@@ -126,6 +146,7 @@ fn settings_row(row: &Row<'_>, first: usize) -> rusqlite::Result<ConversationSet
         },
         think: parse_think(&think).ok_or_else(|| bad_text(first + 3, "think"))?,
         charts: row.get::<_, i64>(first + 4)? != 0,
+        files: row.get::<_, i64>(first + 5)? != 0,
     })
 }
 
@@ -160,8 +181,8 @@ fn conversation_row(row: &Row<'_>) -> rusqlite::Result<Conversation> {
         updated_at: row.get(4)?,
         settings: settings_row(row, 5)?,
         project_id: row
-            .get::<_, Option<String>>(10)?
-            .map(|_| uuid_column(row, 10))
+            .get::<_, Option<String>>(11)?
+            .map(|_| uuid_column(row, 11))
             .transpose()?,
     })
 }
@@ -224,7 +245,7 @@ impl Storage {
         let conversation = tx.query_row(
             &format!(
                 "INSERT INTO conversations ({COLUMNS})
-                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7, ?8, ?9)
+                 VALUES (?1, ?2, ?3, {NOW}, {NOW}, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  RETURNING {COLUMNS}"
             ),
             params![
@@ -236,6 +257,7 @@ impl Storage {
                 settings.options.num_ctx,
                 think_column(&settings.think),
                 settings.charts,
+                settings.files,
                 project_id
             ],
             conversation_row,
@@ -260,7 +282,7 @@ impl Storage {
             &format!(
                 "UPDATE conversations
                  SET system_prompt = ?2, temperature = ?3, num_ctx = ?4, think = ?5,
-                     charts = ?6
+                     charts = ?6, files = ?7
                  WHERE id = ?1 RETURNING {COLUMNS}"
             ),
             params![
@@ -269,7 +291,8 @@ impl Storage {
                 settings.options.temperature.map(f64::from),
                 settings.options.num_ctx,
                 think_column(&settings.think),
-                settings.charts
+                settings.charts,
+                settings.files
             ],
             conversation_row,
         )
@@ -465,6 +488,7 @@ mod tests {
             },
             think,
             charts: false,
+            files: true,
         }
     }
 
@@ -487,6 +511,7 @@ mod tests {
 
         let second = ConversationSettings {
             charts: true,
+            files: false,
             ..settings("", None, ThinkChoice::Level("high".into()))
         };
         let updated = storage.update_settings(created.id, &second).unwrap();
@@ -498,6 +523,24 @@ mod tests {
             second,
             "the list carries the settings too"
         );
+    }
+
+    #[test]
+    fn files_on_by_default() {
+        let (storage, _dir) = temp_storage();
+        assert!(ConversationSettings::default().files);
+        assert!(
+            storage
+                .create_conversation(None, "m")
+                .unwrap()
+                .settings
+                .files
+        );
+        // A payload from before the field existed still parses, with Files on.
+        let parsed: ConversationSettings =
+            serde_json::from_str(r#"{"systemPrompt":"","options":{},"think":{"kind":"off"}}"#)
+                .unwrap();
+        assert!(parsed.files);
     }
 
     #[test]
@@ -583,9 +626,10 @@ mod tests {
             )
             .unwrap();
         let saved = storage.conversation_settings(Uuid::nil()).unwrap();
-        // Charts too start off.
+        // Charts too start off, and Files on.
         assert_eq!(saved, ConversationSettings::default());
         assert!(!saved.charts);
+        assert!(saved.files);
 
         let qwen3 = ModelCapabilities {
             thinking: true,

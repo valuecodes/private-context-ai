@@ -66,6 +66,7 @@ describe("ChatSettingsPanel", () => {
       options: { temperature: 0.7, num_ctx: 16_384 },
       think: { kind: "off" },
       charts: false,
+      files: true,
     });
     expect(html).toContain("Answer only in Finnish</textarea>");
     expect(html).toContain("0.7");

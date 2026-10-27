@@ -3,7 +3,7 @@
 //! here reads a disk path. Names and content are the user's text, so both
 //! are redacted in logs.
 
-use rusqlite::{OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -25,6 +25,8 @@ const CHUNK_BYTES: usize = 2048;
 /// Search uses at most this many terms of a query.
 const MAX_SEARCH_TERMS: usize = 16;
 const MAX_SEARCH_HITS: u32 = 50;
+/// How many passages a chat's turn gets at most.
+pub const TURN_PASSAGES: u32 = 6;
 const MAX_PAGE: u32 = 500;
 /// `read_lines` returns at most this many lines,
 pub const MAX_READ_LINES: u32 = 200;
@@ -63,6 +65,8 @@ pub struct SearchHit {
     pub start_line: u32,
     pub end_line: u32,
     pub snippet: Redacted,
+    /// The whole chunk.
+    pub text: Redacted,
 }
 
 /// Numbered lines of a file, `"{n}\t{line}\n"` each. Empty when `start` is
@@ -206,6 +210,52 @@ fn match_expression(query: &str) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" OR "))
 }
 
+/// The chunks of project `project` matching any term of `query`, best
+/// first, at most `limit` (up to 50). Read on `conn` so a transaction sees
+/// its own snapshot. A query with no searchable term finds nothing.
+pub(super) fn search_chunks(
+    conn: &Connection,
+    project: &str,
+    query: &str,
+    limit: u32,
+) -> rusqlite::Result<Vec<SearchHit>> {
+    let Some(expression) = match_expression(query) else {
+        return Ok(Vec::new());
+    };
+    conn.prepare(
+        "SELECT f.name, c.start_line, c.end_line,
+                snippet(file_chunks_fts, 0, '', '', '…', 32), c.text
+         FROM file_chunks_fts
+         JOIN file_chunks c ON c.id = file_chunks_fts.rowid
+         JOIN project_files f ON f.id = c.file_id
+         WHERE file_chunks_fts MATCH ?1 AND f.project_id = ?2
+         ORDER BY bm25(file_chunks_fts), c.id
+         LIMIT ?3",
+    )?
+    .query_map(
+        params![expression, project, limit.clamp(1, MAX_SEARCH_HITS)],
+        |row| {
+            Ok(SearchHit {
+                name: Redacted::new(row.get::<_, String>(0)?),
+                start_line: row.get(1)?,
+                end_line: row.get(2)?,
+                snippet: Redacted::new(row.get::<_, String>(3)?),
+                text: Redacted::new(row.get::<_, String>(4)?),
+            })
+        },
+    )?
+    .collect()
+}
+
+/// Whether project `project` has any file.
+pub(super) fn has_files(conn: &Connection, project: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM project_files WHERE project_id = ?1)",
+        [project],
+        |row| row.get(0),
+    )
+}
+
 /// `line` for `read_lines`: cut to [`MAX_READ_LINE_BYTES`] with a marker.
 fn shown_line(line: &str) -> String {
     if line.len() > MAX_READ_LINE_BYTES {
@@ -320,38 +370,12 @@ impl Storage {
         query: &str,
         limit: u32,
     ) -> Result<Vec<SearchHit>, AppError> {
-        let Some(expression) = match_expression(query) else {
-            return Ok(Vec::new());
-        };
-        let conn = self.conn();
-        let hits = conn
-            .prepare(
-                "SELECT f.name, c.start_line, c.end_line,
-                        snippet(file_chunks_fts, 0, '', '', '…', 32)
-                 FROM file_chunks_fts
-                 JOIN file_chunks c ON c.id = file_chunks_fts.rowid
-                 JOIN project_files f ON f.id = c.file_id
-                 WHERE file_chunks_fts MATCH ?1 AND f.project_id = ?2
-                 ORDER BY bm25(file_chunks_fts), c.id
-                 LIMIT ?3",
-            )?
-            .query_map(
-                params![
-                    expression,
-                    project_id.to_string(),
-                    limit.clamp(1, MAX_SEARCH_HITS)
-                ],
-                |row| {
-                    Ok(SearchHit {
-                        name: Redacted::new(row.get::<_, String>(0)?),
-                        start_line: row.get(1)?,
-                        end_line: row.get(2)?,
-                        snippet: Redacted::new(row.get::<_, String>(3)?),
-                    })
-                },
-            )?
-            .collect::<Result<_, _>>()?;
-        Ok(hits)
+        Ok(search_chunks(
+            &self.conn(),
+            &project_id.to_string(),
+            query,
+            limit,
+        )?)
     }
 
     /// Up to `count` numbered lines of file `name` from line `start` (from
@@ -512,6 +536,19 @@ mod tests {
             names(&storage.search(project, "cherries", 10).unwrap()),
             ["notes.md"]
         );
+    }
+
+    #[test]
+    fn search_returns_whole_chunk() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        assert!(!has_files(&storage.conn(), &project.to_string()).unwrap());
+        add(&storage, project, "a.md", &numbered(1..=50));
+
+        let hits = storage.search(project, "line 7", 1).unwrap();
+        assert_eq!(hits[0].text.expose(), numbered(1..=40));
+        assert!(hits[0].snippet.len_bytes() < hits[0].text.len_bytes());
+        assert!(has_files(&storage.conn(), &project.to_string()).unwrap());
     }
 
     #[test]

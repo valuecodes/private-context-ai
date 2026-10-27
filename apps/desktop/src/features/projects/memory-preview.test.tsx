@@ -16,6 +16,7 @@ const preview: ContextPreview = {
   ],
   memoryBytes: 1200,
   budgetBytes: 4096,
+  files: { kind: "none" },
 };
 
 const body = (props: Partial<Parameters<typeof PreviewBody>[0]> = {}) =>
@@ -54,6 +55,49 @@ describe("PreviewBody", () => {
   it("explains what a chat sees", () => {
     expect(body({ forChat: true })).toContain("Its own memory is never sent");
     expect(body()).toContain("Each chat leaves out its own entry");
+  });
+
+  it("says how the project's files are used", () => {
+    expect(body()).not.toContain("project&#x27;s files");
+    expect(body({ preview: { ...preview, files: { kind: "off" } } })).toContain(
+      "Files is off for this chat"
+    );
+    expect(
+      body({ preview: { ...preview, files: { kind: "perMessage" } } })
+    ).toContain("chosen for each message");
+  });
+
+  it("meters the passages found for the draft", () => {
+    const html = body({
+      preview: {
+        ...preview,
+        files: {
+          kind: "searched",
+          included: 2,
+          dropped: 1,
+          bytes: 3000,
+          budgetBytes: 4096,
+        },
+      },
+    });
+    expect(html).toMatch(/<meter[^>]*id="files-budget"[^>]*value="3000"/);
+    expect(html).toContain("3.0 KB of 4.1 KB");
+    expect(html).toContain("2 passages");
+    expect(html).toContain("1 more are over the budget");
+    expect(
+      body({
+        preview: {
+          ...preview,
+          files: {
+            kind: "searched",
+            included: 0,
+            dropped: 0,
+            bytes: 0,
+            budgetBytes: 4096,
+          },
+        },
+      })
+    ).toContain("No passage");
   });
 
   it("shows loading, errors and an empty message", () => {

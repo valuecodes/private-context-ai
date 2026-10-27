@@ -1,4 +1,4 @@
-import { ChartColumn } from "lucide-react";
+import { ChartColumn, FileText } from "lucide-react";
 
 import { ModelPicker } from "~/features/chat/model-picker";
 import { ThinkControl } from "~/features/chat/think-control";
@@ -22,9 +22,18 @@ type ComposerControlsProps = {
   onSettings: (settings: ConversationSettings) => void;
   /** While the chat loads, its saved settings are not known yet. */
   disabled: boolean;
+  /**
+   * Whether the chat's project has files: the Files switch shows unless this
+   * is `false`, so it stays reachable while that is not known (`null`).
+   * `undefined` outside a project.
+   */
+  hasFiles?: boolean | null;
 };
 
-/** How the next turn is set up: model, Instant/Thinking and Charts. */
+const toggle =
+  "flex size-8 shrink-0 items-center justify-center rounded-full text-zinc-600 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 aria-pressed:bg-zinc-900 aria-pressed:text-white dark:text-zinc-300 dark:hover:bg-zinc-800 dark:aria-pressed:bg-zinc-100 dark:aria-pressed:text-zinc-900";
+
+/** How the next turn is set up: model, Instant/Thinking, Charts and Files. */
 const ComposerControls = ({
   models,
   capabilities,
@@ -34,6 +43,7 @@ const ComposerControls = ({
   settings,
   onSettings,
   disabled,
+  hasFiles,
 }: ComposerControlsProps) => {
   const caps: ModelCapabilities | undefined = capabilities[selected];
   const tools = caps?.tools === true;
@@ -68,10 +78,25 @@ const ComposerControls = ({
         onClick={() => {
           onSettings({ ...settings, charts: !settings.charts });
         }}
-        className="flex size-8 shrink-0 items-center justify-center rounded-full text-zinc-600 hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 aria-pressed:bg-zinc-900 aria-pressed:text-white dark:text-zinc-300 dark:hover:bg-zinc-800 dark:aria-pressed:bg-zinc-100 dark:aria-pressed:text-zinc-900"
+        className={toggle}
       >
         <ChartColumn aria-hidden="true" className="size-4" />
       </button>
+      {hasFiles !== undefined && hasFiles !== false && (
+        <button
+          type="button"
+          aria-label="Files"
+          aria-pressed={settings.files}
+          disabled={disabled}
+          title="Adds the most relevant passages of this project's files to each message. Nothing leaves this computer."
+          onClick={() => {
+            onSettings({ ...settings, files: !settings.files });
+          }}
+          className={toggle}
+        >
+          <FileText aria-hidden="true" className="size-4" />
+        </button>
+      )}
     </>
   );
 };

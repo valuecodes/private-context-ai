@@ -23,6 +23,7 @@ const finnish: ConversationSettings = {
   options: { temperature: 0.7, num_ctx: 8192 },
   think: { kind: "level", level: "high" },
   charts: false,
+  files: true,
 };
 
 const sent = (text = "Hi", streamId = "s1"): ChatState =>

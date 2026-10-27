@@ -1,6 +1,6 @@
 import { Activity, Gauge, MessageSquare, Settings } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { loadVersion } from "~/app-version";
 import { ActivityPanel } from "~/features/activity/activity-panel";
@@ -12,6 +12,7 @@ import { useConversations } from "~/features/conversations/use-conversations";
 import { ModelsPanel } from "~/features/models/models-panel";
 import { MemoryPreview } from "~/features/projects/memory-preview";
 import { ProjectView } from "~/features/projects/project-view";
+import { useHasFiles } from "~/features/projects/use-has-files";
 import { useMemoryStatus } from "~/features/projects/use-memory-status";
 import { useProjects } from "~/features/projects/use-projects";
 import { SettingsView } from "~/features/settings/settings-view";
@@ -46,8 +47,14 @@ const Workspace = () => {
   const [view, setView] = useState<View>("chat");
   // The project whose view is open, or was last.
   const [projectId, setProjectId] = useState<string | null>(null);
-  // The saved chat whose "What this chat sees" dialog is open.
-  const [previewing, setPreviewing] = useState<string | null>(null);
+  // The saved chat whose "What this chat sees" dialog is open, with the
+  // composer's draft when it opened.
+  const [previewing, setPreviewing] = useState<{
+    conversationId: string;
+    draft: string;
+  } | null>(null);
+  // The composer's draft, trimmed: read only when the dialog opens.
+  const draft = useRef("");
   const { status, retry } = useOllamaStatus();
   const conversations = useConversations();
   const projects = useProjects();
@@ -198,6 +205,7 @@ const Workspace = () => {
   };
   const chatMemory =
     chatProject === undefined ? undefined : memory.statuses[chatProject.id];
+  const hasFiles = useHasFiles(chatProject?.id ?? null, view);
 
   const remove = (id: string) => {
     void conversations.remove(id).then((deleted) => {
@@ -290,10 +298,17 @@ const Workspace = () => {
                         previewChat === null
                           ? undefined
                           : () => {
-                              setPreviewing(previewChat);
+                              setPreviewing({
+                                conversationId: previewChat,
+                                draft: draft.current,
+                              });
                             },
                     }
               }
+              hasFiles={hasFiles}
+              onDraft={(text) => {
+                draft.current = text;
+              }}
               memory={
                 previewChat === null
                   ? undefined
@@ -310,10 +325,11 @@ const Workspace = () => {
           {view === "chat" &&
             chatProject !== undefined &&
             previewing !== null &&
-            previewing === previewChat && (
+            previewing.conversationId === previewChat && (
               <MemoryPreview
                 projectId={chatProject.id}
-                conversationId={previewing}
+                conversationId={previewing.conversationId}
+                draft={previewing.draft === "" ? null : previewing.draft}
                 onClose={() => {
                   setPreviewing(null);
                 }}

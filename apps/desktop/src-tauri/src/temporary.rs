@@ -187,6 +187,22 @@ impl TempChats {
         Ok(())
     }
 
+    /// The prompt `input` sends: its own, or for a regenerate the chat's
+    /// last user message; `None` when there is none to regenerate.
+    pub fn turn_prompt(&self, id: Uuid, input: &TurnInput) -> Result<Option<Redacted>, AppError> {
+        if let Some(prompt) = input.prompt() {
+            return Ok(Some(prompt.clone()));
+        }
+        let sessions = self.sessions();
+        let session = sessions.get(&id).ok_or_else(not_found)?;
+        Ok(session
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.message.role == ChatRole::User)
+            .map(|message| message.message.content.clone()))
+    }
+
     /// Forgets a chat. `false` when there was no such chat.
     pub fn remove(&self, id: Uuid) -> bool {
         self.sessions().remove(&id).is_some()
@@ -634,7 +650,7 @@ mod tests {
 
         let context = ProjectContext {
             instructions: Redacted::new("Cite sources."),
-            memories: Vec::new(),
+            ..ProjectContext::default()
         };
         let turn = chats
             .begin(id, &context, PROMPT_LIMIT, &new("Hi"), |_, _| Ok(()))
@@ -654,6 +670,73 @@ mod tests {
             chats.project(Uuid::new_v4()),
             Err(AppError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn temp_turn_prompt_is_the_prompt_sent() {
+        let (chats, id) = answered(&["One", "Two"]);
+        assert!(chats.settings(id).unwrap().files);
+        assert_eq!(
+            chats.turn_prompt(id, &new("Three")).unwrap(),
+            Some(Redacted::new("Three"))
+        );
+        assert_eq!(
+            chats.turn_prompt(id, &TurnInput::Regenerate).unwrap(),
+            Some(Redacted::new("Two"))
+        );
+        let empty = chats.start().unwrap();
+        assert_eq!(
+            chats.turn_prompt(empty, &TurnInput::Regenerate).unwrap(),
+            None
+        );
+        assert!(matches!(
+            chats.turn_prompt(Uuid::new_v4(), &TurnInput::Regenerate),
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn temp_begin_adds_passages_for_its_prompt_only() {
+        use crate::storage::files::SearchHit;
+
+        let chats = TempChats::default();
+        let project = Uuid::new_v4();
+        let id = chats
+            .start_with(ConversationSettings::default(), Some(project))
+            .unwrap();
+        let context = |query: &str| ProjectContext {
+            files: vec![SearchHit {
+                name: Redacted::new("a.txt"),
+                start_line: 1,
+                end_line: 1,
+                snippet: Redacted::default(),
+                text: Redacted::new("plover"),
+            }],
+            files_query: Redacted::new(query),
+            ..ProjectContext::default()
+        };
+        let system = |context: &ProjectContext, prompt: &str| {
+            let turn = chats
+                .begin(id, context, PROMPT_LIMIT, &new(prompt), |_, _| Ok(()))
+                .unwrap();
+            chats.rollback(id);
+            turn.history[0].content.expose().to_owned()
+        };
+
+        assert!(system(&context("Hi"), "Hi").contains("<<<file \"a.txt\" line 1>>>\nplover"));
+        // Searched for another prompt than the one sent: left out.
+        assert_eq!(system(&context("Other"), "Hi"), "Hi");
+
+        chats
+            .update_settings(
+                id,
+                ConversationSettings {
+                    files: false,
+                    ..ConversationSettings::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(system(&context("Hi"), "Hi"), "Hi");
     }
 
     #[test]

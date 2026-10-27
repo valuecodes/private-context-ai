@@ -19,6 +19,29 @@ const STATE_NOTE: Record<ContextPreview["entries"][number]["state"], string> = {
 const formatBytes = (bytes: number): string =>
   bytes < 1000 ? `${bytes} B` : `${(bytes / 1000).toFixed(1)} KB`;
 
+/** What the preview says about the project's files, if anything. */
+const filesNote = (files: ContextPreview["files"]): string | null => {
+  if (files.kind === "none") {
+    return null;
+  }
+  if (files.kind === "off") {
+    return "Files is off for this chat: no passages of the project's files are sent.";
+  }
+  if (files.kind === "perMessage") {
+    return "Passages of the project's files are chosen for each message from what it asks.";
+  }
+  if (files.included + files.dropped === 0) {
+    return "No passage of the project's files matches the draft.";
+  }
+  const sent =
+    files.included === 1
+      ? "1 passage of the project's files is sent with the draft"
+      : `${String(files.included)} passages of the project's files are sent with the draft`;
+  return files.dropped === 0
+    ? `${sent}.`
+    : `${sent}; ${String(files.dropped)} more are over the budget.`;
+};
+
 type PreviewBodyProps = {
   preview: ContextPreview | null;
   error: AppError | null;
@@ -46,6 +69,7 @@ const PreviewBody = ({
   if (preview === null) {
     return <p className="text-sm text-zinc-500">Loading…</p>;
   }
+  const note = filesNote(preview.files);
   return (
     <div className="flex min-h-0 flex-col gap-3">
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -67,6 +91,22 @@ const PreviewBody = ({
         />
         <span>{`${formatBytes(preview.memoryBytes)} of ${formatBytes(preview.budgetBytes)}`}</span>
       </div>
+      {preview.files.kind === "searched" && (
+        <div className="flex items-center gap-2 text-xs">
+          <label htmlFor="files-budget">Files</label>
+          <meter
+            id="files-budget"
+            min={0}
+            max={Math.max(preview.files.budgetBytes, 1)}
+            value={preview.files.bytes}
+            className="flex-1"
+          />
+          <span>{`${formatBytes(preview.files.bytes)} of ${formatBytes(preview.files.budgetBytes)}`}</span>
+        </div>
+      )}
+      {note !== null && (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">{note}</p>
+      )}
       {preview.entries.length > 0 && (
         <ul
           aria-label="Memory entries"
@@ -109,6 +149,11 @@ type MemoryPreviewProps = {
   projectId: string;
   /** "What this chat sees" for this saved chat; the whole project if `null`. */
   conversationId: string | null;
+  /**
+   * The chat's composer draft when the dialog opened: its file passages are
+   * shown as sending it would add them. `null` without one.
+   */
+  draft?: string | null;
   onClose: () => void;
 };
 
@@ -116,6 +161,7 @@ type MemoryPreviewProps = {
 const MemoryPreview = ({
   projectId,
   conversationId,
+  draft = null,
   onClose,
 }: MemoryPreviewProps) => {
   const [preview, setPreview] = useState<ContextPreview | null>(null);
@@ -124,7 +170,7 @@ const MemoryPreview = ({
 
   useEffect(() => {
     let cancelled = false;
-    void projectContextPreview(projectId, conversationId).then(
+    void projectContextPreview(projectId, conversationId, draft).then(
       (loaded) => {
         if (!cancelled) {
           setPreview(loaded);
@@ -139,7 +185,7 @@ const MemoryPreview = ({
     return () => {
       cancelled = true;
     };
-  }, [projectId, conversationId]);
+  }, [projectId, conversationId, draft]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {

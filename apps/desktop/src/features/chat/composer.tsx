@@ -27,6 +27,8 @@ type ComposerProps = {
   compare?: CompareOption;
   /** Controls for the next turn, left of Compare. */
   toolbar?: ReactNode;
+  /** The draft changed; called with the trimmed text a send would submit. */
+  onDraft?: (text: string) => void;
 };
 
 const button =
@@ -40,8 +42,13 @@ const Composer = ({
   temporary = false,
   compare,
   toolbar,
+  onDraft,
 }: ComposerProps) => {
   const [draft, setDraft] = useState("");
+  const changeDraft = (next: string) => {
+    setDraft(next);
+    onDraft?.(next.trim());
+  };
   const [picking, setPicking] = useState(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
   const text = draft.trim();
@@ -66,7 +73,7 @@ const Composer = ({
       return;
     }
     if (onSend(text)) {
-      setDraft("");
+      changeDraft("");
     }
   };
 
@@ -101,7 +108,7 @@ const Composer = ({
           onCompare={(models) => {
             setPicking(false);
             if (comparable && compare.onCompare(text, models)) {
-              setDraft("");
+              changeDraft("");
             }
           }}
         />
@@ -118,7 +125,7 @@ const Composer = ({
           ref={textarea}
           value={draft}
           onChange={(event) => {
-            setDraft(event.target.value);
+            changeDraft(event.target.value);
           }}
           onKeyDown={onKeyDown}
           rows={1}

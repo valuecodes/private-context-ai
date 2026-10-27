@@ -79,6 +79,11 @@ type ConversationSettings = {
    * Off unless the user turns it on.
    */
   charts: boolean;
+  /**
+   * In a project with files, adds the passages that best match each prompt
+   * to the system message. On unless the user turns it off.
+   */
+  files: boolean;
 };
 
 /** A chart the model asked for, validated by Rust. Its text is the model's. */
@@ -240,6 +245,22 @@ type ContextPreview = {
   }[];
   memoryBytes: number;
   budgetBytes: number;
+  /**
+   * `none`: the project has no files. `off`: the chat's Files switch is off.
+   * `perMessage`: no draft to search for. `searched`: `text` carries what
+   * sending the draft adds.
+   */
+  files:
+    | { kind: "none" }
+    | { kind: "off" }
+    | { kind: "perMessage" }
+    | {
+        kind: "searched";
+        included: number;
+        dropped: number;
+        bytes: number;
+        budgetBytes: number;
+      };
 };
 
 /** `pending`: still streaming, or the app stopped while it was. */

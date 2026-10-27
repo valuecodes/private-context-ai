@@ -23,6 +23,7 @@ const finnish: ConversationSettings = {
   options: { temperature: 0.7 },
   think: { kind: "on" },
   charts: true,
+  files: true,
 };
 
 const request = {

@@ -13,6 +13,7 @@ const finnish: ConversationSettings = {
   options: {},
   think: { kind: "off" },
   charts: false,
+  files: true,
 };
 
 const hot: ConversationSettings = {
@@ -20,6 +21,7 @@ const hot: ConversationSettings = {
   options: { temperature: 1.9 },
   think: { kind: "on" },
   charts: true,
+  files: false,
 };
 
 const refused: AppError = { kind: "invalidInput", message: "too hot" };

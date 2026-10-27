@@ -1474,7 +1474,12 @@ mod tests {
 
         let preview = setup
             .storage
-            .context_preview(setup.project, Some(b), setup.ollama.max_prompt_bytes())
+            .context_preview(
+                setup.project,
+                Some(b),
+                None,
+                setup.ollama.max_prompt_bytes(),
+            )
             .unwrap();
         send(&setup, b, "Three").unwrap();
 
@@ -1496,11 +1501,11 @@ mod tests {
 
         setup
             .storage
-            .context_preview(setup.project, None, PROMPT_LIMIT)
+            .context_preview(setup.project, None, None, PROMPT_LIMIT)
             .unwrap();
         setup
             .storage
-            .context_preview(setup.project, Some(a), PROMPT_LIMIT)
+            .context_preview(setup.project, Some(a), None, PROMPT_LIMIT)
             .unwrap();
 
         assert_eq!(count_rows(&setup.storage, "audit_events"), rows);
