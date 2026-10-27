@@ -6,6 +6,7 @@ pub mod compare;
 pub mod conversations;
 pub mod db;
 pub mod export;
+pub mod files;
 pub mod key;
 pub mod lock;
 pub mod memory;

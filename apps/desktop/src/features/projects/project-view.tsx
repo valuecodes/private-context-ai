@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { projectMemoryCatchUp } from "~/lib/ipc";
 import type { AppError, Conversation, Project } from "~/lib/types";
 
+import { FilesPanel } from "./files-panel";
 import { MemoryPanel } from "./memory-panel";
 import { MemoryPreview } from "./memory-preview";
 import type { ProjectMemoryStatus } from "./use-memory-status";
@@ -40,7 +41,7 @@ type ProjectViewProps = {
 };
 
 /**
- * A project's name, instructions, memory and chats. Opening it moves its
+ * A project's name, instructions, memory, files and chats. Opening it moves its
  * pending chats to the front of the background memory queue.
  */
 const ProjectView = ({
@@ -224,6 +225,8 @@ const ProjectView = ({
             }}
           />
         )}
+        {/* Keyed so an add running in one project never shows in another. */}
+        <FilesPanel key={project.id} projectId={project.id} />
         <div className="flex gap-2">
           <button
             type="button"

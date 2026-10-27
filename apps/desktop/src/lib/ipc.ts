@@ -13,6 +13,7 @@ import type {
   Conversation,
   ConversationSettings,
   ConversationWithMessages,
+  FilePage,
   MemoryEntry,
   MemoryList,
   MemoryStatus,
@@ -22,6 +23,7 @@ import type {
   OllamaStatus,
   PendingCount,
   Project,
+  ProjectFile,
   RefreshResult,
   RequestId,
   SendStarted,
@@ -177,6 +179,28 @@ const projectContextPreview = (
     projectId,
     conversationId,
   });
+
+/**
+ * Stores one file's text in the project, replacing a file of the same name.
+ * The webview read it; Rust never reads a disk path.
+ */
+const projectFileAdd = (
+  projectId: string,
+  name: string,
+  content: string
+): Promise<ProjectFile> =>
+  invoke<ProjectFile>("project_file_add", { projectId, name, content });
+
+/** `limit` of the project's files by name, from `offset`; at most 500. */
+const projectFileList = (
+  projectId: string,
+  offset: number,
+  limit: number
+): Promise<FilePage> =>
+  invoke<FilePage>("project_file_list", { projectId, offset, limit });
+
+const projectFileDelete = (projectId: string, id: string): Promise<void> =>
+  invoke<undefined>("project_file_delete", { projectId, id });
 
 /** Rust sends the chat's saved settings: system prompt, options and Think. */
 type ChatTurnArgs = { model: string };
@@ -389,6 +413,9 @@ export {
   projectContextPreview,
   projectCreate,
   projectDelete,
+  projectFileAdd,
+  projectFileDelete,
+  projectFileList,
   projectList,
   projectMemoryCatchUp,
   projectMemoryDelete,
