@@ -131,7 +131,18 @@ fn pieces(text: &str, max: usize) -> impl Iterator<Item = &str> {
         if rest.is_empty() {
             return None;
         }
-        let (piece, tail) = rest.split_at(truncate_at(rest, max).len());
+        let mut cut = truncate_at(rest, max).len();
+        // Cut after the last separator, so no word is split between two
+        // chunks and lost to search; only a word longer than `max` is.
+        if cut < rest.len()
+            && let Some((at, separator)) = rest[..cut]
+                .char_indices()
+                .rev()
+                .find(|(_, c)| !c.is_alphanumeric())
+        {
+            cut = at + separator.len_utf8();
+        }
+        let (piece, tail) = rest.split_at(cut);
         rest = tail;
         Some(piece)
     })
@@ -463,6 +474,25 @@ mod tests {
         assert!(read.text.expose().starts_with("1\tx"));
         assert!(read.text.expose().ends_with(&format!("{LINE_TRUNCATED}\n")));
         assert!(read.text.expose().len() <= MAX_READ_BYTES);
+    }
+
+    #[test]
+    fn long_line_splits_between_words() {
+        let (storage, _dir) = temp_storage();
+        let project = storage.create_project("p").unwrap().id;
+        // A plain cut at 2048 bytes would leave "nee" and "dle".
+        let line = format!("{}needle and more words", " ".repeat(2045));
+        let chunks = chunk_lines(&line);
+        assert_eq!(chunks.len(), 2);
+        assert!(chunks[1].text.starts_with("needle"));
+        let joined: String = chunks.iter().map(|chunk| chunk.text.as_str()).collect();
+        assert_eq!(joined, line);
+
+        add(&storage, project, "wide.txt", &line);
+        assert_eq!(
+            names(&storage.search(project, "needle", 10).unwrap()),
+            ["wide.txt"]
+        );
     }
 
     #[test]
