@@ -67,6 +67,13 @@ const Workspace = () => {
   const memory = useMemoryStatus();
   const { reload: reloadMemoryCounts } = memory;
 
+  // Leaving Chat unmounts the composer, which comes back empty.
+  useEffect(() => {
+    if (view !== "chat") {
+      draft.current = "";
+    }
+  }, [view]);
+
   // Projects and chats added, deleted or switched change the counts.
   useEffect(() => {
     reloadMemoryCounts();
