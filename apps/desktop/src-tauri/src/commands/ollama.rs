@@ -323,13 +323,10 @@ pub(crate) fn tool_follow_up<R: ReplyRecorder>(
 /// Runs the file tools against project `project`'s library.
 pub(crate) fn file_runner(storage: Arc<Storage>, project: Uuid) -> FileRunner {
     Arc::new(move |call| match call {
-        FileCall::List { page } => {
-            let offset = page.saturating_sub(1).saturating_mul(LIST_PAGE);
-            Ok(list_result(
-                &storage.list_files(project, offset, LIST_PAGE)?,
-                *page,
-            ))
-        }
+        FileCall::List { start } => Ok(list_result(
+            &storage.list_files(project, start - 1, LIST_PAGE)?,
+            *start,
+        )),
         FileCall::Search { query } => Ok(search_result(
             query,
             &storage.search(project, query, SEARCH_HITS)?,
@@ -1206,9 +1203,9 @@ mod tests {
         let (project, _) = project_chat(&storage, &ConversationSettings::default());
         let run = file_runner(Arc::clone(&storage), project);
 
-        let listed = run(&FileCall::List { page: 1 }).unwrap();
+        let listed = run(&FileCall::List { start: 1 }).unwrap();
         assert_eq!(listed.hits, 1);
-        assert!(listed.text.contains("page 1 of 1, 1 in all>>>\na.txt\n"));
+        assert!(listed.text.contains("<<<files 1-1 of 1>>>\na.txt\n"));
         let found = run(&FileCall::Search {
             query: "plover".into(),
         })
