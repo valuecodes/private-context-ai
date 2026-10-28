@@ -108,8 +108,8 @@ const FilesList = ({
         </span>
       </div>
       <p className="text-xs text-zinc-500 dark:text-zinc-400">
-        Copies of text files, up to 4 MiB each, stored encrypted on this
-        computer. Chats don&apos;t use them yet.
+        Copies of text files, up to 4 MiB each, and the text of PDFs up to 32
+        MiB (the first 4 MiB of their text), stored encrypted on this computer.
       </p>
       {state.adding !== null && (
         <p role="status" className="text-sm">

@@ -1,8 +1,11 @@
 // Reading the files the user picks or drops, in the webview. Rust gets their
-// text only; it has no command that reads a disk path.
+// text, or a PDF's bytes to extract its text from; it has no command that
+// reads a disk path.
 
 /** The largest file Rust stores, in bytes. */
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
+/** The largest PDF Rust reads, in bytes. */
+const MAX_PDF_BYTES = 32 * 1024 * 1024;
 
 /** What reading a file needs: a `File` has both. */
 type Readable = Pick<Blob, "size" | "arrayBuffer">;
@@ -12,6 +15,7 @@ type PickedFile = { name: string; file: Readable };
 
 type PreparedFile =
   | { kind: "ok"; name: string; content: string }
+  | { kind: "pdf"; name: string; bytes: ArrayBuffer }
   | { kind: "skipped"; name: string; reason: string };
 
 /**
@@ -52,12 +56,22 @@ const decoder = new TextDecoder("utf-8", { fatal: true });
 const fileName = (file: Pick<File, "name" | "webkitRelativePath">): string =>
   file.webkitRelativePath === "" ? file.name : file.webkitRelativePath;
 
-/** The file's text, or why it is skipped: too large, not text, unreadable. */
+/** A PDF by its name: Rust then reads its text. */
+const isPdf = (name: string): boolean => name.toLowerCase().endsWith(".pdf");
+
+/**
+ * The file's text, or a PDF's bytes, or why it is skipped: too large, not
+ * text, unreadable.
+ */
 const prepareFile = async ({
   name,
   file,
 }: PickedFile): Promise<PreparedFile> => {
-  if (file.size > MAX_FILE_BYTES) {
+  const pdf = isPdf(name);
+  if (pdf && file.size > MAX_PDF_BYTES) {
+    return { kind: "skipped", name, reason: "larger than 32 MiB" };
+  }
+  if (!pdf && file.size > MAX_FILE_BYTES) {
     return { kind: "skipped", name, reason: "larger than 4 MiB" };
   }
   let bytes: ArrayBuffer;
@@ -65,6 +79,9 @@ const prepareFile = async ({
     bytes = await file.arrayBuffer();
   } catch {
     return { kind: "skipped", name, reason: "could not be read" };
+  }
+  if (pdf) {
+    return { kind: "pdf", name, bytes };
   }
   let content: string;
   try {
@@ -132,5 +149,5 @@ const collectDropped = async (entries: DropEntry[]): Promise<PickedFile[]> => {
   return picked;
 };
 
-export type { DropEntry, PickedFile };
-export { collectDropped, fileName, MAX_FILE_BYTES, prepareFile };
+export type { DropEntry, PickedFile, PreparedFile };
+export { collectDropped, fileName, MAX_FILE_BYTES, MAX_PDF_BYTES, prepareFile };

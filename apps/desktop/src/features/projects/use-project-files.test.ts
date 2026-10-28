@@ -1,9 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import { projectFileAdd, projectFileAddPdf } from "~/lib/ipc";
 import type { ProjectFile } from "~/lib/types";
 
 import type { FilesState } from "./use-project-files";
-import { filesReducer, initialFiles, isBusy } from "./use-project-files";
+import {
+  filesReducer,
+  initialFiles,
+  isBusy,
+  storeFile,
+} from "./use-project-files";
 
 vi.mock("~/lib/ipc");
 
@@ -113,5 +119,51 @@ describe("filesReducer", () => {
     expect(failed.error?.message).toBe("disk full");
     expect(failed.deleting).toBeNull();
     expect(ids(failed)).toEqual(["a"]);
+  });
+});
+
+describe("storeFile", () => {
+  beforeEach(() => {
+    vi.mocked(projectFileAdd).mockReset().mockResolvedValue(file("t"));
+    vi.mocked(projectFileAddPdf).mockReset().mockResolvedValue(file("p"));
+  });
+
+  it("sends text to the text command and a PDF to the PDF command", async () => {
+    expect(
+      await storeFile("p1", { kind: "ok", name: "a.md", content: "hi" })
+    ).toBeNull();
+    expect(projectFileAdd).toHaveBeenCalledWith("p1", "a.md", "hi");
+
+    const bytes = new ArrayBuffer(4);
+    expect(
+      await storeFile("p1", { kind: "pdf", name: "b.pdf", bytes })
+    ).toBeNull();
+    expect(projectFileAddPdf).toHaveBeenCalledWith("p1", "b.pdf", bytes);
+    expect(projectFileAdd).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports Rust's reason as a skip", async () => {
+    vi.mocked(projectFileAddPdf).mockRejectedValue({
+      kind: "invalidInput",
+      message: "encrypted",
+    });
+    expect(
+      await storeFile("p1", {
+        kind: "pdf",
+        name: "locked.pdf",
+        bytes: new ArrayBuffer(1),
+      })
+    ).toEqual({ name: "locked.pdf", reason: "encrypted" });
+  });
+
+  it("passes a skipped file through without a call", async () => {
+    const skipped = {
+      kind: "skipped",
+      name: "x.bin",
+      reason: "a binary file",
+    } as const;
+    expect(await storeFile("p1", skipped)).toEqual(skipped);
+    expect(projectFileAdd).not.toHaveBeenCalled();
+    expect(projectFileAddPdf).not.toHaveBeenCalled();
   });
 });

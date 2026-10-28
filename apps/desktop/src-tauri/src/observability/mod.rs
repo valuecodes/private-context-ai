@@ -5,13 +5,14 @@
 
 use std::path::Path;
 
-use tracing::Subscriber;
+use tracing::{Metadata, Subscriber};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::{EnvFilter, Registry, fmt, reload};
+use tracing_subscriber::{EnvFilter, Layer, Registry, fmt, reload};
 
 use crate::error::AppError;
 use crate::settings::LogLevel;
@@ -37,9 +38,25 @@ impl LogControl {
     }
 }
 
+/// Crates whose `log` records carry document text: the PDF parser logs
+/// glyphs, text runs and whole content streams.
+const CONTENT_LOGGING_CRATES: [&str; 2] = ["pdf_extract", "lopdf"];
+
+/// Whether an event comes from one of [`CONTENT_LOGGING_CRATES`].
+fn logs_content(metadata: &Metadata<'_>) -> bool {
+    let target = metadata.target();
+    CONTENT_LOGGING_CRATES.iter().any(|name| {
+        target
+            .strip_prefix(name)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+    })
+}
+
 /// A JSON subscriber writing to `writer`, filtered by `env_filter` when
 /// given (a `RUST_LOG` override), else at `info` until
-/// [`LogControl::set_level`] changes it.
+/// [`LogControl::set_level`] changes it. Events of
+/// [`CONTENT_LOGGING_CRATES`] are dropped at every level, outside the
+/// reloadable filter, so neither the setting nor `RUST_LOG` brings them back.
 pub fn subscriber<W>(
     writer: W,
     env_filter: Option<EnvFilter>,
@@ -55,7 +72,8 @@ where
             .json()
             // A file, not a terminal: no colour escape codes in the JSON lines.
             .with_ansi(false)
-            .with_writer(writer),
+            .with_writer(writer)
+            .with_filter(filter_fn(|metadata| !logs_content(metadata))),
     );
     (
         subscriber,
@@ -153,5 +171,26 @@ mod tests {
         let text = captured.text();
         assert!(!text.contains("hidden"));
         assert!(text.contains("shown"));
+    }
+
+    #[test]
+    fn dependency_logs_from_pdf_crates_are_dropped() {
+        let captured = Captured::default();
+        let writer = captured.clone();
+        let (subscriber, _control) =
+            subscriber(move || writer.clone(), Some(EnvFilter::new("trace")));
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "pdf_extract", "Stream: page text");
+            tracing::error!(target: "lopdf::reader", "glyph text");
+            tracing::warn!(target: "lopdfx", "a lookalike crate");
+            tracing::warn!("app event");
+        });
+
+        let text = captured.text();
+        assert!(!text.contains("page text"));
+        assert!(!text.contains("glyph text"));
+        assert!(text.contains("a lookalike crate"));
+        assert!(text.contains("app event"));
     }
 }

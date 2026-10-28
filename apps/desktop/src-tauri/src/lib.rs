@@ -8,6 +8,7 @@ pub mod error;
 pub mod memory;
 pub mod observability;
 pub mod ollama;
+pub mod pdf;
 pub mod redacted;
 pub mod settings;
 pub mod storage;
@@ -25,6 +26,7 @@ use crate::error::AppError;
 use crate::memory::{MemoryScheduler, MemoryStatus, Timings};
 use crate::ollama::Ollama;
 use crate::ollama::client::resolve_base_url;
+use crate::pdf::PdfWorker;
 use crate::settings::Settings;
 use crate::storage::StorageState;
 use crate::storage::key::KeychainKeySource;
@@ -122,6 +124,7 @@ pub fn run() {
             let ollama = Arc::new(Ollama::new(base_url, audit));
             app.manage(Arc::clone(&ollama));
             app.manage(Arc::new(TempChats::default()));
+            app.manage(PdfWorker::default());
 
             let handle = app.handle().clone();
             let emit = Arc::new(move |status: MemoryStatus| {
@@ -183,6 +186,7 @@ pub fn run() {
             commands::projects::project_memory_pending,
             commands::projects::project_context_preview,
             commands::files::project_file_add,
+            commands::files::project_file_add_pdf,
             commands::files::project_file_list,
             commands::files::project_file_delete,
             commands::activity::activity_list,

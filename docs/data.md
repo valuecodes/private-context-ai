@@ -24,7 +24,8 @@ key never reaches the app window, and without a working keychain the app shows
 
 **Project files.** Files you add to a project are copies: their text is stored in the
 same encrypted database, with a full-text index, and the originals are never read
-again. To update one, add it again; a file of the same name is replaced. Deleting a
+again. A PDF is stored as the text extracted from it (the first 4 MiB), never as the
+PDF itself. To update one, add it again; a file of the same name is replaced. Deleting a
 file, or its project, deletes the copy and its index entries. Each chat in the project
 searches them for every message it sends, and puts the best passages in its request
 to the local model, unless the chat's Files switch is off (saved with the chat). A

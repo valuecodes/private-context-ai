@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useReducer } from "react";
 
 import { toAppError } from "~/lib/app-error";
-import { projectFileAdd, projectFileDelete, projectFileList } from "~/lib/ipc";
+import {
+  projectFileAdd,
+  projectFileAddPdf,
+  projectFileDelete,
+  projectFileList,
+} from "~/lib/ipc";
 import type { AppError, FilePage, ProjectFile } from "~/lib/types";
 
-import type { DropEntry, PickedFile } from "./read-files";
+import type { DropEntry, PickedFile, PreparedFile } from "./read-files";
 import { collectDropped, prepareFile } from "./read-files";
 
 /** Files loaded per page. */
@@ -104,6 +109,28 @@ const filesReducer = (state: FilesState, action: FilesAction): FilesState => {
 };
 
 /**
+ * Sends a prepared file to Rust: text as it is, a PDF for its text. Resolves
+ * to why it was skipped, or `null` once it is stored.
+ */
+const storeFile = async (
+  projectId: string,
+  prepared: PreparedFile
+): Promise<SkippedFile | null> => {
+  if (prepared.kind === "skipped") {
+    return prepared;
+  }
+  const { name } = prepared;
+  try {
+    await (prepared.kind === "pdf"
+      ? projectFileAddPdf(projectId, name, prepared.bytes)
+      : projectFileAdd(projectId, name, prepared.content));
+    return null;
+  } catch (error) {
+    return { name, reason: toAppError(error).message };
+  }
+};
+
+/**
  * One project's files: loading them page by page, adding and deleting.
  * Files are added one at a time, in order; afterwards the list reloads from
  * the first page, since new names can land anywhere in it.
@@ -139,16 +166,9 @@ const useProjectFiles = (projectId: string) => {
     }
     dispatch({ type: "adding", of: picked.length });
     for (const [index, file] of picked.entries()) {
-      const prepared = await prepareFile(file);
-      if (prepared.kind === "skipped") {
-        dispatch({ type: "skipped", file: prepared });
-      } else {
-        await projectFileAdd(projectId, prepared.name, prepared.content).catch(
-          (error: unknown) => {
-            const reason = toAppError(error).message;
-            dispatch({ type: "skipped", file: { name: file.name, reason } });
-          }
-        );
+      const skipped = await storeFile(projectId, await prepareFile(file));
+      if (skipped !== null) {
+        dispatch({ type: "skipped", file: skipped });
       }
       dispatch({ type: "progress", done: index + 1 });
     }
@@ -192,4 +212,4 @@ const useProjectFiles = (projectId: string) => {
 };
 
 export type { FilesState };
-export { filesReducer, initialFiles, isBusy, useProjectFiles };
+export { filesReducer, initialFiles, isBusy, storeFile, useProjectFiles };
