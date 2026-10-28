@@ -6,12 +6,13 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use super::Limits;
-use super::chart_tool::{ChartEntry, MAX_CHARTS, utf16_len};
+use super::chart_tool::{ChartEntry, MAX_CHARTS, TOOL_NAME, utf16_len};
 use super::client::{
     MAX_ERROR_BODY, MAX_ERROR_CHARS, http_error, map_reqwest, read_limited, truncate,
 };
-use super::types::{ChatEvent, ChatLine, ChatLineMessage};
+use super::file_tools::MAX_CALLS;
+use super::types::{ChatEvent, ChatLine, ChatLineMessage, ToolCallLine};
+use super::{Limits, ToolSet};
 use crate::error::AppError;
 
 /// Splits a byte stream into NDJSON lines, keeping a partial line between
@@ -90,6 +91,9 @@ pub enum ChatEnd {
         /// The reply's `render_chart` calls. When there are any, no `Done`
         /// event was emitted: a follow-up request continues the reply.
         charts: Vec<ChartEntry>,
+        /// The reply's file tool calls, not yet validated; at most
+        /// [`MAX_CALLS`]. Like charts, any means no `Done` was emitted.
+        file_calls: Vec<ToolCallLine>,
     },
     Cancelled,
     Failed(AppError),
@@ -109,7 +113,7 @@ pub async fn run_chat(
     http: &reqwest::Client,
     url: Url,
     body: Vec<u8>,
-    tools: bool,
+    tools: ToolSet,
     limits: &Limits,
     cancel: &CancellationToken,
     emit: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
@@ -198,14 +202,38 @@ struct Reply<'a> {
     http: &'a reqwest::Client,
     url: Url,
     body: Vec<u8>,
-    tools: bool,
+    tools: ToolSet,
     limits: &'a Limits,
+}
+
+/// The calls a reply made so far: chart calls and file calls, each list
+/// capped, the rest never kept.
+#[derive(Default)]
+struct Calls {
+    charts: Vec<ToolCallLine>,
+    files: Vec<ToolCallLine>,
+}
+
+impl Calls {
+    /// With file tools offered, every call but `render_chart` (when charts
+    /// are offered) is a file call, so an unknown name gets an error result
+    /// instead of a chart note.
+    fn add(&mut self, tools: ToolSet, call: ToolCallLine) {
+        let chart = tools.charts && (!tools.files || call.function.name == TOOL_NAME);
+        if chart {
+            if self.charts.len() < MAX_CHARTS {
+                self.charts.push(call);
+            }
+        } else if tools.files && self.files.len() < MAX_CALLS {
+            self.files.push(call);
+        }
+    }
 }
 
 /// Checks the first [`MAX_CHARTS`] calls and emits a `Chart` or `ChartError`
 /// for each, all at `offset`. `None` when the receiver is gone.
 fn emit_charts(
-    calls: Vec<super::types::ToolCallLine>,
+    calls: Vec<ToolCallLine>,
     offset: u64,
     cancel: &CancellationToken,
     emit: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
@@ -280,7 +308,7 @@ async fn stream_reply(
     let mut thinking = ThinkingClock::default();
     // The answer's length in UTF-16 units, where its charts go.
     let mut answer_units = 0u64;
-    let mut calls = Vec::new();
+    let mut calls = Calls::default();
     let mut deadline = first_deadline;
     loop {
         let chunk = match step(cancel, deadline, resp.chunk()).await? {
@@ -312,10 +340,12 @@ async fn stream_reply(
                 thinking: thought,
                 tool_calls,
             } = line.message.unwrap_or_default();
-            if tools && let Some(tool_calls) = tool_calls {
-                // Only the first few are used; the rest are never kept.
-                let room = MAX_CHARTS.saturating_sub(calls.len());
-                calls.extend(tool_calls.into_iter().take(room));
+            if (tools.charts || tools.files)
+                && let Some(tool_calls) = tool_calls
+            {
+                for call in tool_calls {
+                    calls.add(tools, call);
+                }
             }
             // Thinking comes first: within one line it precedes the answer.
             for (text, is_thinking) in [(thought, true), (answer, false)] {
@@ -348,12 +378,14 @@ async fn stream_reply(
                 let load_ms = line.load_duration.map(|nanos| nanos / 1_000_000);
                 thinking.answered();
                 let thinking_ms = thinking.ms();
-                let Some(charts) =
-                    emit_charts(std::mem::take(&mut calls), answer_units, cancel, emit)
-                else {
+                let Calls {
+                    charts,
+                    files: file_calls,
+                } = std::mem::take(&mut calls);
+                let Some(charts) = emit_charts(charts, answer_units, cancel, emit) else {
                     return Ok(ChatEnd::Cancelled);
                 };
-                if charts.is_empty() {
+                if charts.is_empty() && file_calls.is_empty() {
                     let done = ChatEvent::Done {
                         prompt_tokens: line.prompt_eval_count,
                         completion_tokens: line.eval_count,
@@ -375,6 +407,7 @@ async fn stream_reply(
                     prompt_eval_ms,
                     load_ms,
                     charts,
+                    file_calls,
                 });
             }
         }

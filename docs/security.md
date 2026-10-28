@@ -50,31 +50,50 @@ What the app guarantees, and what enforces it:
   credentials, path, query or fragment. The HTTP client ignores system proxies, follows
   no redirects and pins `localhost` to `127.0.0.1`. `reqwest` is built without any TLS
   backend, so the binary cannot speak HTTPS at all.
-- **The model gets one display-only tool, only when you turn Charts on, never with
-  `format`.** The request type has no `format` field. `tools` is only ever the fixed
-  `render_chart` definition in Rust, sent on the first request of a turn when the chat's
-  Charts switch is on and the model's audited `/api/show` lists `tools`. Rust validates
-  each call (bar, line or pie; 1 to 100 finite values; short trimmed text), and the
-  webview draws it as SVG from those numbers: nothing runs, nothing is fetched, the model
-  supplies no markup, and its text reaches the page only as text. A follow-up request with
-  a fixed result line and no `tools` lets the model comment, so it cannot call again.
-  Each request writes its own audit row. `think` is sent only as a boolean or a level the
-  model advertises, and only to models whose audited `/api/show` lists `thinking`; it
+- **The model gets a fixed, read-only tool set, never with `format`.** The request type
+  has no `format` field, and `tools` is only ever one of the fixed arrays defined in Rust
+  (`ollama/chart_tool.rs`, `ollama/file_tools.rs`), offered only to models whose audited
+  `/api/show` lists `tools`. Each request writes its own audit row.
+  - **Charts, only when you turn Charts on.** `render_chart` is offered on the first
+    request of a turn only. Rust validates each call (bar, line or pie; 1 to 100 finite
+    values; short trimmed text), and the webview draws it as SVG from those numbers:
+    nothing runs, nothing is fetched, the model supplies no markup, and its text reaches
+    the page only as text. The follow-up after a chart has a fixed result line and no
+    `tools`, so the model cannot call again.
+  - **Project files, only with Files on in a project that has files.** `list_files`,
+    `search_files` and `read_file` read the project's encrypted library and nothing
+    else: no tool takes a disk path, writes anything or reaches the network. Rust
+    validates every call (a query of at most 200 characters and 16 words, each word
+    quoted for FTS5 so no search syntax gets through; a file name as stored) and runs
+    it itself. A turn has at most 4 requests, each running at most 4 file calls; a
+    search returns at most 8 passages, each result is at most 16 KiB, and a turn's
+    results at most 64 KiB. The last request, the one after a chart, and any after the
+    budget runs out are sent with no `tools`. Results go back inside one escaped,
+    delimited block under a line saying they are reference data, not instructions;
+    they are never saved or replayed into later turns (only what was looked up is
+    saved, for the "Searched files" row). Errors, including an unknown tool, come back
+    as results, never as failed turns. Like the automatic passages below, this lowers
+    but cannot rule out a file steering the model; the worst case is a worse answer or
+    more lookups within the caps.
+
+  `think` is sent only as a boolean or a level the model advertises, and only to models whose audited `/api/show` lists `thinking`; it
   is `false` unless you turn Think on (models that always think get a level). Thinking
   text is stored encrypted, shown collapsed, and never sent back to the model.
   Comparing models adds only `keep_alive: 0`, which unloads each model but the last.
   Replies are rendered as Markdown into
   React elements with raw HTML disabled: links and images are inert (no `href`, nothing
   fetched), code highlighting is local JS, and nothing in a reply is executed.
+
 - **Project memory is written by the model, and read as notes.** A project chat's
   summary is made by a separate `/api/chat` request with the chat's own model: no
   `tools`, no `format`, thinking off. It is audited as `ollama.memory` (Memory summary
   in Activity). Summaries are stored encrypted and sent to the project's other chats
   inside one delimited, escaped block that says they are reference notes, not
   instructions. That lowers the risk of a chat steering another through its summary,
-  but cannot rule it out with an LLM. Because the model has no tools, the worst case is
-  a worse answer. Every entry can be viewed, edited and deleted, and "View full memory"
-  shows the exact message sent. A change that gives the model tools must revisit this.
+  but cannot rule it out with an LLM. The summary request has no tools, and the history
+  it summarizes never holds tool results (they are not saved), so the worst case is a
+  worse answer. Every entry can be viewed, edited and deleted, and "View full memory"
+  shows the exact message sent.
   Summaries also run in the background: about a minute after a project chat's last
   reply, and to catch up on unsaved chats shortly after startup and when a project is
   opened. They run one at a time, only while no other request is in flight, and any new

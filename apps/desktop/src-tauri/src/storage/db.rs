@@ -67,13 +67,20 @@ mod tests {
     use super::*;
     use crate::storage::key::new_key;
 
-    /// Undoes migration 0012.
+    /// Undoes migration 0013.
+    fn undo_file_lookups(conn: &Connection) {
+        conn.execute_batch("ALTER TABLE messages DROP COLUMN file_lookups;")
+            .unwrap();
+    }
+
+    /// Undoes migrations 0013 and 0012.
     fn undo_conversation_files(conn: &Connection) {
+        undo_file_lookups(conn);
         conn.execute_batch("ALTER TABLE conversations DROP COLUMN files;")
             .unwrap();
     }
 
-    /// Undoes migrations 0012 and 0011.
+    /// Undoes migrations 0013 to 0011.
     fn undo_files(conn: &Connection) {
         undo_conversation_files(conn);
         conn.execute_batch(
@@ -84,7 +91,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Undoes migrations 0012 to 0010.
+    /// Undoes migrations 0013 to 0010.
     fn undo_audit_timings(conn: &Connection) {
         undo_files(conn);
         conn.execute_batch(
@@ -95,7 +102,7 @@ mod tests {
         .unwrap();
     }
 
-    /// Undoes migrations 0012 to 0009.
+    /// Undoes migrations 0013 to 0009.
     fn undo_memory(conn: &Connection) {
         undo_audit_timings(conn);
         conn.execute_batch(
@@ -125,7 +132,7 @@ mod tests {
         let version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 12);
+        assert_eq!(version, 13);
         let audit_columns: Vec<String> = conn
             .prepare("SELECT name FROM pragma_table_info('audit_events')")
             .unwrap()
@@ -585,6 +592,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(files, 1);
+    }
+
+    #[test]
+    fn version_twelve_db_has_no_file_lookups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.db");
+        let key = new_key();
+        let conn = open(&path, &key).unwrap();
+        // Back to what the previous release wrote.
+        undo_file_lookups(&conn);
+        conn.execute_batch(
+            "PRAGMA user_version = 12;
+             INSERT INTO conversations (id, title, model, created_at, updated_at)
+               VALUES ('c', 't', 'm', 'x', 'x');
+             INSERT INTO messages (id, conversation_id, role, content, created_at, status)
+               VALUES ('m', 'c', 'assistant', 'hi', 'x', 'complete');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let conn = open(&path, &key).unwrap();
+        let lookups: Option<String> = conn
+            .query_row(
+                "SELECT file_lookups FROM messages WHERE id = 'm'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lookups, None);
     }
 
     #[test]

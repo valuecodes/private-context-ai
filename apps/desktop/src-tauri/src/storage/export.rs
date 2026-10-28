@@ -156,6 +156,7 @@ mod tests {
             model: None,
             compare_group: None,
             charts: Vec::new(),
+            file_lookups: Vec::new(),
         }
     }
 

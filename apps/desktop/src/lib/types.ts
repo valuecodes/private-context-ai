@@ -105,6 +105,19 @@ type ChartEntry = {
   error?: string;
 };
 
+/**
+ * One file tool call of a reply, for its "Searched files" row; display only.
+ * `target` is the query, the file name or `page N`; empty for a refused call.
+ */
+type FileLookup = {
+  tool: "list" | "search" | "read" | "unknown";
+  target: string;
+  /** Names listed, passages found or lines read. */
+  hits: number;
+  /** Why nothing was looked up; fixed text from Rust. */
+  error?: string;
+};
+
 /** How a thinking model is switched. */
 type ThinkStyle =
   | { kind: "bool" }
@@ -286,6 +299,8 @@ type StoredMessage = {
   compareGroup: string | null;
   /** A reply's `render_chart` calls; empty for most. */
   charts: ChartEntry[];
+  /** A reply's file tool calls; empty for most. */
+  fileLookups: FileLookup[];
 };
 
 /** What the `conversation_get` command returns. */
@@ -300,6 +315,7 @@ type ChatEvent =
   | { type: "thinking"; content: string }
   | { type: "chart"; offset: number; spec: ChartSpec }
   | { type: "chartError"; offset: number; reason: string }
+  | { type: "fileLookup"; lookup: FileLookup }
   | {
       type: "done";
       promptTokens: number | null;
@@ -377,7 +393,7 @@ type AuditEvent = {
  */
 type ModelStats = {
   model: string;
-  /** Requests, not replies: a charted reply makes two. */
+  /** Requests, not replies: a reply that calls tools makes several. */
   runs: number;
   /** ISO-8601 UTC of the newest request. */
   lastAt: string;
@@ -415,6 +431,7 @@ export type {
   Conversation,
   ConversationSettings,
   ConversationWithMessages,
+  FileLookup,
   FilePage,
   LogLevel,
   MemoryEntry,

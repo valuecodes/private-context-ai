@@ -55,6 +55,7 @@ const row = (id: string, charts: StoredMessage["charts"]): StoredMessage => ({
   model: null,
   compareGroup: null,
   charts,
+  fileLookups: [],
 });
 
 describe("charts", () => {

@@ -1,9 +1,11 @@
-//! The one tool a model can be offered: `render_chart`, display only.
+//! The display-only tool a model can be offered: `render_chart`. The
+//! read-only file tools are in [`super::file_tools`].
 //!
 //! Its definition is fixed here, never built from webview input. A call's
 //! arguments are validated into a [`ChartSpec`] that the webview draws as
 //! SVG; the model only ever gets a fixed result line back.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::sync::LazyLock;
 
@@ -120,8 +122,55 @@ pub struct ToolCall {
 pub struct ToolFunction {
     /// The call's position, as Ollama's own responses number them.
     pub index: usize,
-    pub name: &'static str,
-    pub arguments: ChartArgs,
+    pub name: Cow<'static, str>,
+    pub arguments: ToolArgs,
+}
+
+/// A call's arguments as sent back: a chart's, or a file tool's validated
+/// ones (`{}` for a refused call).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolArgs {
+    Chart(ChartArgs),
+    File(Value),
+}
+
+impl Serialize for ToolArgs {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Chart(args) => args.serialize(serializer),
+            Self::File(value) => value.serialize(serializer),
+        }
+    }
+}
+
+/// The calls of one assistant message: `charts`, then `files`, numbered in
+/// that order.
+pub fn tool_calls<'a>(
+    charts: &[ChartEntry],
+    files: impl IntoIterator<Item = (Cow<'static, str>, &'a Value)>,
+) -> Vec<ToolCall> {
+    charts
+        .iter()
+        .map(|entry| {
+            (
+                Cow::Borrowed(TOOL_NAME),
+                ToolArgs::Chart(ChartArgs(entry.spec.clone())),
+            )
+        })
+        .chain(
+            files
+                .into_iter()
+                .map(|(name, arguments)| (name, ToolArgs::File(arguments.clone()))),
+        )
+        .enumerate()
+        .map(|(index, (name, arguments))| ToolCall {
+            function: ToolFunction {
+                index,
+                name,
+                arguments,
+            },
+        })
+        .collect()
 }
 
 /// The validated arguments; a rejected call is sent back as `{}`.
@@ -237,25 +286,7 @@ pub fn follow_up_history(
     text: &str,
     charts: &[ChartEntry],
 ) -> Vec<ChatMessage> {
-    let calls = charts
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| ToolCall {
-            function: ToolFunction {
-                index,
-                name: TOOL_NAME,
-                arguments: ChartArgs(entry.spec.clone()),
-            },
-        })
-        .collect();
-    history.push(ChatMessage {
-        tool_calls: Some(calls),
-        ..ChatMessage::new(ChatRole::Assistant, Redacted::new(text))
-    });
-    history.extend(charts.iter().map(|entry| ChatMessage {
-        tool_name: Some(TOOL_NAME),
-        ..ChatMessage::new(ChatRole::Tool, Redacted::new(tool_result(entry)))
-    }));
+    history.extend(super::round_messages(text, charts, &[]));
     history
 }
 

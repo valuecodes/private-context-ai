@@ -372,6 +372,7 @@ mod tests {
             &setup.ollama,
             &setup.chats,
             context,
+            None,
             request(&setup.ollama, session, prompt),
             |_| true,
         )
@@ -531,6 +532,7 @@ mod tests {
             &ollama,
             &chats,
             ProjectContext::default(),
+            None,
             request(&ollama, session, "Hi"),
             |_| true,
         )

@@ -132,7 +132,11 @@ const applyCompareEvent = (
       return { ...withStats(candidate, chat), status: "complete" };
     }
     // Compared answers are never offered tools.
-    if (chat.type === "chart" || chat.type === "chartError") {
+    if (
+      chat.type === "chart" ||
+      chat.type === "chartError" ||
+      chat.type === "fileLookup"
+    ) {
       return candidate;
     }
     return { ...candidate, status: "error", failure: chat.error.message };
