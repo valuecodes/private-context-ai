@@ -27,7 +27,10 @@ same encrypted database, with a full-text index, and the originals are never rea
 again. To update one, add it again; a file of the same name is replaced. Deleting a
 file, or its project, deletes the copy and its index entries. Each chat in the project
 searches them for every message it sends, and puts the best passages in its request
-to the local model, unless the chat's Files switch is off (saved with the chat).
+to the local model, unless the chat's Files switch is off (saved with the chat). A
+model that can use tools may also look things up in them itself; what it looked up
+(the query or file name and how much it found, never the text it read) is saved with
+its reply, encrypted, for the "Searched files" row.
 
 **Logs.** Daily JSON log files (`app.*.log`, the last 14 kept) are written to the app
 log folder, shown in Settings: `%LOCALAPPDATA%\io.github.valuecodes.privatecontextai\logs`

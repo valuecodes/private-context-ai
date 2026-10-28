@@ -19,6 +19,7 @@ const STEPS: &[M<'static>] = &[
     M::up(include_str!("migrations/0010_audit_timings.sql")),
     M::up(include_str!("migrations/0011_project_files.sql")),
     M::up(include_str!("migrations/0012_conversation_files.sql")),
+    M::up(include_str!("migrations/0013_file_lookups.sql")),
 ];
 const MIGRATIONS: Migrations<'static> = Migrations::from_slice(STEPS);
 

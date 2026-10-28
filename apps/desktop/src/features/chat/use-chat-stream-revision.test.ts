@@ -28,6 +28,7 @@ const stored = (
   model: null,
   compareGroup: null,
   charts: [],
+  fileLookups: [],
 });
 
 const event = (state: ChatState, chatEvent: ChatEvent): ChatState =>

@@ -18,7 +18,7 @@ use crate::error::AppError;
 use crate::memory::MemoryScheduler;
 use crate::ollama::chart_tool::without_tools;
 use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
-use crate::ollama::{Admission, ChatCall, ConnectionId, Ollama};
+use crate::ollama::{Admission, ChatCall, ConnectionId, Ollama, ToolSet};
 use crate::redacted::Redacted;
 use crate::storage::compare::CompareTurn;
 use crate::storage::messages::{FlushPolicy, MessageStatus, TurnRecorder};
@@ -292,7 +292,7 @@ where
             // Only one model sits in memory: each but the last unloads.
             keep_alive: (index != last).then_some(0),
             // Compared answers stay tool-free.
-            tools: false,
+            tools: ToolSet::default(),
         };
         ollama
             .run(&admission, call, &sink, |end| {

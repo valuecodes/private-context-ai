@@ -9,10 +9,11 @@ use tauri::ipc::Channel;
 use uuid::Uuid;
 
 use crate::commands::ollama::{
-    SendRequest, SendStarted, Shared, channel_sink, chart_follow_up, check_prompt, check_turn,
-    finish_turn, model_history, recording_sink,
+    SendRequest, SendStarted, Shared, channel_sink, check_prompt, check_turn, file_runner,
+    finish_turn, model_history, recording_sink, tool_follow_up, turn_tools,
 };
 use crate::error::AppError;
+use crate::ollama::file_tools::FileRunner;
 use crate::ollama::types::{ChatEvent, ThinkChoice, validate_model};
 use crate::ollama::{ChatCall, ChatThink, Ollama};
 use crate::redacted::Redacted;
@@ -94,6 +95,23 @@ fn session_context(
     Ok(context)
 }
 
+/// Runs the file tools for the temporary chat, when its project has files.
+/// Whether they are offered is decided with the Files setting
+/// [`TempChats::begin`] reads under its lock.
+fn session_files(
+    storage: &StorageState,
+    chats: &TempChats,
+    session_id: Uuid,
+) -> Result<Option<FileRunner>, AppError> {
+    let Some(project) = chats.project(session_id)? else {
+        return Ok(None);
+    };
+    let storage = storage.get()?;
+    Ok(storage
+        .project_has_files(project)?
+        .then(|| file_runner(Arc::clone(storage), project)))
+}
+
 /// Applies from the temporary chat's next send.
 #[tauri::command]
 pub fn temp_chat_update_settings(
@@ -133,6 +151,7 @@ pub async fn temp_chat_send(
         &ollama,
         &chats,
         session_context(&storage, &chats, session_id, &input)?,
+        session_files(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -159,6 +178,7 @@ pub async fn temp_chat_regenerate(
         &ollama,
         &chats,
         session_context(&storage, &chats, session_id, &TurnInput::Regenerate)?,
+        session_files(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -192,6 +212,7 @@ pub async fn temp_chat_edit(
         &ollama,
         &chats,
         session_context(&storage, &chats, session_id, &input)?,
+        session_files(&storage, &chats, session_id)?,
         SendRequest {
             conversation_id: session_id,
             model,
@@ -227,11 +248,14 @@ pub async fn discard(ollama: &Ollama, chats: &TempChats, session_id: Uuid) {
 /// discard either lands first (`NotFound`) or finds the slot and cancels it.
 /// Nothing changes when the history is refused, and a request that does not
 /// start is taken back. `context` is the chat's project's instructions and
-/// memory, read just before; the chat itself is never summarized.
+/// memory, read just before; the chat itself is never summarized. `files`
+/// runs the file tools, offered only when the Files setting `begin` read is
+/// on.
 pub fn send_temp_turn<S>(
     ollama: &Arc<Ollama>,
     chats: &Arc<TempChats>,
     context: ProjectContext,
+    files: Option<FileRunner>,
     request: SendRequest,
     send: S,
 ) -> Result<SendStarted, AppError>
@@ -266,9 +290,9 @@ where
         revision,
     )));
     let sink = recording_sink(Arc::clone(&recorder), send);
-    let tools = turn.charts && think.tools;
+    let tools = turn_tools(&think, turn.charts, turn.files && files.is_some());
     let history = model_history(turn.history, think.tools);
-    let follow_up = chart_follow_up(&recorder, &history, tools);
+    let follow_up = tool_follow_up(&recorder, &history, tools, files);
     let request_id = ollama
         .start(
             admission,
@@ -317,6 +341,7 @@ mod tests {
             ollama,
             chats,
             ProjectContext::default(),
+            None,
             SendRequest {
                 conversation_id: session,
                 model: "llama3.2".into(),
@@ -423,6 +448,81 @@ mod tests {
                 .files
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn temp_files_setting_read_in_begin_decides_file_tools() {
+        use crate::ollama::client::OllamaBaseUrl;
+        use crate::ollama::file_tools::FILE_TOOLS;
+        use crate::ollama::testing::{Reply, fake_ollama};
+        use crate::storage::key::testing::MemoryKeySource;
+
+        let fake = fake_ollama(Reply::Lines(
+            vec![r#"{"message":{"role":"assistant","content":"Hi"},"done":true}"#],
+            std::time::Duration::ZERO,
+        ))
+        .await;
+        let ollama = Arc::new(Ollama::new(
+            OllamaBaseUrl::parse(&format!("http://{}", fake.addr)),
+            Arc::new(Audit::new()),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let state = StorageState::open(dir.path(), &MemoryKeySource::default());
+        let storage = state.get().unwrap();
+        let project = storage.create_project("p").unwrap().id;
+        storage
+            .add_file(project, &Redacted::new("a.txt"), &Redacted::new("plover"))
+            .unwrap();
+        let chats = Arc::new(TempChats::default());
+        let session = start_temp(
+            &state,
+            &chats,
+            ConversationSettings::default(),
+            Some(project),
+        )
+        .unwrap();
+        let send = |files: Option<FileRunner>| {
+            send_temp_turn(
+                &ollama,
+                &chats,
+                ProjectContext::default(),
+                files,
+                SendRequest {
+                    conversation_id: session,
+                    model: "qwen3".into(),
+                    input: TurnInput::New(Redacted::new("word?")),
+                    think_choice: ThinkChoice::Off,
+                    think: ChatThink {
+                        tools: true,
+                        ..no_think(&ollama)
+                    },
+                },
+                |_| true,
+            )
+            .unwrap();
+        };
+
+        send(session_files(&state, &chats, session).unwrap());
+        ollama.wait_idle().await;
+        // Files turned off after the runner was built, before `begin`.
+        let files = session_files(&state, &chats, session).unwrap();
+        assert!(files.is_some());
+        chats
+            .update_settings(
+                session,
+                ConversationSettings {
+                    files: false,
+                    ..ConversationSettings::default()
+                },
+            )
+            .unwrap();
+        send(files);
+        ollama.wait_idle().await;
+
+        let bodies = fake.bodies.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0]["tools"], *FILE_TOOLS);
+        assert!(bodies[1].get("tools").is_none());
     }
 
     #[tokio::test]

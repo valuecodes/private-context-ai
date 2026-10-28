@@ -5,6 +5,7 @@
 
 pub mod chart_tool;
 pub mod client;
+pub mod file_tools;
 pub mod stream;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -20,16 +21,18 @@ use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use uuid::Uuid;
 
-use self::chart_tool::{CHART_TOOLS, ChartEntry};
+use self::chart_tool::{ChartEntry, tool_calls, tool_result};
 use self::client::{MAX_SHOW_BODY, OllamaBaseUrl, build_http, get_json, post_json};
+use self::file_tools::{Budget, FileOutcome, FileRunner, MAX_ROUNDS, run_call, tools_for};
 use self::stream::{ChatEnd, run_chat};
 use self::types::{
-    ChatEvent, ChatMessage, ChatOptions, ChatRequest, ModelCapabilities, ModelInfo, OllamaStatus,
-    ShowResponse, TagsResponse, Think, VersionResponse, resolve_think, validate_chat_input,
-    validate_model,
+    ChatEvent, ChatMessage, ChatOptions, ChatRequest, ChatRole, ModelCapabilities, ModelInfo,
+    OllamaStatus, ShowResponse, TagsResponse, Think, VersionResponse, resolve_think,
+    validate_chat_input, validate_model,
 };
 use crate::audit::{Audit, AuditId, AuditOutcome, AuditStatus, NewAuditEvent};
 use crate::error::AppError;
+use crate::redacted::Redacted;
 
 const MIB: usize = 1024 * 1024;
 const VERSION_TIMEOUT: Duration = Duration::from_secs(3);
@@ -177,15 +180,73 @@ pub struct ChatCall<'a> {
     pub think: ChatThink,
     /// `Some(0)` unloads the model once it has answered.
     pub keep_alive: Option<u32>,
-    /// Offers the display-only `render_chart` tool.
-    pub tools: bool,
+    pub tools: ToolSet,
 }
 
-/// What the request continuing a charted reply reuses from the first one.
+/// Which of the fixed tools a request offers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ToolSet {
+    /// The display-only `render_chart`.
+    pub charts: bool,
+    /// The read-only file tools, run through [`FollowUp::files`].
+    pub files: bool,
+}
+
+/// What the requests continuing a reply that called tools need, from the
+/// command that started it.
+pub struct FollowUp {
+    /// What the first request sent; empty when it offered no tools.
+    pub history: Vec<ChatMessage>,
+    /// The answer so far.
+    pub text: Box<dyn Fn() -> String + Send>,
+    /// Runs file calls; `None` when no file tools are offered.
+    pub files: Option<FileRunner>,
+}
+
+impl FollowUp {
+    /// For a request that offers no tools.
+    pub fn none() -> Self {
+        Self {
+            history: Vec::new(),
+            text: Box::new(String::new),
+            files: None,
+        }
+    }
+}
+
+/// What the requests continuing a reply reuse from the first one.
 struct FollowUpCall {
     model: String,
     options: Option<ChatOptions>,
     think: ChatThink,
+}
+
+/// One round's messages: the assistant's text with its calls (charts, then
+/// file calls), then one `tool` result per call in the same order.
+pub(crate) fn round_messages(
+    text: &str,
+    charts: &[ChartEntry],
+    files: &[FileOutcome],
+) -> Vec<ChatMessage> {
+    let calls = tool_calls(
+        charts,
+        files
+            .iter()
+            .map(|outcome| (outcome.name.clone(), &outcome.arguments)),
+    );
+    let mut messages = vec![ChatMessage {
+        tool_calls: Some(calls),
+        ..ChatMessage::new(ChatRole::Assistant, Redacted::new(text))
+    }];
+    messages.extend(charts.iter().map(|entry| ChatMessage {
+        tool_name: Some(chart_tool::TOOL_NAME),
+        ..ChatMessage::new(ChatRole::Tool, Redacted::new(tool_result(entry)))
+    }));
+    messages.extend(files.iter().map(|outcome| ChatMessage {
+        tool_name: outcome.tool_name,
+        ..ChatMessage::new(ChatRole::Tool, outcome.result.clone())
+    }));
+    messages
 }
 
 /// `a + b`, where a missing count is left out rather than unknown.
@@ -197,8 +258,8 @@ fn plus(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
-/// A follow-up's `Done` with the first request's counts added, so the reply
-/// shows what both requests took.
+/// A follow-up's `Done` with the earlier requests' counts added, so the
+/// reply shows what all of them took.
 fn summed_event(first: &ChatEnd, event: ChatEvent) -> ChatEvent {
     let (
         ChatEnd::Done {
@@ -231,7 +292,8 @@ fn summed_event(first: &ChatEnd, event: ChatEvent) -> ChatEvent {
     }
 }
 
-/// Like [`summed_event`], for the end; the charts are the first request's.
+/// Like [`summed_event`], for the end; the charts are the first request's,
+/// the file calls the last one's.
 fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
     let (
         ChatEnd::Done {
@@ -243,6 +305,7 @@ fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
             prompt_eval_ms: pe,
             load_ms: l,
             charts,
+            ..
         },
         ChatEnd::Done {
             prompt_tokens,
@@ -252,6 +315,7 @@ fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
             eval_ms,
             prompt_eval_ms,
             load_ms,
+            file_calls,
             ..
         },
     ) = (first, &end)
@@ -267,7 +331,14 @@ fn summed_end(first: &ChatEnd, end: ChatEnd) -> ChatEnd {
         prompt_eval_ms: plus(*pe, *prompt_eval_ms),
         load_ms: plus(*l, *load_ms),
         charts: charts.clone(),
+        file_calls: file_calls.clone(),
     }
+}
+
+/// The request ended by calling a tool, so the reply goes on.
+fn called_tools(end: &ChatEnd) -> bool {
+    matches!(end, ChatEnd::Done { charts, file_calls, .. }
+        if !charts.is_empty() || !file_calls.is_empty())
 }
 
 /// Which [`Connection`] something was decided against. Every
@@ -282,7 +353,7 @@ pub struct ChatThink {
     pub think: Option<Think>,
     pub connection: ConnectionId,
     /// The model's audited capabilities list `tools`, so it may be offered
-    /// `render_chart`.
+    /// `render_chart` and the file tools.
     pub tools: bool,
 }
 
@@ -365,7 +436,7 @@ struct Prepared {
     http: reqwest::Client,
     url: url::Url,
     body: Vec<u8>,
-    tools: bool,
+    tools: ToolSet,
     tracked: Tracked,
 }
 
@@ -732,7 +803,7 @@ impl Ollama {
             options: call.options,
             think: call.think.think,
             keep_alive: call.keep_alive,
-            tools: call.tools.then_some(&*CHART_TOOLS),
+            tools: tools_for(call.tools),
         })
         .map_err(|err| AppError::Internal(format!("request body: {err}")))?;
         let tracked = Tracked::begin(&self.audit, kind, base, "/api/chat", Some(call.model))?;
@@ -753,7 +824,7 @@ impl Ollama {
         http: &reqwest::Client,
         url: url::Url,
         body: Vec<u8>,
-        tools: bool,
+        tools: ToolSet,
         cancel: &CancellationToken,
         sink: &(dyn Fn(ChatEvent) -> bool + Send + Sync),
     ) -> (ChatEnd, AuditOutcome) {
@@ -886,23 +957,21 @@ impl Ollama {
     /// whose connection is no longer current is refused before its socket
     /// opens.
     ///
-    /// When the reply calls `render_chart`, a second request on the same slot
-    /// continues it: `follow_up` builds its history from the calls, and it
-    /// goes with the same model, options and think but no `tools`, so the
-    /// model cannot call again. It writes its own audit row, and its `Done`
-    /// carries both requests' counts. A follow-up over the request limits is
-    /// refused without a request, as an `Error`.
-    pub fn start<F, U, E>(
+    /// When the reply calls tools, more requests on the same slot continue
+    /// it ([`Self::continue_turn`]), with the same model, options and think.
+    /// Each writes its own audit row, and the last `Done` carries every
+    /// request's counts. A follow-up over the request limits is refused
+    /// without a request, as an `Error`.
+    pub fn start<F, E>(
         self: &Arc<Self>,
         admission: Admission,
         call: ChatCall<'_>,
         sink: F,
-        follow_up: U,
+        follow_up: FollowUp,
         on_end: E,
     ) -> Result<Uuid, AppError>
     where
         F: Fn(ChatEvent) -> bool + Send + Sync + 'static,
-        U: FnOnce(&[ChartEntry]) -> Vec<ChatMessage> + Send + 'static,
         E: FnOnce(&ChatEnd) + Send + 'static,
     {
         let next = FollowUpCall {
@@ -932,18 +1001,14 @@ impl Ollama {
                 let (end, outcome) = this
                     .stream(&http, url, body, tools, &admission.cancel, &sink)
                     .await;
-                let charts = match &end {
-                    ChatEnd::Done { charts, .. } if !charts.is_empty() => charts.clone(),
-                    _ => {
-                        on_end(&end);
-                        tracked.finish(outcome);
-                        return;
-                    }
-                };
+                if !called_tools(&end) {
+                    on_end(&end);
+                    tracked.finish(outcome);
+                    return;
+                }
                 tracked.finish(outcome);
-                let messages = follow_up(&charts);
                 let end = this
-                    .continue_reply(&admission, &next, &messages, &end, &sink)
+                    .continue_turn(&admission, &next, follow_up, end, &sink)
                     .await;
                 on_end(&end);
             }
@@ -952,13 +1017,91 @@ impl Ollama {
         Ok(request_id)
     }
 
-    /// The follow-up request of a charted reply, ended by `first`.
-    async fn continue_reply<F>(
+    /// The requests after a first one, ended by `first`, that called tools.
+    /// Each round adds the text it streamed, its calls and their results to
+    /// the history: charts are answered as before, and file calls run
+    /// through `follow_up.files` within one turn budget, each reported as a
+    /// `FileLookup` event. The next request offers only the file tools, and
+    /// none at all after a chart (the chart rule wins), from the
+    /// [`MAX_ROUNDS`]th request on, once the budget is spent, or without a
+    /// runner. It ends when a round calls nothing, fails or is cancelled.
+    async fn continue_turn<F>(
+        &self,
+        admission: &Admission,
+        next: &FollowUpCall,
+        follow_up: FollowUp,
+        first: ChatEnd,
+        sink: &F,
+    ) -> ChatEnd
+    where
+        F: Fn(ChatEvent) -> bool + Send + Sync,
+    {
+        let FollowUp {
+            mut history,
+            text,
+            files,
+        } = follow_up;
+        let mut budget = Budget::default();
+        // Where the answer stood when the round that just ended started.
+        let mut start = 0;
+        let mut round = 1;
+        let mut total = first.clone();
+        let mut last = first;
+        loop {
+            let ChatEnd::Done {
+                charts, file_calls, ..
+            } = &last
+            else {
+                return total;
+            };
+            if charts.is_empty() && file_calls.is_empty() {
+                return total;
+            }
+            let answer = text();
+            let said = answer.get(start..).unwrap_or_default();
+            start = answer.len();
+            let mut outcomes = Vec::with_capacity(file_calls.len());
+            for call in file_calls {
+                if admission.is_cancelled() {
+                    return ChatEnd::Cancelled;
+                }
+                let outcome = run_call(
+                    &call.function.name,
+                    &call.function.arguments,
+                    files.as_ref(),
+                    &mut budget,
+                );
+                let lookup = outcome.lookup.clone();
+                if !sink(ChatEvent::FileLookup { lookup }) {
+                    admission.cancel.cancel();
+                    return ChatEnd::Cancelled;
+                }
+                outcomes.push(outcome);
+            }
+            history.extend(round_messages(said, charts, &outcomes));
+            round += 1;
+            let tools = ToolSet {
+                charts: false,
+                files: charts.is_empty()
+                    && files.is_some()
+                    && round < MAX_ROUNDS
+                    && !budget.spent(),
+            };
+            last = self
+                .next_round(admission, next, &history, tools, &total, sink)
+                .await;
+            total = summed_end(&total, last.clone());
+        }
+    }
+
+    /// One request continuing a reply, its `Done` summed with `before`.
+    async fn next_round<F>(
         &self,
         admission: &Admission,
         next: &FollowUpCall,
         messages: &[ChatMessage],
-        first: &ChatEnd,
+        tools: ToolSet,
+        before: &ChatEnd,
         sink: &F,
     ) -> ChatEnd
     where
@@ -973,19 +1116,19 @@ impl Ollama {
             });
             return ChatEnd::Failed(error);
         }
-        let summing = |event| sink(summed_event(first, event));
+        let summing = |event| sink(summed_event(before, event));
         let call = ChatCall {
             model: &next.model,
             messages,
             options: next.options.as_ref(),
             think: next.think.clone(),
             keep_alive: None,
-            tools: false,
+            tools,
         };
         let mut last = ChatEnd::Cancelled;
         self.run(admission, call, &summing, |end| last = end.clone())
             .await;
-        summed_end(first, last)
+        last
     }
 
     /// Cancels a running request and waits (up to `cancel_wait`) for its
@@ -1084,6 +1227,7 @@ mod tests {
     use crate::storage::Storage;
     use crate::storage::testing::{break_writes, temp_storage};
 
+    use super::file_tools::{FileAnswer, FileCall, FileLookup, LookupKind};
     use super::testing::{Reply, fake_ollama};
 
     fn test_limits() -> Limits {
@@ -1173,12 +1317,8 @@ mod tests {
             options: None,
             think,
             keep_alive: None,
-            tools: false,
+            tools: ToolSet::default(),
         }
-    }
-
-    fn no_follow_up(_: &[ChartEntry]) -> Vec<ChatMessage> {
-        Vec::new()
     }
 
     fn send_with_end<F>(
@@ -1211,7 +1351,7 @@ mod tests {
             admission,
             call("llama3.2", &messages, current(ollama, think)),
             sink,
-            no_follow_up,
+            FollowUp::none(),
             move |end| {
                 ends.lock().unwrap().push(end.clone());
             },
@@ -1463,7 +1603,7 @@ mod tests {
                 admission,
                 call("qwen3:8b", &messages, think),
                 |_| true,
-                no_follow_up,
+                FollowUp::none(),
                 move |end| recorded.lock().unwrap().push(end.clone()),
             )
             .unwrap_err();
@@ -2073,7 +2213,7 @@ mod tests {
                 admission,
                 call("m", &messages, current(&ollama, None)),
                 sink,
-                no_follow_up,
+                FollowUp::none(),
                 move |end| {
                     recorded.lock().unwrap().push(end.clone());
                 },
@@ -2159,6 +2299,11 @@ mod tests {
     const AFTER: &str = r#"{"message":{"role":"assistant","content":" Grew."},"done":false}"#;
     const AFTER_DONE: &str = r#"{"message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":7000000,"prompt_eval_count":10,"eval_count":4,"eval_duration":1000000000}"#;
 
+    const CHARTS: ToolSet = ToolSet {
+        charts: true,
+        files: false,
+    };
+
     /// Answers a request offering tools with `first`, any other with
     /// `follow`.
     async fn charted(first: Vec<&'static str>, follow: Reply) -> testing::Fake {
@@ -2192,7 +2337,10 @@ mod tests {
         ollama.start(
             admission,
             ChatCall {
-                tools,
+                tools: ToolSet {
+                    charts: tools,
+                    files: false,
+                },
                 ..call(
                     "qwen3",
                     &messages,
@@ -2200,7 +2348,11 @@ mod tests {
                 )
             },
             sink,
-            |charts: &[ChartEntry]| chart_tool::follow_up_history(prompt(), "Here:", charts),
+            FollowUp {
+                history: prompt(),
+                text: Box::new(|| "Here:".to_owned()),
+                files: None,
+            },
             move |end| ends.lock().unwrap().push(end.clone()),
         )
     }
@@ -2431,13 +2583,15 @@ mod tests {
             .start(
                 ollama.admit(Uuid::new_v4()).unwrap(),
                 ChatCall {
-                    tools: true,
+                    tools: CHARTS,
                     ..call("qwen3", &messages, current(&ollama, None))
                 },
                 sink,
-                // Over `max_messages`.
-                |charts: &[ChartEntry]| {
-                    chart_tool::follow_up_history(vec![prompt()[0].clone(); 10], "", charts)
+                // Over `max_messages` once the round is added.
+                FollowUp {
+                    history: vec![prompt()[0].clone(); 10],
+                    text: Box::new(String::new),
+                    files: None,
                 },
                 move |end| recorded.lock().unwrap().push(end.clone()),
             )
@@ -2451,6 +2605,360 @@ mod tests {
             [ChatEnd::Failed(AppError::InvalidInput(_))]
         ));
         assert_eq!(fake.bodies.lock().unwrap().len(), 1);
+    }
+
+    const LOOKING: &str = r#"{"message":{"role":"assistant","content":"Looking."},"done":false}"#;
+    const READING: &str = r#"{"message":{"role":"assistant","content":" Reading."},"done":false}"#;
+    const SEARCH: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"search_files","arguments":{"query":"tax"}}}]},"done":false}"#;
+    const READ: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"read_file","arguments":"{\"name\":\"a.txt\"}"}}]},"done":false}"#;
+    const CHART_AND_SEARCH: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"render_chart","arguments":{"title":"Pop","type":"bar","labels":["1950"],"values":[4.0]}}},{"function":{"name":"search_files","arguments":{"query":"tax"}}}]},"done":false}"#;
+    const BAD_CALLS: &str = r#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"run_shell","arguments":{"cmd":"ls"}}},{"function":{"name":"search_files","arguments":{"query":" "}}}]},"done":false}"#;
+    const FIVE_SEARCHES: &str = concat!(
+        r#"{"message":{"role":"assistant","content":"","tool_calls":["#,
+        r#"{"function":{"name":"search_files","arguments":{"query":"a"}}},"#,
+        r#"{"function":{"name":"search_files","arguments":{"query":"b"}}},"#,
+        r#"{"function":{"name":"search_files","arguments":{"query":"c"}}},"#,
+        r#"{"function":{"name":"search_files","arguments":{"query":"d"}}},"#,
+        r#"{"function":{"name":"search_files","arguments":{"query":"e"}}}"#,
+        r#"]},"done":false}"#
+    );
+
+    const FILES: ToolSet = ToolSet {
+        charts: false,
+        files: true,
+    };
+
+    /// Room for several rounds of tool results.
+    fn file_limits() -> Limits {
+        Limits {
+            max_prompt_bytes: MIB,
+            max_messages: 100,
+            max_line_bytes: 4096,
+            ..test_limits()
+        }
+    }
+
+    /// Answers the requests in order with `replies`, the last one for any
+    /// request after them.
+    async fn scripted(replies: Vec<Reply>) -> testing::Fake {
+        let sent = AtomicUsize::new(0);
+        fake_ollama(Reply::Route(Arc::new(move |_, _| {
+            let index = sent.fetch_add(1, Ordering::SeqCst).min(replies.len() - 1);
+            replies[index].clone()
+        })))
+        .await
+    }
+
+    fn lines(lines: Vec<&'static str>) -> Reply {
+        Reply::Lines(lines, Duration::ZERO)
+    }
+
+    type Calls = Arc<Mutex<Vec<FileCall>>>;
+
+    /// A runner that records each call and answers `text`.
+    fn runner(text: String) -> (Calls, FileRunner) {
+        let calls = Calls::default();
+        let seen = Arc::clone(&calls);
+        let run: FileRunner = Arc::new(move |call| {
+            seen.lock().unwrap().push(call.clone());
+            Ok(FileAnswer {
+                text: text.clone(),
+                hits: 1,
+            })
+        });
+        (calls, run)
+    }
+
+    /// Sends with `tools`, file calls run by `files`; the answer so far is
+    /// the tokens the sink has seen, as a recorder would have them.
+    fn send_tools(ollama: &Arc<Ollama>, tools: ToolSet, files: FileRunner) -> (Events, Ends, Uuid) {
+        let (events, sink) = collector();
+        let seen = Arc::clone(&events);
+        let ends = Ends::default();
+        let recorded = Arc::clone(&ends);
+        let messages = prompt();
+        let id = ollama
+            .start(
+                ollama.admit(Uuid::new_v4()).unwrap(),
+                ChatCall {
+                    tools,
+                    ..call("qwen3", &messages, current(ollama, None))
+                },
+                sink,
+                FollowUp {
+                    history: prompt(),
+                    text: Box::new(move || {
+                        snapshot(&seen)
+                            .into_iter()
+                            .filter_map(|event| match event {
+                                ChatEvent::Token { content } => Some(content.expose().to_owned()),
+                                _ => None,
+                            })
+                            .collect()
+                    }),
+                    files: Some(files),
+                },
+                move |end| recorded.lock().unwrap().push(end.clone()),
+            )
+            .unwrap();
+        (events, ends, id)
+    }
+
+    fn lookups(events: &Events) -> Vec<FileLookup> {
+        snapshot(events)
+            .into_iter()
+            .filter_map(|event| match event {
+                ChatEvent::FileLookup { lookup } => Some(lookup),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn bodies(fake: &testing::Fake) -> Vec<serde_json::Value> {
+        fake.bodies.lock().unwrap().clone()
+    }
+
+    #[tokio::test]
+    async fn file_search_rounds_then_answer() {
+        let fake = scripted(vec![
+            lines(vec![LOOKING, SEARCH, DONE]),
+            lines(vec![READING, READ, DONE]),
+            lines(vec![AFTER, AFTER_DONE]),
+        ])
+        .await;
+        let (ollama, log) = ollama_at(fake.addr, file_limits());
+        let (calls, files) = runner("found".into());
+
+        let (events, ends, _) = send_tools(&ollama, FILES, files);
+        wait_idle(&ollama).await;
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            [
+                FileCall::Search {
+                    query: "tax".into()
+                },
+                FileCall::Read {
+                    name: "a.txt".into(),
+                    start_line: 1,
+                    line_count: 200
+                }
+            ]
+        );
+        let bodies = bodies(&fake);
+        assert_eq!(bodies.len(), 3);
+        for body in &bodies {
+            assert_eq!(body["tools"], *file_tools::FILE_TOOLS);
+        }
+        // Each round's own text once, its call, then its result.
+        assert_eq!(
+            bodies[2]["messages"],
+            serde_json::json!([
+                { "role": "user", "content": "hi" },
+                { "role": "assistant", "content": "Looking.", "tool_calls": [
+                    { "function": { "index": 0, "name": "search_files",
+                                    "arguments": { "query": "tax" } } }
+                ] },
+                { "role": "tool", "content": "found", "tool_name": "search_files" },
+                { "role": "assistant", "content": " Reading.", "tool_calls": [
+                    { "function": { "index": 0, "name": "read_file",
+                                    "arguments": { "name": "a.txt", "start_line": 1,
+                                                   "line_count": 200 } } }
+                ] },
+                { "role": "tool", "content": "found", "tool_name": "read_file" }
+            ])
+        );
+        let found: Vec<(LookupKind, String)> = lookups(&events)
+            .into_iter()
+            .map(|lookup| (lookup.tool, lookup.target.expose().to_owned()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                (LookupKind::Search, "tax".to_owned()),
+                (LookupKind::Read, "a.txt".to_owned())
+            ]
+        );
+        // One `Done`, last, with every request's counts.
+        let events = snapshot(&events);
+        let dones: Vec<&ChatEvent> = events
+            .iter()
+            .filter(|event| matches!(event, ChatEvent::Done { .. }))
+            .collect();
+        assert_eq!(dones.len(), 1);
+        assert!(matches!(
+            events.last(),
+            Some(ChatEvent::Done {
+                completion_tokens: Some(8),
+                ..
+            })
+        ));
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Done {
+                completion_tokens: Some(8),
+                ..
+            }]
+        ));
+        assert_eq!(
+            log.all()
+                .into_iter()
+                .filter(|event| event.kind == "ollama.chat" && event.status == AuditStatus::Ok)
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn round_cap_ends_with_tool_free_request() {
+        // Calls whenever it may, answers once it may not.
+        let fake = charted(vec![SEARCH, DONE], commentary()).await;
+        let (ollama, log) = ollama_at(fake.addr, file_limits());
+        let (calls, files) = runner("found".into());
+
+        let (events, ends, _) = send_tools(&ollama, FILES, files);
+        wait_idle(&ollama).await;
+
+        let bodies = bodies(&fake);
+        assert_eq!(bodies.len(), file_tools::MAX_ROUNDS);
+        let offered: Vec<bool> = bodies
+            .iter()
+            .map(|body| body.get("tools").is_some())
+            .collect();
+        assert_eq!(offered, [true, true, true, false]);
+        assert_eq!(calls.lock().unwrap().len(), 3);
+        assert_eq!(lookups(&events).len(), 3);
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Done { .. }]
+        ));
+        // One audit row per round.
+        let rows: Vec<String> = log.all().into_iter().map(|event| event.kind).collect();
+        assert_eq!(rows, vec!["ollama.chat".to_owned(); 4]);
+    }
+
+    #[tokio::test]
+    async fn cancel_mid_loop() {
+        let fake = scripted(vec![lines(vec![SEARCH, DONE]), Reply::Silent]).await;
+        let (ollama, log) = ollama_at(fake.addr, file_limits());
+        let (_, files) = runner("found".into());
+
+        let (events, ends, id) = send_tools(&ollama, FILES, files);
+        for _ in 0..500 {
+            if fake.bodies.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ollama.chat_cancel(id).await.unwrap();
+
+        assert_eq!(ollama.inflight_len(), 0);
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Cancelled]
+        ));
+        assert_eq!(lookups(&events).len(), 1);
+        assert!(
+            !snapshot(&events)
+                .iter()
+                .any(|event| matches!(event, ChatEvent::Done { .. } | ChatEvent::Error { .. }))
+        );
+        assert_eq!(log.last().status, AuditStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn mixed_chart_and_file_batch_ends_tools() {
+        let fake = charted(vec![CHART_AND_SEARCH, DONE], commentary()).await;
+        let (ollama, _) = ollama_at(fake.addr, file_limits());
+        let (calls, files) = runner("found".into());
+
+        let (events, ends, _) = send_tools(
+            &ollama,
+            ToolSet {
+                charts: true,
+                files: true,
+            },
+            files,
+        );
+        wait_idle(&ollama).await;
+
+        assert_eq!(chart_events(&events).len(), 1);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        let bodies = bodies(&fake);
+        let [first, second] = bodies.as_slice() else {
+            panic!("expected two requests, got {bodies:?}");
+        };
+        assert_eq!(first["tools"], *file_tools::ALL_TOOLS);
+        assert!(second.get("tools").is_none());
+        let messages = second["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 4);
+        let calls = messages[1]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls[0]["function"]["name"], "render_chart");
+        assert_eq!(calls[1]["function"]["name"], "search_files");
+        assert_eq!(calls[1]["function"]["index"], 1);
+        assert_eq!(messages[2]["content"], "The chart was shown to the user.");
+        assert_eq!(messages[3]["content"], "found");
+        assert!(
+            matches!(ends.lock().unwrap().as_slice(), [ChatEnd::Done { charts, .. }] if charts.len() == 1)
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_and_bad_arguments_are_error_results() {
+        let fake = scripted(vec![lines(vec![BAD_CALLS, DONE]), commentary()]).await;
+        let (ollama, _) = ollama_at(fake.addr, file_limits());
+        let (calls, files) = runner("found".into());
+
+        let (events, ends, _) = send_tools(&ollama, FILES, files);
+        wait_idle(&ollama).await;
+
+        assert!(calls.lock().unwrap().is_empty());
+        assert!(chart_events(&events).is_empty());
+        let errors: Vec<Option<String>> = lookups(&events)
+            .into_iter()
+            .map(|lookup| lookup.error)
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                Some("unknown tool".to_owned()),
+                Some("query is blank".to_owned())
+            ]
+        );
+        let bodies = bodies(&fake);
+        let messages = bodies[1]["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["name"],
+            "run_shell"
+        );
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["arguments"],
+            serde_json::json!({})
+        );
+        assert_eq!(messages[2]["content"], "The lookup failed: unknown tool");
+        assert!(messages[2].get("tool_name").is_none());
+        assert_eq!(messages[3]["content"], "The lookup failed: query is blank");
+        assert!(matches!(
+            ends.lock().unwrap().as_slice(),
+            [ChatEnd::Done { .. }]
+        ));
+    }
+
+    #[tokio::test]
+    async fn budget_ends_tools() {
+        let fake = charted(vec![FIVE_SEARCHES, DONE], commentary()).await;
+        let (ollama, _) = ollama_at(fake.addr, file_limits());
+        // Four calls run, filling the budget exactly; the fifth is ignored.
+        let (calls, files) = runner("x".repeat(file_tools::TURN_BUDGET_BYTES / 4));
+
+        let (events, _, _) = send_tools(&ollama, FILES, files);
+        wait_idle(&ollama).await;
+
+        assert_eq!(calls.lock().unwrap().len(), file_tools::MAX_CALLS);
+        assert!(lookups(&events).iter().all(|lookup| lookup.error.is_none()));
+        let bodies = bodies(&fake);
+        assert_eq!(bodies.len(), 2);
+        assert!(bodies[1].get("tools").is_none());
     }
 
     #[tokio::test]

@@ -11,12 +11,16 @@ use uuid::Uuid;
 
 use crate::error::AppError;
 use crate::memory::MemoryScheduler;
-use crate::ollama::chart_tool::{ChartEntry, follow_up_history, without_tools};
+use crate::ollama::chart_tool::{ChartEntry, without_tools};
+use crate::ollama::file_tools::{
+    FileCall, FileLookup, FileRunner, LIST_PAGE, SEARCH_HITS, list_result, read_result,
+    search_result,
+};
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{
     ChatEvent, ChatMessage, ModelCapabilities, ModelInfo, OllamaStatus, ThinkChoice, validate_model,
 };
-use crate::ollama::{ChatCall, ChatThink, Ollama};
+use crate::ollama::{ChatCall, ChatThink, FollowUp, Ollama, ToolSet};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
 use crate::storage::messages::{FlushPolicy, MessageStatus, ReplyStats, TurnInput, TurnRecorder};
@@ -241,6 +245,7 @@ pub trait ReplyRecorder: Send + 'static {
     fn push(&mut self, token: &Redacted) -> Result<(), AppError>;
     fn push_thinking(&mut self, chunk: &Redacted) -> Result<(), AppError>;
     fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError>;
+    fn push_file_lookup(&mut self, lookup: &FileLookup) -> Result<(), AppError>;
     /// The answer so far, which a follow-up request sends back.
     fn text(&self) -> String;
     fn complete(&mut self, stats: ReplyStats) -> Result<(), AppError>;
@@ -258,6 +263,10 @@ impl ReplyRecorder for TurnRecorder {
 
     fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError> {
         Self::push_chart(self, entry)
+    }
+
+    fn push_file_lookup(&mut self, lookup: &FileLookup) -> Result<(), AppError> {
+        Self::push_file_lookup(self, lookup)
     }
 
     fn text(&self) -> String {
@@ -291,19 +300,57 @@ pub(crate) fn model_history(history: Vec<ChatMessage>, tools: bool) -> Vec<ChatM
     }
 }
 
-/// What a reply that called `render_chart` continues with: `history`, the
-/// answer so far with its calls, and their results. `history` is only
+/// What a reply that called tools continues with: `history`, the answer so
+/// far from `recorder`, and `files` to run file calls. `history` is only
 /// cloned when tools are offered.
-pub(crate) fn chart_follow_up<R: ReplyRecorder>(
+pub(crate) fn tool_follow_up<R: ReplyRecorder>(
     recorder: &Shared<R>,
     history: &[ChatMessage],
-    tools: bool,
-) -> impl FnOnce(&[ChartEntry]) -> Vec<ChatMessage> + Send + 'static {
+    tools: ToolSet,
+    files: Option<FileRunner>,
+) -> FollowUp {
+    if !tools.charts && !tools.files {
+        return FollowUp::none();
+    }
     let recorder = Arc::clone(recorder);
-    let history = if tools { history.to_vec() } else { Vec::new() };
-    move |charts| {
-        let text = lock(&recorder).text();
-        follow_up_history(history, &text, charts)
+    FollowUp {
+        history: history.to_vec(),
+        text: Box::new(move || lock(&recorder).text()),
+        files: files.filter(|_| tools.files),
+    }
+}
+
+/// Runs the file tools against project `project`'s library.
+pub(crate) fn file_runner(storage: Arc<Storage>, project: Uuid) -> FileRunner {
+    Arc::new(move |call| match call {
+        FileCall::List { page } => {
+            let offset = page.saturating_sub(1).saturating_mul(LIST_PAGE);
+            Ok(list_result(
+                &storage.list_files(project, offset, LIST_PAGE)?,
+                *page,
+            ))
+        }
+        FileCall::Search { query } => Ok(search_result(
+            query,
+            &storage.search(project, query, SEARCH_HITS)?,
+        )),
+        FileCall::Read {
+            name,
+            start_line,
+            line_count,
+        } => Ok(read_result(
+            name,
+            &storage.read_lines(project, name, *start_line, *line_count)?,
+        )),
+    })
+}
+
+/// What a turn offers: charts with Charts on, the file tools with a
+/// searchable project, both only to a model that lists `tools`.
+pub(crate) fn turn_tools(think: &ChatThink, charts: bool, files: bool) -> ToolSet {
+    ToolSet {
+        charts: charts && think.tools,
+        files: files && think.tools,
     }
 }
 
@@ -358,6 +405,10 @@ where
         |history, settings| check_turn(ollama, &model, &think_choice, history, settings),
     )?;
 
+    let tools = turn_tools(&think, turn.charts, turn.files_project.is_some());
+    let files = turn
+        .files_project
+        .map(|project| file_runner(Arc::clone(&storage), project));
     let recorder: SharedRecorder = Arc::new(Mutex::new(TurnRecorder::new(
         storage,
         turn.assistant_id,
@@ -366,10 +417,8 @@ where
     let stop_ticker = CancellationToken::new();
     spawn_ticker(Arc::clone(&recorder), policy.every, stop_ticker.clone());
     let sink = recording_sink(Arc::clone(&recorder), send);
-    // Only when the user turned Charts on and the model lists `tools`.
-    let tools = turn.charts && think.tools;
     let history = model_history(turn.history, think.tools);
-    let follow_up = chart_follow_up(&recorder, &history, tools);
+    let follow_up = tool_follow_up(&recorder, &history, tools, files);
     let request_id = ollama.start(
         admission,
         ChatCall {
@@ -423,6 +472,7 @@ where
                 spec: None,
                 error: Some(reason.clone()),
             }),
+            ChatEvent::FileLookup { lookup } => lock(&recorder).push_file_lookup(lookup),
             ChatEvent::Done {
                 prompt_tokens,
                 completion_tokens,
@@ -515,7 +565,10 @@ mod tests {
     use crate::commands::testing::{no_think, silent_ollama};
     use crate::ollama::Limits;
     use crate::ollama::client::OllamaBaseUrl;
+    use crate::ollama::file_tools::{FILE_TOOLS, LookupKind};
+    use crate::ollama::testing::{Reply, fake_ollama};
     use crate::ollama::types::Think;
+    use crate::storage::memory::FILES_PREAMBLE;
     use crate::storage::messages::StoredMessage;
     use crate::storage::testing::{PROMPT_LIMIT, break_writes, count_rows, temp_storage};
 
@@ -1038,6 +1091,145 @@ mod tests {
         assert!(matches!(err, AppError::InvalidInput(_)));
         assert_eq!(count_rows(&storage, "messages"), 0);
         assert_eq!(ollama.inflight_len(), 0);
+    }
+
+    const ANSWER: &[&str] = &[
+        r#"{"message":{"role":"assistant","content":"Plover."},"done":false}"#,
+        r#"{"message":{"role":"assistant","content":""},"done":true,"eval_count":1}"#,
+    ];
+
+    /// A conversation in a project whose one file says the word is plover.
+    fn project_chat(storage: &Storage, settings: &ConversationSettings) -> (Uuid, Uuid) {
+        let project = storage.create_project("p").unwrap().id;
+        storage
+            .add_file(
+                project,
+                &Redacted::new("a.txt"),
+                &Redacted::new("the word is plover"),
+            )
+            .unwrap();
+        let conversation = storage
+            .create_conversation_with(None, "m", settings, Some(project))
+            .unwrap()
+            .id;
+        (project, conversation)
+    }
+
+    /// Sends "word?" to `conversation` as a model that lists `tools`, and
+    /// waits for the reply.
+    async fn send_to_tool_model(ollama: &Arc<Ollama>, storage: &Arc<Storage>, conversation: Uuid) {
+        send_turn(
+            ollama,
+            Arc::clone(storage),
+            SendRequest {
+                think: ChatThink {
+                    tools: true,
+                    ..no_think(ollama)
+                },
+                ..request(ollama, conversation, TurnInput::New(Redacted::new("word?")))
+            },
+            FlushPolicy::default(),
+            |_| true,
+        )
+        .unwrap();
+        ollama.wait_idle().await;
+    }
+
+    #[tokio::test]
+    async fn automatic_section_sent_to_tool_model() {
+        let fake = fake_ollama(Reply::Lines(ANSWER.to_vec(), Duration::ZERO)).await;
+        let ollama = Arc::new(Ollama::new(
+            OllamaBaseUrl::parse(&format!("http://{}", fake.addr)),
+            Arc::new(Audit::new()),
+        ));
+        let (storage, _dir) = temp_storage();
+        let (_, conversation) = project_chat(&storage, &ConversationSettings::default());
+
+        send_to_tool_model(&ollama, &storage, conversation).await;
+
+        let bodies = fake.bodies.lock().unwrap().clone();
+        let [body] = bodies.as_slice() else {
+            panic!("expected one request, got {bodies:?}");
+        };
+        assert_eq!(body["tools"], *FILE_TOOLS);
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains(FILES_PREAMBLE));
+        assert!(system.contains("the word is plover"));
+        let saved = assistant(&storage, conversation);
+        assert_eq!(saved.content.expose(), "Plover.");
+        assert!(saved.file_lookups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn files_off_offers_no_file_tools() {
+        let fake = fake_ollama(Reply::Lines(ANSWER.to_vec(), Duration::ZERO)).await;
+        let ollama = Arc::new(Ollama::new(
+            OllamaBaseUrl::parse(&format!("http://{}", fake.addr)),
+            Arc::new(Audit::new()),
+        ));
+        let (storage, _dir) = temp_storage();
+        let off = ConversationSettings {
+            files: false,
+            ..ConversationSettings::default()
+        };
+        let (_, conversation) = project_chat(&storage, &off);
+
+        send_to_tool_model(&ollama, &storage, conversation).await;
+
+        let bodies = fake.bodies.lock().unwrap().clone();
+        assert!(bodies[0].get("tools").is_none());
+    }
+
+    #[test]
+    fn file_lookups_are_saved() {
+        let (storage, _dir) = temp_storage();
+        let (conversation, recorder) = started_turn(&storage);
+        let sink = recording_sink(recorder, |_| true);
+        let lookup = FileLookup {
+            tool: LookupKind::Search,
+            target: Redacted::new("tax"),
+            hits: 2,
+            error: None,
+        };
+
+        assert!(sink(ChatEvent::FileLookup {
+            lookup: lookup.clone()
+        }));
+        assert!(sink(done()));
+
+        assert_eq!(assistant(&storage, conversation).file_lookups, [lookup]);
+    }
+
+    #[test]
+    fn file_runner_formats_and_reports_missing_file() {
+        let (storage, _dir) = temp_storage();
+        let (project, _) = project_chat(&storage, &ConversationSettings::default());
+        let run = file_runner(Arc::clone(&storage), project);
+
+        let listed = run(&FileCall::List { page: 1 }).unwrap();
+        assert_eq!(listed.hits, 1);
+        assert!(listed.text.contains("page 1 of 1, 1 in all>>>\na.txt\n"));
+        let found = run(&FileCall::Search {
+            query: "plover".into(),
+        })
+        .unwrap();
+        assert_eq!(found.hits, 1);
+        assert!(found.text.contains("\"a.txt\" line 1:"));
+        let read = run(&FileCall::Read {
+            name: "a.txt".into(),
+            start_line: 1,
+            line_count: 5,
+        })
+        .unwrap();
+        assert!(read.text.contains("1\tthe word is plover"));
+        assert!(matches!(
+            run(&FileCall::Read {
+                name: "b.txt".into(),
+                start_line: 1,
+                line_count: 5,
+            }),
+            Err(AppError::NotFound(_))
+        ));
     }
 
     #[tokio::test]

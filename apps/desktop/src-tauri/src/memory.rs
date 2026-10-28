@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::error::AppError;
 use crate::ollama::stream::ChatEnd;
 use crate::ollama::types::{ChatEvent, ChatMessage, ChatOptions, ChatRole, Think, resolve_think};
-use crate::ollama::{Admission, ChatCall, Ollama};
+use crate::ollama::{Admission, ChatCall, Ollama, ToolSet};
 use crate::redacted::Redacted;
 use crate::storage::Storage;
 use crate::storage::memory::{
@@ -214,7 +214,7 @@ async fn summarize_on(
                     options: Some(&options),
                     think,
                     keep_alive: None,
-                    tools: false,
+                    tools: ToolSet::default(),
                 },
                 &sink,
                 |ended| end = ended.clone(),
@@ -1431,6 +1431,7 @@ mod tests {
             &setup.ollama,
             &chats,
             setup.storage.project_context(setup.project).unwrap(),
+            None,
             SendRequest {
                 conversation_id: session,
                 model: "qwen3".into(),
@@ -1731,6 +1732,7 @@ mod tests {
             &setup.ollama,
             &chats,
             setup.storage.project_context(setup.project).unwrap(),
+            None,
             SendRequest {
                 conversation_id: session,
                 model: "qwen3".into(),

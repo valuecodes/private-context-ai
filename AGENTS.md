@@ -146,10 +146,15 @@ discussion first.
 - **No egress except Ollama on loopback.** The webview has no network (strict CSP, no
   Tauri plugins). Only Rust talks to Ollama, through `ollama/client.rs`, which refuses
   non-loopback hosts, proxies and redirects; `reqwest` has no TLS feature.
-- **The model gets one display-only `render_chart` tool, only when the user turns
-  Charts on, never with `format`.** The tool definition is fixed in
-  `ollama/chart_tool.rs`, offered only on a turn's first request to models whose audited
-  `/api/show` lists `tools`; Rust validates every call and the follow-up has no `tools`.
+- **The model gets a fixed, read-only tool set, never with `format`, only if its
+  audited `/api/show` lists `tools`.** The display-only `render_chart`
+  (`ollama/chart_tool.rs`) only when the user turns Charts on, on a turn's first request,
+  and the request after a chart has no `tools`. The read-only `list_files` /
+  `search_files` / `read_file` (`ollama/file_tools.rs`) only with Files on in a project
+  that has files: no tool takes a disk path, writes or reaches the network; at most 4
+  requests per turn and 4 calls per request, results capped (16 KiB each, 64 KiB per
+  turn), escaped as data and never saved or replayed, and the last request has no
+  `tools`. Rust validates every call and runs it itself.
   Charts are drawn as SVG by local React code, with model text only as text nodes;
   `think` is sent only as a boolean or an advertised level, only to models whose
   audited `/api/show` lists `thinking`, and is `false` unless the user turns it on.

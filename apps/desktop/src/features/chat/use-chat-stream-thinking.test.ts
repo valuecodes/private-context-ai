@@ -51,6 +51,7 @@ const stored = (
   model: null,
   compareGroup: null,
   charts: [],
+  fileLookups: [],
 });
 
 const noStats = { completionTokens: null, durationMs: null, evalMs: null };

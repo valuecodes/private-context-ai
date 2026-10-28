@@ -361,6 +361,11 @@ impl Storage {
         Ok(FilePage { files, total })
     }
 
+    /// Whether project `project_id` has any file.
+    pub fn project_has_files(&self, project_id: Uuid) -> Result<bool, AppError> {
+        Ok(has_files(&self.conn(), &project_id.to_string())?)
+    }
+
     /// The project's chunks matching any term of `query`, best first, at
     /// most `limit` (up to 50). A query with no searchable term finds
     /// nothing.

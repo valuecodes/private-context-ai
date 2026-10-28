@@ -19,6 +19,7 @@ import {
   updateMessage,
   withChart,
   withChunk,
+  withFileLookup,
   withStats,
 } from "~/features/chat/ui-message";
 import type { MessageStatus, UiMessage } from "~/features/chat/ui-message";
@@ -100,6 +101,9 @@ const applyEvent = (
   }
   if (event.type === "chart" || event.type === "chartError") {
     return update((message) => withChart(message, event));
+  }
+  if (event.type === "fileLookup") {
+    return update((message) => withFileLookup(message, event.lookup));
   }
   if (event.type === "done") {
     return finishStream(

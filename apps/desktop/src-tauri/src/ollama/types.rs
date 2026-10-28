@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::chart_tool::{ChartSpec, ToolCall};
+use super::file_tools::FileLookup;
 use crate::error::AppError;
 use crate::redacted::Redacted;
 
@@ -53,7 +54,7 @@ impl ChatRole {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: Redacted,
-    /// The `render_chart` calls an assistant message made.
+    /// The tool calls an assistant message made.
     #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     /// The tool a `tool` message answers for.
@@ -169,8 +170,10 @@ fn is_level_name(name: &str) -> bool {
 }
 
 /// The `/api/chat` request body. Deliberately has no `format` field: no
-/// structured-output hooks. `tools` is only ever the fixed display-only
-/// `render_chart` definition, sent only when the user turned Charts on. `think`
+/// structured-output hooks. `tools` is only ever one of the fixed arrays in
+/// `file_tools::tools_for`: `render_chart` only when the user turned Charts
+/// on, the read-only file tools only with Files on in a project with files.
+/// `think`
 /// is only ever what [`resolve_think`] allowed for the model.
 #[derive(Debug, Serialize)]
 pub struct ChatRequest<'a> {
@@ -185,7 +188,7 @@ pub struct ChatRequest<'a> {
     /// once. Unset leaves Ollama's default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keep_alive: Option<u32>,
-    /// `chart_tool::CHART_TOOLS`, or nothing.
+    /// From `file_tools::tools_for`, or nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<&'static Value>,
 }
@@ -221,13 +224,13 @@ pub struct ChatLineMessage {
 }
 
 /// A tool call as Ollama streams it. `Debug` hides the model's text.
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, PartialEq, Deserialize)]
 pub struct ToolCallLine {
     #[serde(default)]
     pub function: ToolCallLineFunction,
 }
 
-#[derive(Default, Deserialize)]
+#[derive(Clone, Default, PartialEq, Deserialize)]
 pub struct ToolCallLineFunction {
     #[serde(default)]
     pub name: String,
@@ -265,6 +268,10 @@ pub enum ChatEvent {
     ChartError {
         offset: u64,
         reason: String,
+    },
+    /// A file tool call, run or refused, for the "Searched files" row.
+    FileLookup {
+        lookup: FileLookup,
     },
     Done {
         prompt_tokens: Option<u64>,

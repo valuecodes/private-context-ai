@@ -1,5 +1,5 @@
 import type { ReplyStats } from "~/features/chat/message-stats";
-import type { ChartEntry, ChatEvent } from "~/lib/types";
+import type { ChartEntry, ChatEvent, FileLookup } from "~/lib/types";
 
 type MessageStatus = "complete" | "streaming" | "cancelled" | "error";
 
@@ -26,6 +26,8 @@ type UiMessage = {
   failure?: string;
   /** A reply's `render_chart` calls, when it made any. */
   charts?: ChartEntry[];
+  /** A reply's file tool calls, when it made any. */
+  fileLookups?: FileLookup[];
 };
 
 const updateMessage = (
@@ -77,6 +79,12 @@ const withChart = (
   return { ...message, charts: [...(message.charts ?? []), entry] };
 };
 
+/** A reply with a file lookup added. */
+const withFileLookup = (message: UiMessage, lookup: FileLookup): UiMessage => ({
+  ...message,
+  fileLookups: [...(message.fileLookups ?? []), lookup],
+});
+
 /** A finished reply with its counts. */
 const withStats = (
   message: UiMessage,
@@ -93,4 +101,4 @@ const withStats = (
 });
 
 export type { MessageStatus, UiMessage };
-export { updateMessage, withChart, withChunk, withStats };
+export { updateMessage, withChart, withChunk, withFileLookup, withStats };

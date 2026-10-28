@@ -14,6 +14,7 @@ import {
 import { ChartBlock, ChartFailed } from "~/features/chat/chart-block";
 import { sendsMessage } from "~/features/chat/chat-keys";
 import type { UiMessage } from "~/features/chat/chat-reducer";
+import { FileLookups } from "~/features/chat/file-lookups";
 import { Markdown } from "~/features/chat/markdown";
 import { formatStats } from "~/features/chat/message-stats";
 import { ThinkingBlock } from "~/features/chat/thinking-block";
@@ -130,8 +131,10 @@ const AssistantReply = ({ message }: { message: UiMessage }) => {
   const thinking = message.thinking ?? "";
   const streaming = message.status === "streaming";
   const charts = message.charts ?? [];
+  const lookups = message.fileLookups ?? [];
   return (
     <>
+      {lookups.length > 0 && <FileLookups lookups={lookups} />}
       {thinking !== "" && (
         <ThinkingBlock
           text={thinking}

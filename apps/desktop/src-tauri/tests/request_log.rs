@@ -9,10 +9,9 @@ use std::time::Duration;
 
 use private_context_ai_lib::audit::Audit;
 use private_context_ai_lib::observability;
-use private_context_ai_lib::ollama::chart_tool::ChartEntry;
 use private_context_ai_lib::ollama::client::OllamaBaseUrl;
 use private_context_ai_lib::ollama::types::{ChatMessage, ChatRole};
-use private_context_ai_lib::ollama::{ChatCall, ChatThink, Ollama};
+use private_context_ai_lib::ollama::{ChatCall, ChatThink, FollowUp, Ollama, ToolSet};
 use private_context_ai_lib::redacted::Redacted;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -105,10 +104,10 @@ async fn request_log_has_counts_and_no_content() {
                 options: None,
                 think,
                 keep_alive: None,
-                tools: false,
+                tools: ToolSet::default(),
             },
             |_| true,
-            |_: &[ChartEntry]| Vec::new(),
+            FollowUp::none(),
             |_| {},
         )
         .unwrap();

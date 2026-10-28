@@ -430,7 +430,7 @@ pub(super) fn search_turn_files(
 
 /// Text inside an entry block: it can neither open nor close a block, nor
 /// start a heading.
-fn escape_entry(text: &str) -> String {
+pub(crate) fn escape_entry(text: &str) -> String {
     text.replace("<<<", "‹‹‹")
         .replace(">>>", "›››")
         .lines()

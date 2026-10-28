@@ -9,6 +9,7 @@ use uuid::Uuid;
 use crate::commands::ollama::ReplyRecorder;
 use crate::error::AppError;
 use crate::ollama::chart_tool::{ChartEntry, replay};
+use crate::ollama::file_tools::FileLookup;
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 use crate::storage::conversations::ConversationSettings;
@@ -66,6 +67,8 @@ pub struct TempTurn {
     pub options: Option<ChatOptions>,
     /// The Charts setting, read with the history.
     pub charts: bool,
+    /// The Files setting, read with the history.
+    pub files: bool,
 }
 
 impl Session {
@@ -258,6 +261,7 @@ impl TempChats {
         check(&history, &session.settings)?;
         let options = session.settings.options();
         let charts = session.settings.charts;
+        let files = session.settings.files;
         if let Some(base) = cut {
             let tail = session.messages.split_off(base);
             session.revision = Some(Revision { base, tail });
@@ -268,6 +272,7 @@ impl TempChats {
             history,
             options,
             charts,
+            files,
         })
     }
 
@@ -388,6 +393,11 @@ impl ReplyRecorder for MemoryRecorder {
         if !self.finished {
             self.charts.push(entry.clone());
         }
+        Ok(())
+    }
+
+    /// Shown live only: nothing in a temporary chat is reloaded from here.
+    fn push_file_lookup(&mut self, _lookup: &FileLookup) -> Result<(), AppError> {
         Ok(())
     }
 

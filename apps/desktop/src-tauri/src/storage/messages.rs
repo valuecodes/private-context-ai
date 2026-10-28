@@ -6,16 +6,19 @@ use std::time::Duration;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
 use super::Storage;
 use super::conversations::{ConversationSettings, NOW, load_settings, uuid_column};
+use super::files::has_files;
 use super::memory::{
-    ProjectContext, build_system_message, history_bytes, load_conversation_context,
-    search_turn_files,
+    ProjectContext, build_system_message, conversation_project, history_bytes,
+    load_conversation_context, search_turn_files,
 };
 use crate::error::AppError;
 use crate::ollama::chart_tool::{ChartEntry, replay};
+use crate::ollama::file_tools::FileLookup;
 use crate::ollama::types::{ChatMessage, ChatOptions, ChatRole};
 use crate::redacted::Redacted;
 
@@ -74,23 +77,34 @@ pub struct StoredMessage {
     pub compare_group: Option<Uuid>,
     /// A reply's `render_chart` calls; empty for most.
     pub charts: Vec<ChartEntry>,
+    /// A reply's file tool calls, display only; empty for most.
+    pub file_lookups: Vec<FileLookup>,
 }
 
-/// The `charts` column: JSON, `NULL` when there are none.
-pub(super) fn charts_column(row: &Row<'_>, index: usize) -> rusqlite::Result<Vec<ChartEntry>> {
+/// A JSON list column, `NULL` when the list is empty.
+fn list_column<T: DeserializeOwned>(
+    row: &Row<'_>,
+    index: usize,
+    what: &str,
+) -> rusqlite::Result<Vec<T>> {
     row.get::<_, Option<String>>(index)?
-        .map(|json| serde_json::from_str(&json).map_err(|_| bad_text(index, "charts")))
+        .map(|json| serde_json::from_str(&json).map_err(|_| bad_text(index, what)))
         .transpose()
         .map(Option::unwrap_or_default)
 }
 
-fn charts_json(charts: &[ChartEntry]) -> Result<Option<String>, AppError> {
-    if charts.is_empty() {
+fn list_json<T: Serialize>(items: &[T], what: &str) -> Result<Option<String>, AppError> {
+    if items.is_empty() {
         return Ok(None);
     }
-    serde_json::to_string(charts)
+    serde_json::to_string(items)
         .map(Some)
-        .map_err(|err| AppError::Internal(format!("charts: {err}")))
+        .map_err(|err| AppError::Internal(format!("{what}: {err}")))
+}
+
+/// The `charts` column: JSON, `NULL` when there are none.
+pub(super) fn charts_column(row: &Row<'_>, index: usize) -> rusqlite::Result<Vec<ChartEntry>> {
+    list_column(row, index, "charts")
 }
 
 pub(super) fn bad_text(index: usize, what: &str) -> rusqlite::Error {
@@ -135,6 +149,7 @@ fn message_row(row: &Row<'_>) -> rusqlite::Result<StoredMessage> {
             .map(|group| Uuid::parse_str(&group).map_err(|_| bad_text(12, "compare group")))
             .transpose()?,
         charts: charts_column(row, 13)?,
+        file_lookups: list_column(row, 14, "file lookups")?,
     })
 }
 
@@ -163,7 +178,8 @@ pub(super) fn load_messages(
 ) -> Result<Vec<StoredMessage>, AppError> {
     let mut statement = conn.prepare(&format!(
         "SELECT id, role, content, status, created_at, prompt_tokens, completion_tokens,
-                duration_ms, thinking, thinking_ms, eval_ms, model, compare_group, charts
+                duration_ms, thinking, thinking_ms, eval_ms, model, compare_group, charts,
+                file_lookups
          FROM messages WHERE {LIVE} ORDER BY created_at, rowid"
     ))?;
     let messages = statement
@@ -301,6 +317,9 @@ pub struct Turn {
     pub options: Option<ChatOptions>,
     /// The Charts setting, read with the history.
     pub charts: bool,
+    /// The chat's project, when Files is on and the project has files: the
+    /// file tools may search it.
+    pub files_project: Option<Uuid>,
 }
 
 /// The history with the chat's one `system` message first, when there is
@@ -478,6 +497,12 @@ impl Storage {
         }
         let history = with_system_message(&context, &settings, history, max_prompt_bytes);
         check(&history, &settings)?;
+        let files_project = match conversation_project(&tx, &id)? {
+            Some(project) if settings.files && has_files(&tx, &project)? => {
+                Uuid::parse_str(&project).ok()
+            }
+            _ => None,
+        };
 
         let assistant_id = Uuid::new_v4();
         if let Some((position, op)) = &replaced {
@@ -510,6 +535,7 @@ impl Storage {
             history,
             options: settings.options(),
             charts: settings.charts,
+            files_project,
         })
     }
 
@@ -517,13 +543,14 @@ impl Storage {
     /// status. A deleted row is silently skipped.
     fn save_pending(&self, id: Uuid, reply: &ReplyText<'_>) -> Result<(), AppError> {
         self.conn().execute(
-            "UPDATE messages SET content = ?2, thinking = ?3, charts = ?4
+            "UPDATE messages SET content = ?2, thinking = ?3, charts = ?4, file_lookups = ?5
              WHERE id = ?1 AND status = 'pending'",
             params![
                 id.to_string(),
                 reply.content,
                 thinking_column(reply.thinking),
-                charts_json(reply.charts)?
+                list_json(reply.charts, "charts")?,
+                list_json(reply.file_lookups, "file lookups")?
             ],
         )?;
         Ok(())
@@ -537,14 +564,16 @@ impl Storage {
         reply: &ReplyText<'_>,
         end: &FinalState,
     ) -> Result<(), AppError> {
-        let charts = charts_json(reply.charts)?;
+        let charts = list_json(reply.charts, "charts")?;
+        let file_lookups = list_json(reply.file_lookups, "file lookups")?;
         let mut conn = self.conn();
         let tx = conn.transaction()?;
         let id = id.to_string();
         let changed = tx.execute(
             "UPDATE messages
              SET content = ?2, status = ?3, prompt_tokens = ?4, completion_tokens = ?5,
-                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8, eval_ms = ?9, charts = ?10
+                 duration_ms = ?6, thinking = ?7, thinking_ms = ?8, eval_ms = ?9, charts = ?10,
+                 file_lookups = ?11
              WHERE id = ?1 AND status = 'pending'",
             params![
                 id,
@@ -556,7 +585,8 @@ impl Storage {
                 thinking_column(reply.thinking),
                 to_sql_count(end.thinking_ms),
                 to_sql_count(end.eval_ms),
-                charts
+                charts,
+                file_lookups
             ],
         )?;
         if changed == 1 {
@@ -594,6 +624,7 @@ struct ReplyText<'a> {
     content: &'a str,
     thinking: &'a str,
     charts: &'a [ChartEntry],
+    file_lookups: &'a [FileLookup],
 }
 
 #[derive(Debug)]
@@ -637,6 +668,7 @@ pub struct TurnRecorder {
     content: String,
     thinking: String,
     charts: Vec<ChartEntry>,
+    file_lookups: Vec<FileLookup>,
     unflushed: usize,
     policy: FlushPolicy,
     /// A write failed: the turn ends as `error` whatever the stream does.
@@ -652,6 +684,7 @@ impl TurnRecorder {
             content: String::new(),
             thinking: String::new(),
             charts: Vec::new(),
+            file_lookups: Vec::new(),
             unflushed: 0,
             policy,
             failed: false,
@@ -676,11 +709,20 @@ impl TurnRecorder {
 
     /// Buffers a chart call, flushed like [`Self::push`].
     pub fn push_chart(&mut self, entry: &ChartEntry) -> Result<(), AppError> {
+        self.buffer_with(|recorder| recorder.charts.push(entry.clone()))
+    }
+
+    /// Buffers a file lookup, flushed like [`Self::push`].
+    pub fn push_file_lookup(&mut self, lookup: &FileLookup) -> Result<(), AppError> {
+        self.buffer_with(|recorder| recorder.file_lookups.push(lookup.clone()))
+    }
+
+    fn buffer_with(&mut self, add: impl FnOnce(&mut Self)) -> Result<(), AppError> {
         self.check_failed()?;
         if self.finished {
             return Ok(());
         }
-        self.charts.push(entry.clone());
+        add(self);
         self.unflushed += 1;
         if self.unflushed >= self.policy.tokens {
             self.flush()?;
@@ -698,6 +740,7 @@ impl TurnRecorder {
             content: &self.content,
             thinking: &self.thinking,
             charts: &self.charts,
+            file_lookups: &self.file_lookups,
         }
     }
 
