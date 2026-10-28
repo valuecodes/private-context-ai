@@ -5,11 +5,13 @@
 //! running thread cannot be killed, so the bound comes from limits: bytes,
 //! pages and text are capped, one dedicated thread extracts at a time, and
 //! after a timeout new PDFs are refused until that thread really ends. At
-//! most one runaway extraction can ever exist.
+//! most one runaway extraction can ever exist. Memory and stack exhaustion
+//! (unbounded inflate, cyclic page parents or forms) cannot be caught in
+//! process; `docs/security.md` lists that as a known limit.
 
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Duration;
 
 use pdf_extract::{ConvertToFmt, Document, PlainTextOutput, output_doc_page};
@@ -136,6 +138,32 @@ pub fn extract_text(bytes: &[u8], limits: &PdfLimits) -> Result<Extracted, AppEr
     })
 }
 
+/// The extraction thread's name, which the panic hook keys on.
+const THREAD_NAME: &str = "pdf-extract";
+
+/// Whether a panic on the thread named `thread` stays silent: the parser's
+/// panic messages can quote document text.
+fn is_extraction_thread(thread: Option<&str>) -> bool {
+    thread == Some(THREAD_NAME)
+}
+
+/// Wraps the panic hook, once per process, so a panic on the extraction
+/// thread prints a fixed line instead of its message; `catch_unwind` then
+/// reports the PDF as skipped. Other threads keep the previous hook.
+fn quiet_extraction_panics() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if is_extraction_thread(std::thread::current().name()) {
+                eprintln!("PDF extraction panicked; the PDF is skipped");
+            } else {
+                previous(info);
+            }
+        }));
+    });
+}
+
 /// Runs extractions one at a time, each on its own thread.
 pub struct PdfWorker {
     permit: Arc<Semaphore>,
@@ -143,6 +171,7 @@ pub struct PdfWorker {
 
 impl Default for PdfWorker {
     fn default() -> Self {
+        quiet_extraction_panics();
         Self {
             permit: Arc::new(Semaphore::new(1)),
         }
@@ -169,7 +198,7 @@ impl PdfWorker {
         };
         let (sender, receiver) = oneshot::channel();
         std::thread::Builder::new()
-            .name("pdf-extract".into())
+            .name(THREAD_NAME.into())
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| extract(&bytes, &limits)))
                     .unwrap_or_else(|_| Err(skipped("could not be read")));
@@ -513,6 +542,13 @@ mod tests {
             })
             .await;
         assert_eq!(third, Ok(extracted("third")));
+    }
+
+    #[test]
+    fn only_the_extraction_thread_panics_quietly() {
+        assert!(is_extraction_thread(Some("pdf-extract")));
+        assert!(!is_extraction_thread(Some("main")));
+        assert!(!is_extraction_thread(None));
     }
 
     #[tokio::test]

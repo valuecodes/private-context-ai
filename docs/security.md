@@ -116,7 +116,8 @@ What the app guarantees, and what enforces it:
   stops at 4 MiB of text. One dedicated thread extracts at a time, with a 30-second
   limit. A thread cannot be killed, so after a timeout new PDFs are refused until that
   thread ends: at most one runaway extraction ever exists. A panic in the parser is
-  caught (release builds unwind for this) and the PDF is reported as skipped, as are
+  caught (release builds unwind for this), its message, which can quote the PDF, is
+  not printed, and the PDF is reported as skipped, as are
   encrypted and scanned (text-less) PDFs. The parser's own log messages can quote
   document text, so the log writer drops every event from `pdf_extract` and `lopdf`
   at any level.
@@ -170,9 +171,12 @@ What this does **not** protect against:
   steer the model like any pasted text. Add only files whose text may go to the
   project's chats, or turn Files off in a chat.
 - **A hostile PDF can crash the app.** The PDF parser inflates compressed streams
-  without a size limit, so a crafted PDF you add can use up memory and end the app,
-  even within the byte cap. Nothing leaves the machine and the database stays
-  consistent (every write is a transaction); add PDFs only from sources you trust.
+  without a size limit and follows page parents and nested forms without a depth
+  limit, so a crafted PDF you add can use up memory or overflow the stack and end the
+  app, even within the byte cap. Neither can be caught inside the process. Nothing
+  leaves the machine, the database stays consistent (every write is a transaction),
+  and the PDF is not stored, so the crash does not repeat on the next start. Add PDFs
+  only from sources you trust.
 - **What the model says.** Replies can be wrong, made up or harmful. The model cannot
   act, but you can be misled.
 - **Debug builds.** A development build reads `PRIVATE_CONTEXT_OLLAMA_URL` to override
