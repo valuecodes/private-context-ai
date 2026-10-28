@@ -21,6 +21,10 @@ tauri-build = { version = "=2.7.3", features = [] }
 # The OS keychain (Windows Credential Manager, macOS Keychain, Secret Service)
 # holds the database key.
 keyring = "=4.2.0"
+# Text of the PDFs added to a project library. Pure Rust (lopdf 0.42 without
+# default features): no C, no network, no TLS. It can panic on malformed
+# input, which `pdf.rs` catches, so release builds unwind.
+pdf-extract = "=0.12.1"
 rand = "=0.10.3"
 # No TLS feature and no system proxy: the binary cannot speak HTTPS and only
 # ever talks to Ollama on loopback.
@@ -60,7 +64,9 @@ tempfile = "=3.27.0"
 tokio = { version = "=1.53.3", features = ["io-util", "net"] }
 
 [profile.release]
-panic = "abort"
+# Unwind, not abort: `pdf.rs` catches a panic in PDF extraction, which an
+# abort would turn into a crash. Locks recover from poisoning.
+panic = "unwind"
 strip = true
 lto = true
 codegen-units = 1

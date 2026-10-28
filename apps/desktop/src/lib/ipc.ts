@@ -194,6 +194,23 @@ const projectFileAdd = (
 ): Promise<ProjectFile> =>
   invoke<ProjectFile>("project_file_add", { projectId, name, content });
 
+/**
+ * Sends a PDF's bytes for Rust to extract its text, stored under `name` like
+ * a text file; the PDF itself is not kept. The bytes go as the raw body, the
+ * name percent-encoded in a header, since header values are not Unicode.
+ */
+const projectFileAddPdf = (
+  projectId: string,
+  name: string,
+  bytes: ArrayBuffer
+): Promise<ProjectFile> =>
+  invoke<ProjectFile>("project_file_add_pdf", new Uint8Array(bytes), {
+    headers: {
+      "x-project-id": projectId,
+      "x-file-name": encodeURIComponent(name),
+    },
+  });
+
 /** `limit` of the project's files by name, from `offset`; at most 500. */
 const projectFileList = (
   projectId: string,
@@ -417,6 +434,7 @@ export {
   projectCreate,
   projectDelete,
   projectFileAdd,
+  projectFileAddPdf,
   projectFileDelete,
   projectFileList,
   projectList,

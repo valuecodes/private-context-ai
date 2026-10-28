@@ -5,10 +5,17 @@ import {
   collectDropped,
   fileName,
   MAX_FILE_BYTES,
+  MAX_PDF_BYTES,
   prepareFile,
 } from "./read-files";
 
 const blob = (...parts: BlobPart[]) => new Blob(parts);
+
+/** A file of `size` bytes that reads as empty, without allocating them. */
+const sized = (size: number) => ({
+  size,
+  arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
+});
 
 describe("fileName", () => {
   it("uses the path inside a picked folder, else the name", () => {
@@ -62,6 +69,30 @@ describe("prepareFile", () => {
     expect((await prepareFile({ name: "ok.log", file: atLimit })).kind).toBe(
       "ok"
     );
+  });
+
+  it("passes a PDF's bytes on, by its name in any case", async () => {
+    const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x00, 0xff]);
+    const prepared = await prepareFile({
+      name: "Q3/report.PDF",
+      file: blob(bytes),
+    });
+    expect(prepared).toMatchObject({ kind: "pdf", name: "Q3/report.PDF" });
+    expect(
+      prepared.kind === "pdf" ? new Uint8Array(prepared.bytes) : null
+    ).toEqual(bytes);
+  });
+
+  it("allows PDFs up to 32 MiB, not other files", async () => {
+    expect(
+      (await prepareFile({ name: "big.pdf", file: sized(MAX_PDF_BYTES) })).kind
+    ).toBe("pdf");
+    expect(
+      await prepareFile({ name: "huge.pdf", file: sized(MAX_PDF_BYTES + 1) })
+    ).toMatchObject({ kind: "skipped", reason: "larger than 32 MiB" });
+    expect(
+      await prepareFile({ name: "big.txt", file: sized(MAX_FILE_BYTES + 1) })
+    ).toMatchObject({ kind: "skipped", reason: "larger than 4 MiB" });
   });
 
   it("skips a file that cannot be read", async () => {

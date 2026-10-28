@@ -27,9 +27,9 @@ Internet
   `/api/chat`, over plain HTTP to a loopback address.
 - **Rust ↔ disk.** Chats, the audit log, settings and project files live in one
   SQLCipher database. Its key comes from the OS keychain and stays in Rust. Logs go to
-  a separate folder and hold metadata only. Project files reach Rust as text: the
-  webview reads only the files you pick or drop, with the HTML File API, and no Rust
-  command takes or reads a disk path.
+  a separate folder and hold metadata only. Project files reach Rust as text, or as a
+  PDF's bytes for Rust to extract the text from: the webview reads only the files you
+  pick or drop, with the HTML File API, and no Rust command takes or reads a disk path.
 
 ## Security model
 
@@ -109,6 +109,17 @@ What the app guarantees, and what enforces it:
   risk of a file steering the model but cannot rule it out. The chat's Files switch
   (on by default, shown in projects with files) turns this off, and "What this chat
   sees" shows the exact passages sending the current draft would add.
+- **PDFs are read in Rust, within limits, and only their text is kept.** The webview
+  sends a picked PDF's bytes; Rust extracts its text with the pure-Rust `pdf-extract`
+  crate (lopdf; no C, network or TLS code) and stores that text like a text file. The
+  PDF itself is never stored. A PDF is at most 32 MiB and 2000 pages, and extraction
+  stops at 4 MiB of text. One dedicated thread extracts at a time, with a 30-second
+  limit. A thread cannot be killed, so after a timeout new PDFs are refused until that
+  thread ends: at most one runaway extraction ever exists. A panic in the parser is
+  caught (release builds unwind for this) and the PDF is reported as skipped, as are
+  encrypted and scanned (text-less) PDFs. The parser's own log messages can quote
+  document text, so the log writer drops every event from `pdf_extract` and `lopdf`
+  at any level.
 - **History is encrypted at rest.** Everything is in a SQLCipher database whose random
   32-byte key lives in the OS keychain and never reaches the webview. Without a working
   keychain the app stores nothing. Temporary chats are kept only in process memory,
@@ -158,6 +169,10 @@ What this does **not** protect against:
   temporary ones included, as passages in the system message. A file's text can try to
   steer the model like any pasted text. Add only files whose text may go to the
   project's chats, or turn Files off in a chat.
+- **A hostile PDF can crash the app.** The PDF parser inflates compressed streams
+  without a size limit, so a crafted PDF you add can use up memory and end the app,
+  even within the byte cap. Nothing leaves the machine and the database stays
+  consistent (every write is a transaction); add PDFs only from sources you trust.
 - **What the model says.** Replies can be wrong, made up or harmful. The model cannot
   act, but you can be misled.
 - **Debug builds.** A development build reads `PRIVATE_CONTEXT_OLLAMA_URL` to override
