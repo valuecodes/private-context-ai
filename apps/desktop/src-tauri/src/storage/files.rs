@@ -407,7 +407,9 @@ impl Storage {
         let mut text = String::new();
         let skip = usize::try_from(first_line - 1).unwrap_or(usize::MAX);
         let take = count.min(MAX_READ_LINES) as usize;
-        for (number, line) in (first_line..).zip(content.lines().skip(skip).take(take)) {
+        // Lines first: the counter only advances for a line that exists, so
+        // a start near `u32::MAX` cannot step it past the end.
+        for (line, number) in content.lines().skip(skip).take(take).zip(first_line..) {
             let entry = format!("{number}\t{}\n", shown_line(line));
             if text.len() + entry.len() > MAX_READ_BYTES {
                 break;
@@ -760,6 +762,11 @@ mod tests {
         );
         let from_zero = storage.read_lines(project, "many.txt", 0, 1).unwrap();
         assert_eq!(from_zero.text.expose(), "1\tline 1\n");
+        // A model may ask for any start: the last one reads nothing.
+        let last = storage
+            .read_lines(project, "many.txt", u32::MAX, 200)
+            .unwrap();
+        assert_eq!((last.text.expose(), last.last_line), ("", u32::MAX - 1));
 
         // 200 lines of 2 KiB pass the byte cap first.
         let wide = vec!["y".repeat(MAX_READ_LINE_BYTES); 200].join("\n");
