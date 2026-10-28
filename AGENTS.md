@@ -152,7 +152,8 @@ discussion first.
   and the request after a chart has no `tools`. The read-only `list_files` /
   `search_files` / `read_file` (`ollama/file_tools.rs`) only with Files on in a project
   that has files: no tool takes a disk path, writes or reaches the network; at most 4
-  requests per turn and 4 calls per request, results capped (16 KiB each, 64 KiB per
+  requests per turn and 4 file calls per request (charts keep their own cap of 3),
+  results capped (16 KiB each, 64 KiB per
   turn), escaped as data and never saved or replayed, and the last request has no
   `tools`. Rust validates every call and runs it itself.
   Charts are drawn as SVG by local React code, with model text only as text nodes;
