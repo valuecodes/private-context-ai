@@ -21,7 +21,7 @@ describe("FileLookups", () => {
     const html = renderToString(
       <FileLookups
         lookups={[
-          { tool: "list", target: "page 1", hits: 12 },
+          { tool: "list", target: "from 1", hits: 12 },
           { tool: "search", target: "tax", hits: 1 },
           { tool: "read", target: "a.txt", hits: 40 },
           {
@@ -34,7 +34,7 @@ describe("FileLookups", () => {
         ]}
       />
     );
-    expect(html).toContain("Listed files page 1 — 12 names");
+    expect(html).toContain("Listed files from 1 — 12 names");
     expect(html).toContain("Searched “tax” — 1 passage");
     expect(html).toContain("Read a.txt — 40 lines");
     expect(html).toContain("Read gone.txt (failed: no file has that name)");

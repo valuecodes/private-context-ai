@@ -35,7 +35,7 @@ const MAX_QUERY_TERMS: usize = 16;
 /// Passages a search returns.
 pub const SEARCH_HITS: u32 = 8;
 const MAX_SNIPPET_CHARS: usize = 300;
-/// File names a `list_files` page holds,
+/// File names one `list_files` call returns at most,
 pub const LIST_PAGE: u32 = 100;
 /// in at most this many bytes.
 const MAX_LIST_BYTES: usize = 8 * 1024;
@@ -62,11 +62,15 @@ fn file_tool_definitions() -> [Value; 3] {
             "type": "function",
             "function": {
                 "name": LIST_FILES,
-                "description": "List the names of the files in this project, 100 per page",
+                "description": "List the names of the files in this project, up to 100 \
+                    per call; the result says where the next call starts",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "page": { "type": "integer", "description": "Page number, from 1" }
+                        "start": {
+                            "type": "integer",
+                            "description": "Position of the first name, from 1"
+                        }
                     },
                     "required": []
                 }
@@ -130,9 +134,9 @@ pub fn tools_for(set: ToolSet) -> Option<&'static Value> {
 /// A validated call. `Debug` leaves out the query and the name.
 #[derive(Clone, PartialEq, Eq)]
 pub enum FileCall {
-    /// Page from 1.
+    /// Names from position `start`, from 1.
     List {
-        page: u32,
+        start: u32,
     },
     Search {
         query: String,
@@ -148,7 +152,7 @@ pub enum FileCall {
 impl fmt::Debug for FileCall {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::List { page } => f.debug_struct("List").field("page", page).finish(),
+            Self::List { start } => f.debug_struct("List").field("start", start).finish(),
             Self::Search { .. } => f.write_str("Search { .. }"),
             Self::Read {
                 start_line,
@@ -204,7 +208,7 @@ impl FileCall {
         };
         match name {
             LIST_FILES => Ok(Self::List {
-                page: count(fields, "page", 1)?,
+                start: count(fields, "start", 1)?,
             }),
             SEARCH_FILES => {
                 let query = fields
@@ -248,7 +252,7 @@ impl FileCall {
     /// The validated arguments, as sent back to Ollama.
     fn arguments(&self) -> Value {
         match self {
-            Self::List { page } => serde_json::json!({ "page": page }),
+            Self::List { start } => serde_json::json!({ "start": start }),
             Self::Search { query } => serde_json::json!({ "query": query }),
             Self::Read {
                 name,
@@ -265,7 +269,7 @@ impl FileCall {
     /// What a lookup of this call shows.
     fn target(&self) -> String {
         match self {
-            Self::List { page } => format!("page {page}"),
+            Self::List { start } => format!("from {start}"),
             Self::Search { query: text } | Self::Read { name: text, .. } => {
                 text.chars().take(MAX_TARGET_CHARS).collect()
             }
@@ -311,7 +315,7 @@ impl LookupKind {
 #[serde(rename_all = "camelCase")]
 pub struct FileLookup {
     pub tool: LookupKind,
-    /// The query, the file name, or `page N`; empty for a refused call.
+    /// The query, the file name, or `from N`; empty for a refused call.
     pub target: Redacted,
     /// Names listed, passages found or lines read.
     pub hits: u32,
@@ -454,25 +458,34 @@ fn quoted(name: &str) -> String {
     name.replace('"', "'")
 }
 
-/// Page `page` of the project's files: [`LIST_PAGE`] names at most, in at
-/// most [`MAX_LIST_BYTES`].
-pub fn list_result(listed: &FilePage, page: u32) -> FileAnswer {
-    let pages = listed.total.div_ceil(LIST_PAGE).max(1);
+/// The project's files by name from position `start` (from 1): at most
+/// [`LIST_PAGE`] names in at most [`MAX_LIST_BYTES`], always at least one
+/// when there is one (a name is shorter than the cap). When names are left,
+/// the result says where the next call starts, so a cut never hides any.
+pub fn list_result(listed: &FilePage, start: u32) -> FileAnswer {
     let mut body = String::new();
-    let mut hits = 0;
+    let mut hits: u32 = 0;
     for file in &listed.files {
         let line = format!("{}\n", file.name.expose());
-        if body.len() + line.len() > MAX_LIST_BYTES {
-            body.push_str(CUT);
+        if hits > 0 && body.len() + line.len() > MAX_LIST_BYTES {
             break;
         }
         body.push_str(&line);
         hits += 1;
     }
-    if listed.files.is_empty() {
-        body.push_str("(no files on this page)");
-    }
-    let header = format!("files, page {page} of {pages}, {} in all", listed.total);
+    let header = if hits == 0 {
+        body.push_str("(no files from this position)");
+        format!("files from {start}, {} in all", listed.total)
+    } else {
+        let end = start.saturating_add(hits - 1);
+        if end < listed.total {
+            body.push_str(&format!(
+                "(more: call list_files with start {})",
+                end.saturating_add(1)
+            ));
+        }
+        format!("files {start}-{end} of {}", listed.total)
+    };
     FileAnswer {
         text: block(&header, body.trim_end_matches('\n')),
         hits,
@@ -626,7 +639,7 @@ mod tests {
         );
         assert_eq!(
             parse(LIST_FILES, Value::Null),
-            Ok(FileCall::List { page: 1 })
+            Ok(FileCall::List { start: 1 })
         );
         assert_eq!(
             parse(
@@ -668,18 +681,18 @@ mod tests {
             ),
             (
                 LIST_FILES,
-                serde_json::json!({ "page": 0 }),
-                "page must be a whole number from 1",
+                serde_json::json!({ "start": 0 }),
+                "start must be a whole number from 1",
             ),
             (
                 LIST_FILES,
-                serde_json::json!({ "page": -1 }),
-                "page must be a whole number from 1",
+                serde_json::json!({ "start": -1 }),
+                "start must be a whole number from 1",
             ),
             (
                 LIST_FILES,
-                serde_json::json!({ "page": 1.5 }),
-                "page must be a whole number from 1",
+                serde_json::json!({ "start": 1.5 }),
+                "start must be a whole number from 1",
             ),
             (
                 LIST_FILES,
@@ -721,21 +734,36 @@ mod tests {
     }
 
     #[test]
-    fn list_pages_and_caps_bytes() {
+    fn list_says_where_to_continue() {
         let page = FilePage {
             files: vec![file("a.txt"), file("b.txt")],
             total: 250,
         };
-        let answer = list_result(&page, 2);
+        let answer = list_result(&page, 101);
         assert_eq!(answer.hits, 2);
         assert!(answer.text.starts_with(PREAMBLE));
-        assert!(
-            answer
-                .text
-                .contains("<<<files, page 2 of 3, 250 in all>>>\na.txt\nb.txt\n")
-        );
+        assert!(answer.text.contains(
+            "<<<files 101-102 of 250>>>\na.txt\nb.txt\n(more: call list_files with start 103)"
+        ));
         assert!(answer.text.ends_with("<<<end of results>>>"));
 
+        let last = list_result(&page, 249);
+        assert!(last.text.contains("<<<files 249-250 of 250>>>"));
+        assert!(!last.text.contains("(more"));
+
+        let past = list_result(
+            &FilePage {
+                files: Vec::new(),
+                total: 3,
+            },
+            9,
+        );
+        assert_eq!(past.hits, 0);
+        assert!(past.text.contains("<<<files from 9, 3 in all>>>"));
+    }
+
+    #[test]
+    fn list_cut_by_bytes_continues_after_the_last_name_shown() {
         let long = "n".repeat(200);
         let page = FilePage {
             files: (0..100).map(|_| file(&long)).collect(),
@@ -743,8 +771,23 @@ mod tests {
         };
         let answer = list_result(&page, 1);
         assert_eq!(answer.hits, 40);
-        assert!(answer.text.contains(CUT));
+        assert!(answer.text.contains("<<<files 1-40 of 100>>>"));
+        assert!(
+            answer
+                .text
+                .contains("(more: call list_files with start 41)")
+        );
         assert!(answer.text.len() < MAX_LIST_BYTES + 1024);
+
+        // The widest names (3 KiB each) still come through, two per call.
+        let widest = "€".repeat(MAX_FILE_NAME_CHARS);
+        let page = FilePage {
+            files: vec![file(&widest), file(&widest), file(&widest)],
+            total: 3,
+        };
+        let answer = list_result(&page, 1);
+        assert_eq!(answer.hits, 2);
+        assert!(answer.text.contains("(more: call list_files with start 3)"));
     }
 
     #[test]
@@ -887,7 +930,7 @@ mod tests {
         let broken: FileRunner = Arc::new(|_| Err(AppError::Database("x".into())));
         let outcome = run_call(LIST_FILES, &Value::Null, Some(&broken), &mut budget);
         assert_eq!(outcome.lookup.error.as_deref(), Some(LOOKUP_FAILED));
-        assert_eq!(outcome.lookup.target.expose(), "page 1");
+        assert_eq!(outcome.lookup.target.expose(), "from 1");
     }
 
     #[test]

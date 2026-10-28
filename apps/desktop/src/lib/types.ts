@@ -107,7 +107,7 @@ type ChartEntry = {
 
 /**
  * One file tool call of a reply, for its "Searched files" row; display only.
- * `target` is the query, the file name or `page N`; empty for a refused call.
+ * `target` is the query, the file name or `from N`; empty for a refused call.
  */
 type FileLookup = {
   tool: "list" | "search" | "read" | "unknown";
