@@ -14,8 +14,8 @@ catalog:
   "@tailwindcss/postcss": 4.3.3
   # Held to the `tauri` crate in `apps/desktop/src-tauri/Cargo.toml` (see
   # `updateConfig` below).
-  "@tauri-apps/api": 2.12.1
-  "@tauri-apps/cli": 2.12.1
+  "@tauri-apps/api": 2.12.4
+  "@tauri-apps/cli": 2.12.3
   # Held on the Node 26 line to match `.nvmrc` (see `updateConfig` below).
   "@types/node": 26.6.5
   "@types/react": 19.3.0
@@ -23,7 +23,7 @@ catalog:
   "@vitejs/plugin-react": 6.1.2
   knip: 6.41.0
   lowlight: 3.3.0
-  lucide-react: 1.57.0
+  lucide-react: 1.58.0
   oxfmt: 0.73.0
   oxlint: 1.88.0
   oxlint-tsgolint: 7.0.2004
