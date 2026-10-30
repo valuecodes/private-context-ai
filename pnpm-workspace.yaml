@@ -16,33 +16,34 @@ catalog:
   # `updateConfig` below).
   "@tauri-apps/api": 2.12.1
   "@tauri-apps/cli": 2.12.1
-  # Held on the Node 24 line to match `.nvmrc` (see `updateConfig` below).
-  "@types/node": 24.19.2
+  # Held on the Node 26 line to match `.nvmrc` (see `updateConfig` below).
+  "@types/node": 26.6.5
   "@types/react": 19.3.0
   "@types/react-dom": 19.3.0
   "@vitejs/plugin-react": 6.1.2
   knip: 6.41.0
   lowlight: 3.3.0
-  lucide-react: 1.52.0
-  oxfmt: 0.72.0
-  oxlint: 1.87.0
-  oxlint-tsgolint: 7.0.2003
+  lucide-react: 1.57.0
+  oxfmt: 0.73.0
+  oxlint: 1.88.0
+  oxlint-tsgolint: 7.0.2004
   pino: 10.4.0
-  react: 19.3.0
-  react-dom: 19.3.0
+  react: 19.3.1
+  react-dom: 19.3.1
   react-markdown: 10.1.0
   remark-gfm: 4.0.1
   tailwindcss: 4.3.3
-  turbo: 2.11.7
+  turbo: 2.11.8
   # `typescript` is the native (Go) compiler; its binary is still `tsc`.
   typescript: 7.0.2
   vite: 8.3.4
-  vitest: 5.0.3
+  vitest: 5.0.5
 
 # Skipped by `pnpm up --latest`. `@types/node` must track the Node major in
 # `.nvmrc`, so bump it by hand within that line. The `@tauri-apps/*` packages
 # move together with the exactly pinned (`=x.y.z`) Rust `tauri` crate, so bump
-# all three by hand in one change.
+# all three by hand in one change. `maintenance-updates.yml` does not read this
+# list, so its catalog PR can still propose `@tauri-apps/*` bumps.
 updateConfig:
   ignoreDependencies:
     - "@types/node"
@@ -54,12 +55,21 @@ updateConfig:
 # guardrail, not a CI check.
 catalogMode: strict
 
+# Writes exact versions (no `^` or `~`) on `pnpm add`. pnpm 12 reads only
+# auth settings from `.npmrc`, so this has to live here.
+saveExact: true
+
 allowBuilds:
   # Installs Tailwind 4's native binary. Without it Tailwind silently emits no
   # styles, and `pnpm build` still passes.
   "@tailwindcss/oxide": true
   # Still used by Vite's dependency pre-bundling and Vitest's transforms.
   esbuild: true
+
+# pnpm already fails the install when the root `engines.node` doesn't match.
+# This also refuses any non-optional dependency whose own `engines` excludes
+# the running Node.js, instead of only warning.
+engineStrict: true
 
 # 14 days, in minutes: a new release is not resolvable until it is this old.
 # So `pnpm up --latest` deliberately skips fresh releases; use
