@@ -72,7 +72,9 @@ and threat notes.
 
 ## Quick start
 
-You need Node.js 24.22.1, pnpm 12.11.2, Rust (rustup) and [Ollama](https://ollama.com).
+You need Node.js 26 (exact version in `.nvmrc`), pnpm 12 (exact version in `packageManager`),
+Rust (rustup) and [Ollama](https://ollama.com). Node.js 26 no longer bundles Corepack, so
+install it once with `npm install -g corepack && corepack enable`.
 Start Ollama first: open the Ollama app, or run `ollama serve` in its own terminal.
 
 ```bash

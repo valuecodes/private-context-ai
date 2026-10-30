@@ -41,7 +41,7 @@ if ($missing) {
   Write-Host "Missing on Windows: $($missing -join ', '). Install them in PowerShell, then rerun:"
   Write-Host '  winget install Rustlang.Rustup StrawberryPerl.StrawberryPerl OpenJS.NodeJS.LTS'
   Write-Host '  winget install Microsoft.VisualStudio.2022.BuildTools --override "--passive --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
-  Write-Host '  corepack enable'
+  Write-Host '  npm install -g corepack; corepack enable'
   exit 1
 }
 $node = (& node --version).TrimStart('v')

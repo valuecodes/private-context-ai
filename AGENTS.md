@@ -36,7 +36,7 @@ and inside an app use the `~/` alias (`src/*`) to go up the tree.
 
 ## Commands
 
-**Prerequisites:** Node.js 24 (exact version in `.nvmrc`), pnpm 12.11.2 (`packageManager` in root `package.json`).
+**Prerequisites:** Node.js 26 (exact version in `.nvmrc`), pnpm 12 (exact version in `packageManager` in root `package.json`).
 
 ```bash
 pnpm install                     # Install all dependencies
@@ -95,7 +95,8 @@ from the previous run of the same task, so unchanged packages replay instead of
 rerunning. CI covers the frontend only; see Rust below.
 
 Dependabot (`.github/dependabot.yml`) bumps the SHA-pinned actions and reusable workflows
-monthly in one grouped PR; npm and Cargo dependencies are updated by hand.
+monthly in one grouped PR. In-major npm updates come as maintenance-updates PRs (below);
+npm majors and Cargo dependencies are updated by hand.
 
 `maintenance-dashboard.yml` calls the maintenance dashboard workflow from
 `valuecodes/automation` daily.
@@ -103,12 +104,23 @@ It keeps one issue, **Maintenance dashboard** (label `maintenance-dashboard`), l
 what is due: `catalog:` updates, pnpm (`packageManager`), gitleaks (`GITLEAKS_VERSION`
 in the secrets-scan script), Node.js (`.nvmrc`) and `pnpm audit` findings. Like
 `minimumReleaseAge`, a release shows up only once it is 14 days old; a Node.js security
-release shows up right away and is flagged. It never opens PRs or commits; doing the
-updates stays manual. For a Node.js bump, change only `.nvmrc` (the one place that
-holds the exact version). If `GITLEAKS_VERSION` moves out of
-`.github/scripts/secrets-scan.sh`, pass the new path as the `gitleaks-script` input.
-The dashboard and workflow-lint callers pin the same `valuecodes/automation` commit,
-so bump them together.
+release shows up right away and is flagged. It never opens PRs or commits.
+
+`maintenance-updates.yml` calls the maintenance updates workflow from
+`valuecodes/automation` weekly. It keeps one PR per kind open (Node.js, pnpm,
+gitleaks, `catalog:`) on a `maintenance-updates/<kind>` branch, for updates on the
+current major only; majors stay manual. Those PRs are opened with `GITHUB_TOKEN`, so
+their `pull_request` checks wait until someone with write access clicks **Approve
+workflows to run** in the PR. It needs **Allow GitHub Actions to create and approve
+pull requests** turned on under Settings → Actions → General. Nothing auto-merges.
+The catalog PR ignores `updateConfig.ignoreDependencies`, so it can propose
+`@tauri-apps/api` / `@tauri-apps/cli` bumps; CI does not build Rust and passes a
+mismatch, so drop those from the PR or bump the `tauri` crate in the same change.
+For a Node.js bump by hand, change only `.nvmrc` (the one place that holds the exact
+version). If `GITLEAKS_VERSION` moves out of `.github/scripts/secrets-scan.sh`, pass
+the new path as the `gitleaks-script` input to both callers. The dashboard, updates
+and workflow-lint callers pin the same `valuecodes/automation` commit, so bump them
+together.
 
 ### Rust (`apps/desktop/src-tauri`)
 
@@ -188,6 +200,6 @@ discussion first.
   `@types/node` to the `.nvmrc` major and `@tauri-apps/api` / `@tauri-apps/cli` to
   the `tauri` crate in `Cargo.toml`, so bump those by hand.
 - Every install enforces the supply-chain settings in `pnpm-workspace.yaml`
-  (`minimumReleaseAge`, `trustPolicy: no-downgrade`) plus pnpm 12's default
-  `blockExoticSubdeps`. When one fails, investigate: never disable it, and never
-  exclude a whole package to get past it.
+  (`minimumReleaseAge`, `trustPolicy: no-downgrade`, `engineStrict`) plus pnpm
+  12's default `blockExoticSubdeps`. When one fails, investigate: never disable
+  it, and never exclude a whole package to get past it.

@@ -21,7 +21,8 @@ packages/typescript    shared tsconfig presets (base, node, react)
 
 ## Getting started
 
-Requires Node.js 24.22.1 (`.nvmrc`) and pnpm 12.11.2 (`packageManager` in `package.json`).
+Requires Node.js 26 (exact version in `.nvmrc`) and pnpm 12 (exact version in `packageManager` in `package.json`).
+Node.js 26 no longer bundles Corepack, so install it once with `npm install -g corepack && corepack enable`.
 
 ```bash
 pnpm install
@@ -75,7 +76,7 @@ It exports the committed `HEAD` (uncommitted changes are left out) to
 `%LOCALAPPDATA%\pcai-build`, then runs the build there through Windows PowerShell:
 a fresh `src\`, `pnpm install --frozen-lockfile` and `build:app --bundles nsis`, with
 `target\` kept between runs so SQLCipher compiles only once. It prints the path of the
-setup program it copies to `out\`. Windows needs Node, pnpm (`corepack enable`),
+setup program it copies to `out\`. Windows needs Node, pnpm (`npm install -g corepack`, then `corepack enable`),
 rustup, Strawberry Perl and the MSVC Build Tools; the script names any that are
 missing, with the `winget` commands to install them. Only the NSIS installer is
 built, so the VBSCRIPT feature is not needed.
