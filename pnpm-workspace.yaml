@@ -42,7 +42,7 @@ catalog:
 # Skipped by `pnpm up --latest`. `@types/node` must track the Node major in
 # `.nvmrc`, so bump it by hand within that line. The `@tauri-apps/*` packages
 # move together with the exactly pinned (`=x.y.z`) Rust `tauri` crate, so bump
-# all three by hand in one change. `maintenance-updates.yml` does not read this
+# all three by hand in one change. `maintain-kit-updates.yml` does not read this
 # list, so its catalog PR can still propose `@tauri-apps/*` bumps.
 updateConfig:
   ignoreDependencies:
