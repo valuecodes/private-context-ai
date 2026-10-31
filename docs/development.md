@@ -14,7 +14,6 @@ apps/desktop           Tauri 2 app: React frontend in src/, Rust in src-tauri/
 packages/logger        pino logger, Cloud Logging shaped JSON
 packages/typescript    shared tsconfig presets (base, node, react)
 .github/actions/setup  composite action: pnpm + Node + install
-.github/scripts        secrets-scan script (gitleaks, version pinned)
 .oxlintrc.json         single root lint config for the whole repo
 .oxfmtrc.jsonc         single root format config for the whole repo
 ```
@@ -30,7 +29,10 @@ pnpm install
 
 `pnpm install` also turns on the git hooks in `.githooks/`: format, lint and a staged
 secrets scan before each commit; typecheck, test and Knip before each push. Committing
-needs `gitleaks` v8.19+ on PATH or a running Docker daemon for the secrets scan.
+needs `gitleaks` v8.19+ on PATH for the staged secrets scan: `brew install gitleaks`
+(macOS, Linux and WSL), or unpack the `linux_x64` tarball from the
+[releases page](https://github.com/gitleaks/gitleaks/releases) into a directory on PATH
+such as `~/.local/bin`.
 
 The desktop app also needs Rust via rustup; `rust-toolchain.toml` pins the version.
 On Windows install the MSVC Build Tools and WebView2, plus the VBSCRIPT optional
@@ -96,7 +98,6 @@ pnpm test           # test suite
 pnpm build          # production builds (frontend only, no Rust)
 pnpm format         # oxfmt write
 pnpm format:check   # oxfmt check (CI gate)
-pnpm secrets:scan   # gitleaks secret scan over git history
 
 pnpm --filter desktop rust:fmt    # cargo fmt --check
 pnpm --filter desktop rust:check  # cargo clippy, warnings are errors
@@ -112,11 +113,11 @@ CI runs typecheck, lint, knip, format:check, test, build and a gitleaks secret s
 PRs and on push to `main`, plus CodeQL code scanning and actionlint + zizmor over the
 workflow files. The checks live once in `checks.yml`, called by `feature.yml` (PRs) and
 `main.yml` (push to `main`). The `all-passed` job in `feature.yml` fans them in: require
-only that check in branch protection. `secrets:scan` needs either `gitleaks` v8.19+ on
-PATH or a running Docker daemon.
+only that check in branch protection. The secret scan and the workflow lint run through
+the reusable workflows from `valuecodes/maintain-kit`, which pin the gitleaks version.
 
-A scheduled workflow, `maintenance-dashboard.yml`, calls `valuecodes/automation` daily
-and keeps one issue listing due catalog, pnpm, gitleaks, Node.js and `pnpm audit`
+A scheduled workflow, `maintain-kit-dashboard.yml`, calls `valuecodes/maintain-kit` daily
+and keeps one issue listing due catalog, pnpm, Node.js and `pnpm audit`
 updates. A Node.js security release shows up there right away and is flagged.
 
 ## Repository settings
