@@ -11,33 +11,33 @@ packages:
 catalog:
   "@fontsource-variable/inter": 5.3.0
   "@fontsource-variable/jetbrains-mono": 5.3.0
-  "@tailwindcss/postcss": 4.3.3
+  "@tailwindcss/postcss": 4.3.5
   # Held to the `tauri` crate in `apps/desktop/src-tauri/Cargo.toml` (see
   # `updateConfig` below).
   "@tauri-apps/api": 2.12.4
-  "@tauri-apps/cli": 2.12.3
+  "@tauri-apps/cli": 2.12.4
   # Held on the Node 26 line to match `.nvmrc` (see `updateConfig` below).
-  "@types/node": 26.6.5
+  "@types/node": 26.6.6
   "@types/react": 19.3.0
   "@types/react-dom": 19.3.0
-  "@vitejs/plugin-react": 6.1.2
-  knip: 6.42.0
+  "@vitejs/plugin-react": 6.3.0
+  knip: 6.44.2
   lowlight: 3.3.0
-  lucide-react: 1.59.0
-  oxfmt: 0.73.0
-  oxlint: 1.88.0
-  oxlint-tsgolint: 7.0.2004
+  lucide-react: 1.70.0
+  oxfmt: 0.77.0
+  oxlint: 1.92.0
+  oxlint-tsgolint: 7.0.2006
   pino: 10.4.0
   react: 19.3.1
   react-dom: 19.3.1
   react-markdown: 10.1.0
   remark-gfm: 4.0.1
-  tailwindcss: 4.3.3
-  turbo: 2.11.9
+  tailwindcss: 4.3.5
+  turbo: 2.11.10
   # `typescript` is the native (Go) compiler; its binary is still `tsc`.
   typescript: 7.0.2
-  vite: 8.3.4
-  vitest: 5.0.5
+  vite: 8.3.6
+  vitest: 5.1.0
 
 # Skipped by `pnpm up --latest`. `@types/node` must track the Node major in
 # `.nvmrc`, so bump it by hand within that line. The `@tauri-apps/*` packages
